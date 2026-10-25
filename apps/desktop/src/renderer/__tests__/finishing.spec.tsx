@@ -54,11 +54,11 @@ describe('cost-cap notice', () => {
 })
 
 describe('missing key', () => {
-  it('explains what the key is for and takes it in place', async () => {
+  it('names the env variable on hover and takes the key in place', async () => {
     const { bridge } = await renderApp()
     const notice = screen.getByTestId('key-notice')
     expect(notice.textContent).toContain('还没有模型 API 密钥')
-    expect(notice.textContent).toContain('NEXGENT_API_KEY')
+    expect(notice.innerHTML).toContain('NEXGENT_API_KEY')
     const input = within(notice).getByTestId('key-notice-input') as HTMLInputElement
     expect(input.type).toBe('password')
     const secret = 'sk-ant-test-secret-456'

@@ -467,16 +467,24 @@ export function withModelChoice(change: OrganizationChange, allowed: readonly Or
  * no team task has shown yet (with the change tried now), or the change
  * under trial.
  */
-export function changeNote(changes: readonly ChangeState[], runs: readonly Pick<ReflectedRun, 'seq' | 'decision'>[]): OrganizationChangeNote | undefined {
+export function changeNote(changes: readonly ChangeState[], runs: readonly Pick<ReflectedRun, 'seq' | 'decision' | 'change' | 'profile'>[]): OrganizationChangeNote | undefined {
   const active = changes.find(state => state.verdict === undefined)
   // An unfollowed change was no trial: the card says nothing about it.
   const judged = changes.filter(state => state.verdict !== undefined && state.verdict.verdict !== 'unfollowed').sort((l, r) => l.verdict!.seq - r.verdict!.seq).at(-1)
   const unseen = judged !== undefined && !runs.some(run => run.decision === 'team' && run.seq > judged.verdict!.seq)
   if (unseen) {
+    const status = judged!.verdict!.verdict as 'kept' | 'reverted'
+    const change = judged!.change
+    // What the kept change was judged on: the target value before it and over the runs that kept it.
+    const tried = runs.filter(run => run.change === change.id && run.decision === 'team' && run.profile !== undefined).slice(0, KEEP_AFTER)
+    const measured = status === 'kept' && tried.length > 0
+      ? { before: change.baseline, after: median(tried.map(run => kindValue(run.profile!, change.target.kind, change.target.cause))) }
+      : undefined
     return {
-      status: judged!.verdict!.verdict as 'kept' | 'reverted',
-      action: judged!.change.action,
-      target: judged!.change.target,
+      status,
+      action: change.action,
+      target: change.target,
+      ...(measured === undefined ? {} : { measured }),
       ...(active === undefined ? {} : { next: { action: active.change.action, target: active.change.target } }),
     }
   }

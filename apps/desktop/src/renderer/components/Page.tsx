@@ -35,13 +35,15 @@ export function Page({ title, lead, onClose, testId, bar, aside, children }: Pro
           <div className="page-head-row">
             <div className="grow">
               <h2 className="page-title">{title}</h2>
-              {lead !== undefined && <p>{lead}</p>}
+              {lead !== undefined && lead !== '' && <p>{lead}</p>}
             </div>
-            {aside}
-            <button type="button" className="ghost" onClick={onClose} data-testid="page-back">
-              <Icon name="back" />
-              {T.backToChat}
-            </button>
+            <div className="page-head-actions">
+              {aside}
+              <button type="button" className="ghost" onClick={onClose} data-testid="page-back">
+                <Icon name="back" />
+                {T.backToChat}
+              </button>
+            </div>
           </div>
           {bar}
         </div>

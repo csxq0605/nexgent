@@ -8,6 +8,7 @@ import {
   asContext,
   relayedUserNote,
   renderCompactionSummary,
+  pickUserWords,
   renderUserWords,
   USER_WORDS_HEADING,
   type Agent,
@@ -181,7 +182,7 @@ describe("the user's own words through a compaction", () => {
       { turn: 2, text: 'Now the summary table.' },
     ])
     expect(summary).toContain(USER_WORDS_HEADING)
-    expect(store.of(agent.sessionId, 'compaction')[0]).toMatchObject({ turn: 3, summary })
+    expect(store.of(agent.sessionId, 'compaction')[0]).toMatchObject({ turn: 3, summary, userWords: { turns: [1, 2], dropped: 0 } })
     expect(conversation(llm.requests[2]!)).toEqual([
       { role: 'user', content: renderCompactionSummary(summary) },
       { role: 'user', content: 'Go on.' },
@@ -200,5 +201,6 @@ describe("the user's own words through a compaction", () => {
     expect(text).toContain(`[turn 3]\n${'c'.repeat(5)}`)
     expect(text).not.toContain('[turn 1]')
     expect(renderUserWords([])).toBe('')
+    expect(pickUserWords([{ turn: 1, text: 'a'.repeat(10) }, { turn: 2, text: 'b'.repeat(10) }], 12)).toEqual({ picked: [{ turn: 1, text: `…${'a'.repeat(2)}` }, { turn: 2, text: 'b'.repeat(10) }], dropped: 0 })
   })
 })

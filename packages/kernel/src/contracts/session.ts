@@ -409,6 +409,12 @@ export interface CompactionRecord extends SessionRecordBase {
   readonly usage: LLMUsage
   /** What triggered it: the last reported input size and the threshold it crossed. */
   readonly trigger: { readonly inputTokens: number; readonly threshold: number }
+  /**
+   * The user's messages the summary ends with word for word: their turns,
+   * oldest first (one per message), and how many older ones were left out
+   * for length. Absent when there are none.
+   */
+  readonly userWords?: { readonly turns: readonly number[]; readonly dropped: number }
 }
 
 /** Wrapper the projection puts around a compaction summary. Pure; the exact text is part of the contract. */

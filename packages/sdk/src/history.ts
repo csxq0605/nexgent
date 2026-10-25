@@ -232,7 +232,7 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
         })
         break
       case 'compaction':
-        items.push({ kind: 'compaction', turn: record.turn })
+        items.push({ kind: 'compaction', turn: record.turn, ...(record.userWords === undefined ? {} : { userWords: record.userWords }) })
         break
       case 'turn.rewind':
         items.push({ kind: 'rewind', rewind: { toTurn: record.toTurn, restored: [...record.restored], deleted: [...record.deleted] } })

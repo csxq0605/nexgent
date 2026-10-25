@@ -1,17 +1,20 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 420" width="1400" height="420" role="img" aria-labelledby="title">
   <title id="title">Nexgent</title>
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0B0D1A"/><stop offset="1" stop-color="#171B3D"/></linearGradient>
-    <linearGradient id="m" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#6366F1"/><stop offset="1" stop-color="#2FD8EF"/></linearGradient>
-  </defs>
-  <rect width="1400" height="420" rx="24" fill="url(#g)"/>
-  <g transform="translate(160 132)">
-    <circle cx="80" cy="80" r="78" fill="none" stroke="url(#m)" stroke-width="4"/>
-    <circle cx="80" cy="44" r="16" fill="#6366F1"/>
-    <circle cx="46" cy="104" r="16" fill="#8B8FF8"/>
-    <circle cx="114" cy="104" r="16" fill="#2FD8EF"/>
-    <path d="M80 60 L50 90 M80 60 L110 90 M62 104 H98" stroke="#A6ABCB" stroke-width="3" fill="none"/>
+  <rect width="1400" height="420" rx="24" fill="#f6f7fa"/>
+  <g>
+    <rect x="1000" y="0" width="240" height="420" fill="#3044c8"/>
+    <rect x="1240" y="0" width="160" height="210" fill="#f68a68"/>
+    <rect x="1240" y="210" width="160" height="210" fill="#e9ecfb"/>
+    <rect x="904" y="276" width="96" height="96" rx="16" fill="#fdeae4"/>
+    <g stroke="#f68a68" stroke-width="10" stroke-linecap="round">
+      <path d="M1044 64l20 20M1104 64l20 20M1164 64l20 20"/>
+      <path d="M1044 124l20 20M1104 124l20 20M1164 124l20 20"/>
+      <path d="M1044 184l20 20M1104 184l20 20"/>
+    </g>
+    <rect x="1150" y="262" width="12" height="96" rx="6" fill="#ffffff"/>
+    <rect x="1198" y="262" width="12" height="96" rx="6" fill="#ffffff"/>
+    <path d="M1162 276L1198 344" stroke="#f68a68" stroke-width="12" stroke-linecap="round"/>
   </g>
-  <text x="400" y="212" fill="#F5F6FF" font-family="-apple-system, 'Segoe UI', sans-serif" font-size="96" font-weight="700" letter-spacing="-1">Nexgent</text>
-  <text x="404" y="266" fill="#A6ABCB" font-family="-apple-system, 'Segoe UI', sans-serif" font-size="28">A team that organizes itself and remembers what worked.</text>
+  <text x="120" y="232" fill="#161a26" font-family="'Instrument Sans', -apple-system, 'Segoe UI', sans-serif" font-size="120" font-weight="600" letter-spacing="-3">Nexgent</text>
+  <text x="124" y="290" fill="#5a6072" font-family="'Instrument Sans', -apple-system, 'Segoe UI', sans-serif" font-size="30">One project. A team that learns.</text>
 </svg>

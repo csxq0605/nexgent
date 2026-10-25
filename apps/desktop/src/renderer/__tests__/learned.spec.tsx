@@ -112,7 +112,7 @@ describe('能力 → 经验', () => {
     const bridge = new FakeBridge()
     await renderApp(bridge)
     fireEvent.click(screen.getByTestId('nav-capabilities'))
-    expect(await screen.findByTestId('handbook-empty')).toBeTruthy()
+    expect(screen.getByTestId('capabilities-page').textContent).toContain(L.empty)
     expect(screen.getByTestId('capabilities-page').textContent).toContain(L.leadNone)
     // Not acknowledged yet: the card says learning waits for it.
     fireEvent.click(screen.getByTestId('learning-acknowledge'))
@@ -154,7 +154,7 @@ describe('the learning notice', () => {
     emit(bridge, { type: 'turn.start', turn: 1, source: 'user' })
     emit(bridge, { type: 'text.delta', turn: 1, step: 1, text: '好的' })
     const notice = await screen.findByTestId('learning-notice')
-    expect(notice.textContent).toContain('每个项目每 30 天最多花 3.00 美元')
+    expect(notice.textContent).toContain('每 30 天最多 3.00 美元')
     fireEvent.click(within(notice).getByTestId('learning-notice-settings'))
     expect(screen.getByTestId('settings-page')).toBeTruthy()
     fireEvent.click(screen.getByTestId('page-back'))
@@ -233,5 +233,16 @@ describe('organizations on the capabilities page (new direction step 3)', () => 
     expect(changeNoteText({ status: 'trying', action: 'split', target })).toBe('这次比上次改了一处：“实现”拆给两个成员同时做（上次“实现”占了 55% 的花费）')
     expect(changeNoteText({ status: 'reverted', action: 'split', target, next: { action: 'narrow-reading', target } }))
       .toBe('上次的改动没变好，已退回；这次比上次改了一处：“实现”只读相关的文件（上次“实现”占了 55% 的花费）')
+  })
+
+  it('calls a kept change learned only with the measure it was kept on', async () => {
+    const { learnedNote } = await import('../strings.js')
+    const target = { part: 'builder', kind: 'implement' as const, cause: 'cost' as const, value: 0.55 }
+    expect(learnedNote({ status: 'kept', action: 'split', target })).toBeUndefined()
+    expect(learnedNote({ status: 'trying', action: 'split', target })).toBeUndefined()
+    expect(learnedNote({ status: 'kept', action: 'split', target, measured: { before: 0.55, after: 0.3 } })).toEqual({
+      title: '留下了一处分工改动：“实现”拆给两个成员同时做',
+      evidence: '“实现”占的花费从 55% 降到 30%；以后同类任务组队时照这样做',
+    })
   })
 })

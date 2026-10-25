@@ -49,8 +49,7 @@ export function KeyNotice(): JSX.Element | null {
   if (state.settings === undefined || state.settings.apiKey.configured) return null
   return (
     <aside className="notice-card" role="note" data-testid="key-notice">
-      <div className="setting-name">{T.keyTitle}</div>
-      <p className="muted small wrap">{T.keyBody}</p>
+      <div className="setting-name" title={T.keyEnvHint}>{T.keyTitle}</div>
       <form
         className="inline-form"
         onSubmit={event => {
@@ -69,7 +68,6 @@ export function KeyNotice(): JSX.Element | null {
           {T.apiKeySave}
         </button>
       </form>
-      <p className="faint small wrap">{T.keyEnvHint}</p>
     </aside>
   )
 }

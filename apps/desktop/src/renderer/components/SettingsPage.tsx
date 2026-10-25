@@ -4,6 +4,7 @@ import type { ProjectSettings, SettingsPatch, UserSettingsPatch } from '@nexgent
 import { useAppState, useAppStore } from '../hooks.js'
 import { L, T, credentialText, effortText } from '../strings.js'
 import { readTheme, saveTheme, type Theme } from '../theme.js'
+import { Icon } from './Icon.js'
 import { Switch } from './Learned.js'
 import { Page } from './Page.js'
 import type { SettingsGroup } from '../ui.js'
@@ -307,7 +308,6 @@ export function SettingsPage({ onClose, initialGroup }: { readonly onClose: () =
   return (
     <Page
       title={T.settingsTitle}
-      lead={L.settingsLead}
       onClose={onClose}
       testId="settings-page"
       aside={
@@ -418,7 +418,17 @@ export function SettingsPage({ onClose, initialGroup }: { readonly onClose: () =
                 {capRow('perConversation', L.perConversation, L.perConversationHelp, 'cap-conversation')}
                 {capRow('perProject', L.perProject, L.perProjectHelp(Number(caps.perProject.windowDays) || 30), 'cap-project')}
                 <details className="usage-more" open={hasUsageCaps(settings.costCaps)}>
-                  <summary className="muted small">{L.usageCaps}</summary>
+                  <summary className="muted small">
+                    <Icon name="chevronRight" className="fold-mark closed" />
+                    <Icon name="chevronDown" className="fold-mark opened" />
+                    {L.usageCaps}
+                  </summary>
+                  <div className="usage-caps head" aria-hidden="true">
+                    <span />
+                    <span>{L.maxTokens}</span>
+                    <span>{L.maxRequests}</span>
+                    <span>{L.windowDays}</span>
+                  </div>
                   {usage('perTask', 'cap-task', L.perTask)}
                   {usage('perConversation', 'cap-conversation', L.perConversation)}
                   {usage('perProject', 'cap-project', L.perProject)}
@@ -497,7 +507,14 @@ function Group({ id, children }: { readonly id: (typeof GROUPS)[number]; readonl
   if (FOLDED.has(id))
     return (
       <details className="settings-group folded" id={`settings-${id}`} aria-labelledby={`settings-${id}-title`} data-testid={`settings-group-${id}`}>
-        <summary>{title}</summary>
+        <summary>
+          <h3 id={`settings-${id}-title`}>
+            <Icon name="chevronRight" className="fold-mark closed" />
+            <Icon name="chevronDown" className="fold-mark opened" />
+            {L.groups[id]}
+            <HelpTip text={L.groupHelp[id]} />
+          </h3>
+        </summary>
         <div className="setting-rows">{children}</div>
       </details>
     )

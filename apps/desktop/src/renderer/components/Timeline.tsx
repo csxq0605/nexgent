@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
-import { rewindableTurns, shownEntries, type TimelineEntry } from '../timeline.js'
-import { T, changeNoteText, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
+import { useAppState } from '../hooks.js'
+import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
+import { T, changeNoteText, learnedNote, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import { TeamCard, ThreadCard, WorkflowBlock } from './MemberBlock.js'
 import { ToolBlock, toolSummary } from './ToolBlock.js'
+import { State } from './State.js'
 
 type Entry = TimelineEntry
 type MemberEntry = Extract<Entry, { kind: 'member' }>
@@ -209,18 +211,43 @@ function turnFiles(entries: readonly Entry[]): { readonly changes: Map<number, F
   return { changes: new Map([...byPath].map(([turn, map]) => [turn, [...map.values()]])), lastCard }
 }
 
+/**
+ * A message's materials. A message sent here carries their names; one read back from the
+ * session's history carries their ids, so ids are looked up among the project's materials.
+ */
+function MaterialChips({ materials }: { readonly materials: readonly string[] }): JSX.Element {
+  const known = useAppState().materials
+  return (
+    <div className="chips">
+      {materials.map(ref => {
+        const name = known.find(m => m.id === ref)?.originalName ?? (MATERIAL_ID.test(ref) ? T.materialGone : ref)
+        return (
+          <span key={ref} className="chip" title={name}>
+            <span className="ellipsis">@{name}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+const MATERIAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function EntryView({
   entry,
   deliverables,
   readOnly,
   files,
   onRewind,
+  mark,
 }: {
   readonly entry: Entry
   readonly deliverables: readonly DeliverableSummary[]
   readonly readOnly: boolean
   readonly files: ReturnType<typeof turnFiles>
   readonly onRewind?: ((turn: number) => void) | undefined
+  /** `kept`: the last compaction keeps this message word for word; `steered`: sent while its turn ran. */
+  readonly mark?: 'kept' | 'steered' | undefined
 }): JSX.Element | null {
   switch (entry.kind) {
     case 'user': {
@@ -246,16 +273,18 @@ function EntryView({
       return (
         <div className="msg user" data-testid="user-message">
           <div className="bubble">
-            <p className="text">{entry.text}</p>
-            {entry.materials.length > 0 && (
-              <div className="chips">
-                {entry.materials.map(name => (
-                  <span key={name} className="chip">
-                    @{name}
-                  </span>
-                ))}
+            {mark === 'kept' && (
+              <div className="bubble-meta" title={T.wordsKeptTitle} data-testid="words-kept">
+                {T.wordsKept}
               </div>
             )}
+            {mark === 'steered' && (
+              <div className="bubble-meta" title={T.steeredTitle} data-testid="steered">
+                {T.steered}
+              </div>
+            )}
+            <p className="text">{entry.text}</p>
+            {entry.materials.length > 0 && <MaterialChips materials={entry.materials} />}
           </div>
           {onRewind !== undefined && (
             <button type="button" className="link small msg-action" title={T.rewindActionTitle} onClick={() => onRewind(entry.turn)} data-testid="rewind-open">
@@ -282,8 +311,7 @@ function EntryView({
       if (entry.decision === undefined) return null
       return (
         <div className="approval-note" data-testid="approval-note">
-          <span className={entry.decision.decision === 'allow' ? 'dot ok' : 'dot bad'} aria-hidden="true" />
-          <span>{entry.decision.decision === 'allow' ? T.approvalAllowed : T.approvalDenied}</span>
+          <State tone={entry.decision.decision === 'allow' ? 'ok' : 'bad'}>{entry.decision.decision === 'allow' ? T.approvalAllowed : T.approvalDenied}</State>
           {entry.request.member !== undefined && <span>{entry.request.member.name}</span>}
           <span>
             {toolVerb(entry.request.tool)} · {T.approvalRiskLine(riskText(entry.request.risk))}
@@ -317,9 +345,26 @@ function EntryView({
         </div>
       )
     case 'compaction':
-      return <div className="divider">{T.compacted}</div>
+      return (
+        <div className="divider" data-testid="compaction">
+          {entry.userWords === undefined ? T.compacted : T.compactedKept(entry.userWords.turns.length, entry.userWords.dropped)}
+        </div>
+      )
     case 'change':
-      return <div className="turn-change small muted" data-testid="turn-change">{changeNoteText(entry.change)}</div>
+    {
+      const learned = learnedNote(entry.change)
+      if (learned === undefined) return <div className="turn-change small muted" data-testid="turn-change">{changeNoteText(entry.change)}</div>
+      return (
+        <div className="learned-note" role="note" data-testid="learned-note">
+          <span className="learned-badge">{T.learnedBadge}</span>
+          <div className="grow">
+            <div className="learned-title">{learned.title}</div>
+            <div className="small">{learned.evidence}</div>
+            {learned.next !== undefined && <div className="small muted" data-testid="turn-change">{learned.next}</div>}
+          </div>
+        </div>
+      )
+    }
     case 'turn.end': {
       const text = turnEndText(entry.reason)
       // Rework D3: what the turn cost, quietly under it (nothing when no price is known).
@@ -383,16 +428,21 @@ export function Timeline({
     const el = ref.current
     if (el !== null && stick.current) el.scrollTop = el.scrollHeight
   }, [entries])
+  // A card that appears above the composer shortens the list: stay at the bottom if the reader was there.
+  useEffect(() => {
+    const el = ref.current
+    if (el === null || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
   const files = turnFiles(entries)
   const rewindable = readOnly || onRewind === undefined ? new Set<number>() : rewindableTurns(entries)
   // A message sent while its turn ran is not where that turn starts: only the turn's first message takes the files back.
-  const opening = new Set<string>()
-  const seenTurns = new Set<number>()
-  for (const entry of entries) {
-    if (entry.kind !== 'user' || seenTurns.has(entry.turn)) continue
-    seenTurns.add(entry.turn)
-    opening.add(entry.key)
-  }
+  const opening = openingMessages(entries)
+  const marks = userMarks(entries, opening)
   return (
     <div
       className="timeline"
@@ -419,6 +469,7 @@ export function Timeline({
               readOnly={readOnly}
               files={files}
               onRewind={block.entry.kind === 'user' && rewindable.has(block.entry.turn) && opening.has(block.entry.key) ? onRewind : undefined}
+              mark={marks.get(block.entry.key)}
             />
           ),
         )}

@@ -2,6 +2,7 @@ import { useState, type FormEvent } from 'react'
 import { useAppState, useAppStore } from '../hooks.js'
 import { T, formatTime, isAbsolutePath } from '../strings.js'
 import markUrl from '../assets/mark.svg'
+import markDarkUrl from '../assets/mark-dark.svg'
 import { Icon } from './Icon.js'
 
 /** No project open: recent projects plus open / create by folder. */
@@ -32,17 +33,14 @@ export function StartScreen(): JSX.Element {
   return (
     <main className="start" data-testid="start-screen">
       <div className="start-card">
-        <div className="brand-row">
-          <img src={markUrl} alt="" className="brand-mark" />
-          <div>
-            <h1>{T.appName}</h1>
-            <p className="muted">{T.tagline}</p>
+        <header className="start-hero">
+          <div className="brand-row">
+            <img src={markUrl} alt="" className="brand-mark on-light" />
+            <img src={markDarkUrl} alt="" className="brand-mark on-dark" />
+            <span className="wordmark">{T.appName}</span>
           </div>
-        </div>
-        <div>
-          <h2>{T.startTitle}</h2>
-          <p className="start-lead muted">{T.startHint}</p>
-        </div>
+          <h1 className="display">{T.tagline}</h1>
+        </header>
         {picker && (
           <div className="start-actions">
             <button type="button" className="primary" onClick={() => void store.pickAndOpenProject(false)} data-testid="pick-directory">
@@ -77,11 +75,9 @@ export function StartScreen(): JSX.Element {
             </div>
           </form>
         </details>
-        <div className="stack">
-          <div className="section-title">{T.recentProjects}</div>
-          {state.recent.length === 0 ? (
-            <p className="muted">{T.noRecent}</p>
-          ) : (
+        {state.recent.length > 0 && (
+          <div className="stack">
+            <div className="section-title">{T.recentProjects}</div>
             <ul className="recent" data-testid="recent-projects">
               {state.recent.map(project => (
                 <li key={project.root}>
@@ -96,9 +92,8 @@ export function StartScreen(): JSX.Element {
                 </li>
               ))}
             </ul>
-          )}
-        </div>
-        {state.appVersion !== undefined && <p className="faint small app-version">v{state.appVersion}</p>}
+          </div>
+        )}
       </div>
     </main>
   )

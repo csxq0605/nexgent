@@ -5,6 +5,9 @@ import { ErrorBoundary } from './components/ErrorBoundary.js'
 import { StoreProvider } from './hooks.js'
 import { AppStore } from './store.js'
 import { applyTheme, readTheme } from './theme.js'
+import '@fontsource-variable/instrument-sans'
+import '@fontsource/jetbrains-mono/400.css'
+import '@fontsource/jetbrains-mono/500.css'
 import './styles.css'
 
 applyTheme(readTheme())

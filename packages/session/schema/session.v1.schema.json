@@ -1485,6 +1485,24 @@
                       }
                     }
                   }
+                },
+                "measured": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "before",
+                    "after"
+                  ],
+                  "properties": {
+                    "before": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "after": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  }
                 }
               }
             }
@@ -2051,6 +2069,27 @@
               "minimum": 1
             }
           }
+        },
+        "userWords": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "turns",
+            "dropped"
+          ],
+          "properties": {
+            "turns": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/positiveInteger"
+              }
+            },
+            "dropped": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
         }
       }
     },
@@ -2549,6 +2588,24 @@
                       "minimum": 0
                     }
                   }
+                }
+              }
+            },
+            "measured": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "before",
+                "after"
+              ],
+              "properties": {
+                "before": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "after": {
+                  "type": "number",
+                  "minimum": 0
                 }
               }
             }

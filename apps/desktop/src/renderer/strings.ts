@@ -7,7 +7,7 @@ import type { ApprovalRequest, CredentialInfo, ErrorInfo, FileChange, GoalStatus
 
 export const T = {
   appName: 'Nexgent',
-  tagline: '把资料交给它，拿回成果',
+  tagline: '一个项目，一支会学习的团队。',
 
   backendUnavailableTitle: '无法连接后端',
   backendUnavailableBody: '界面没有拿到桌面应用主进程的接口。请从 Nexgent 桌面应用启动，或重启应用。',
@@ -25,7 +25,7 @@ export const T = {
   loading: '加载中…',
 
   startTitle: '打开一个项目',
-  startHint: '选一个文件夹，Nexgent 就在里面帮你做事：读你给的资料，把成果交回给你。',
+  startHint: '选一个项目文件夹。Nexgent 在里面把任务拆开、派讨论串去做；做完复盘，记下同类任务上顺利的分工。',
   startMore: '用路径打开或新建',
   recentProjects: '最近的项目',
   noRecent: '还没有打开过项目。',
@@ -55,14 +55,15 @@ export const T = {
   interrupted: '上次中断',
   settings: '设置',
 
-  emptyConversationTitle: '开始一段对话',
+  emptyConversationTitle: '想做点什么？',
   emptyConversationBody: '告诉 Nexgent 你想要什么结果。要用到文件的话，先点“附件”加进来，输入 @ 可以引用。',
   noSessionTitle: '选择或新建一个对话',
   noSessionBody: '左侧列出了这个项目的全部对话。',
 
   composerPlaceholder: '描述你想要的结果',
-  composerPlaceholderMore: '接着说，或者让它改点什么',
+  composerPlaceholderMore: '接着说…',
   mentionChip: '@ 资料',
+  materialGone: '已移除的资料',
   send: '发送',
   stop: '停止',
   stopping: '正在停止…',
@@ -75,7 +76,7 @@ export const T = {
   feedbackLabel: '反馈',
   thinking: '思考过程',
   thinkingLive: '正在思考…',
-  interruptedText: '（已中断，以上是已生成的内容）',
+  interruptedText: '（已中断）',
   image: '图片',
   toolRunning: '执行中',
   toolFailed: '失败',
@@ -136,6 +137,13 @@ export const T = {
   threadApprovalHint: '有一步操作要你批准，进入讨论串处理',
   fromCoordinator: '协调者交代',
   compacted: '较早的对话已压缩为摘要',
+  compactedKept: (kept: number, dropped: number) =>
+    `较早的对话已压缩为摘要，你说过的 ${kept} 句话逐字留在摘要里${dropped > 0 ? `（更早的 ${dropped} 句因长度略去）` : ''}`,
+  learnedBadge: '已学到',
+  wordsKept: '你说过 · 逐字保留',
+  wordsKeptTitle: '对话压缩后，这句话仍原样留给模型',
+  steered: '插话 · 带进了正在进行的这一轮',
+  steeredTitle: '这一轮还在进行时发出；正在运行的成员也会收到',
   turnCost: (usd: string, partial: boolean) => (partial ? `本轮至少 ${usd} 美元（有的请求没有用量）` : `本轮 ${usd} 美元`),
   turnCostTitle: '按模型价目表估算，含缓存读写',
   planTitle: '计划',
@@ -186,7 +194,7 @@ export const T = {
   noDiff: '两个版本没有差异。',
   binaryFile: '二进制文件，不显示内容',
   preview: '预览',
-  previewUnavailable: '这个文件不能在这里预览，点上面的“在文件管理器中显示”用其他程序打开。',
+  previewUnavailable: '不能在这里预览',
   changes: '变化',
   fileAdded: '新增',
   fileRemoved: '删除',
@@ -203,11 +211,11 @@ export const T = {
   drawerClose: '收起',
   panelMaterials: '资料',
   panelDeliverables: '成果',
-  noMaterials: '还没有资料。添加的文件会复制到项目里，原文件不会被修改。',
+  noMaterials: '还没有资料',
   removeMaterial: '移除',
   addByPath: '按路径添加',
   materialPathPlaceholder: '文件的绝对路径',
-  noDeliverables: '还没有成果。Nexgent 完成工作后会把成果交给你。',
+  noDeliverables: '还没有成果',
   filesTruncated: (limit: number) => `文件太多，只列出前 ${limit} 个。`,
   goalNone: '这个对话还没有目标。',
   goalAdd: '设定目标',
@@ -247,7 +255,7 @@ export const T = {
   windowDays: '统计窗口（天）',
   unlimited: '不限',
   apiKey: '模型 API 密钥',
-  apiKeyPlaceholder: '粘贴密钥后点保存；保存后不会再显示',
+  apiKeyPlaceholder: '粘贴 API 密钥',
   apiKeySave: '保存密钥',
   apiKeyRemove: '移除本机保存的密钥',
   memberRunning: '进行中',
@@ -266,7 +274,7 @@ export const T = {
   memberNoDeliverables: '这次没有交出成果。',
   openMember: '看它的过程',
   memberSessionTitle: (name: string) => `成员 ${name} 的会话`,
-  memberReadOnly: '只读：成员由主对话安排工作，这里不能发消息。',
+  memberReadOnly: '只读',
   backToConversation: '返回主对话',
   workflow: '工作流',
   workflowPhases: '阶段',
@@ -318,9 +326,44 @@ function actionText(action: OrganizationChangeNote['action'], target: ChangeTarg
   }
 }
 
+function changeNowText(action: OrganizationChangeNote['action'], target: ChangeTarget): string {
+  return `这次比上次改了一处：${actionText(action, target)}（上次${targetPartText(target)}${causeText(target)}）`
+}
+
+function targetPartText(target: ChangeTarget): string {
+  return target.kind === 'thread' ? `讨论串「${target.part}」` : partText(target.kind)
+}
+
+function measureText(target: ChangeTarget, before: number, after: number): string {
+  const percent = (value: number) => `${Math.round(value * 100)}%`
+  const count = (value: number) => `${Math.round(value * 10) / 10}`
+  const part = targetPartText(target)
+  switch (target.cause) {
+    case 'failures': return `${part}失败或重做从 ${count(before)} 次降到 ${count(after)} 次`
+    case 'wasted': return `${part}做的活不再被重写`
+    case 'cost': return `${part}占的花费从 ${percent(before)} 降到 ${percent(after)}`
+    case 'time': return `${part}占的时间从 ${percent(before)} 降到 ${percent(after)}`
+    case 'idle': return `${part}排队等的时间从 ${percent(before)} 降到 ${percent(after)}`
+  }
+}
+
+/**
+ * 「已学到」: a kept organization change with what it was judged on, or
+ * `undefined` when the note is not a kept change or carries no measure
+ * (nothing is called learned without a number).
+ */
+export function learnedNote(note: OrganizationChangeNote): { readonly title: string; readonly evidence: string; readonly next?: string } | undefined {
+  if (note.status !== 'kept' || note.measured === undefined) return undefined
+  return {
+    title: `留下了一处分工改动：${actionText(note.action, note.target)}`,
+    evidence: `${measureText(note.target, note.measured.before, note.measured.after)}；以后同类任务组队时照这样做`,
+    ...(note.next === undefined ? {} : { next: changeNowText(note.next.action, note.next.target) }),
+  }
+}
+
 /** Coordinator: the team card's one line on how this organization differs from the last similar task, and why. */
 export function changeNoteText(note: OrganizationChangeNote): string {
-  const now = (action: OrganizationChangeNote['action'], target: ChangeTarget) => `这次比上次改了一处：${actionText(action, target)}（上次${target.kind === 'thread' ? `讨论串「${target.part}」` : partText(target.kind)}${causeText(target)}）`
+  const now = changeNowText
   if (note.status === 'trying') return now(note.action, note.target)
   const verdict = note.status === 'kept' ? `上次的改动变好了，已留下：${actionText(note.action, note.target)}` : '上次的改动没变好，已退回'
   return note.next === undefined ? verdict : `${verdict}；${now(note.next.action, note.next.target)}`
@@ -569,7 +612,7 @@ export function effortText(effort: string): string {
 // ---------------------------------------------------------------------------
 
 export const L = {
-  leadNone: '做完任务后，Nexgent 会自己检查结果、总结经验；学到的会出现在这里。',
+  leadNone: '',
   lead: (active: number, rules: number, last: string | undefined) =>
     `Nexgent 在这个项目里用着 ${active} 条经验${rules > 0 ? `、${rules} 条项目规则` : ''}${last === undefined ? '' : `，最近一次改进在 ${last}`}。`,
   orgTeamBetter: (kind: string, organization: string, points: number, cost: string) => `${kind}任务用“${organization}”分工，比单独做的顺利率高 ${points}%${cost}。`,
@@ -582,10 +625,11 @@ export const L = {
   },
   orgCost: (percent: number) => (percent === 0 ? '，花费差不多' : `，花费${percent > 0 ? '多' : '少'} ${Math.abs(percent)}%`),
   effect: (points: number) => (points === 0 ? '用上经验的任务和没用上的结果差不多。' : `用上经验的任务，结果${points > 0 ? '好' : '差'} ${Math.abs(points)} 分（满分 100）。`),
-  noneActive: '还没有正式用上的经验，试用中的在“改进记录”里。',
+  noneActive: '还没有正式用上的经验',
   attentionTitle: '等你看一眼',
   recordTitle: '改进记录',
   recordLearning: '学习开关与费用',
+  recordNone: '还没有记录',
   learningSwitch: '每次任务后自己学习',
   learningSwitchHelp: '做完任务后给结果打分、总结经验，下次做类似的事时用上。',
   learningOff: '已关闭：不再打分，也不再总结新经验；已经学到的照常使用。',
@@ -610,7 +654,7 @@ export const L = {
   activeTitle: '已学会',
   trialTitle: '试用中',
   retiredTitle: (n: number) => `已停用（${n}）`,
-  empty: '还没有学到经验。每条新经验先试用，帮上忙两次后正式启用；带偏了就自动停用。',
+  empty: '还没有学到经验',
   scopeUser: '所有项目共用',
   scopeProject: '只用于这个项目',
   helpful: (n: number) => `帮上忙 ${n} 次`,
@@ -636,9 +680,8 @@ export const L = {
     retired: '停用',
   } as Record<string, string>,
   byUser: '你',
-  noticeTitle: 'Nexgent 会在后台学习',
-  noticeBody: (max: string, days: number) =>
-    `每次任务结束后，Nexgent 会给结果打分、总结经验，下次做类似的事时用上。每个项目每 ${days} 天最多花 ${max} 美元；在 设置 → 自动改进 里可以关掉或改预算。`,
+  noticeTitle: '做完任务后会自己学习',
+  noticeBody: (max: string, days: number) => `每 ${days} 天最多 ${max} 美元`,
   noticeOk: '知道了',
   noticeSettings: '去设置',
   // settings

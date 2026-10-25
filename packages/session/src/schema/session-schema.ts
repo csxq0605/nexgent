@@ -54,6 +54,12 @@ const ORGANIZATION_CHANGE_NOTE: JsonObject = {
       required: ['action', 'target'],
       properties: { action: { enum: [...ORGANIZATION_CHANGE_ACTIONS] }, target: ORGANIZATION_HOTSPOT },
     },
+    measured: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['before', 'after'],
+      properties: { before: { type: 'number', minimum: 0 }, after: { type: 'number', minimum: 0 } },
+    },
   },
 }
 import { evaluateSchema, type EvaluateOptions, type SchemaIssue } from './evaluator.js'
@@ -448,6 +454,10 @@ export const sessionRecordSchema: JsonObject = {
         trigger: closedObject(
           { inputTokens: { type: 'integer', minimum: 0 }, threshold: { type: 'integer', minimum: 1 } },
           ['inputTokens', 'threshold'],
+        ),
+        userWords: closedObject(
+          { turns: { type: 'array', minItems: 1, items: turn }, dropped: { type: 'integer', minimum: 0 } },
+          ['turns', 'dropped'],
         ),
       },
       ['turn', 'step', 'summary', 'keepMessages', 'compactedMessages', 'requestId', 'usage', 'trigger'],

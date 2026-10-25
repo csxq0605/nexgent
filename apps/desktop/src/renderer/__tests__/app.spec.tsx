@@ -343,7 +343,7 @@ describe('project and materials', () => {
     expect(screen.getByTestId('recent-projects').textContent).toContain('sales')
     fireEvent.click(within(screen.getByTestId('recent-projects')).getByText('sales'))
     await screen.findByTestId('workspace')
-    expect(screen.getByTestId('session-item').querySelector('.dot')?.getAttribute('aria-label')).toBe('上次中断')
+    expect(screen.getByTestId('session-item').querySelector('.state')?.textContent).toBe('上次中断')
     expect(bridge.callsOf('sessions.open')).toEqual([{ projectId: 'p1', sessionId: 's1' }])
   })
 

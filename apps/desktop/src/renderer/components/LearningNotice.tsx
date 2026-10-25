@@ -18,7 +18,7 @@ export function LearningNotice(): JSX.Element | null {
     <aside className="learning-notice" role="note" data-testid="learning-notice">
       <div className="grow">
         <div className="setting-name">{L.noticeTitle}</div>
-        <p className="muted small wrap">{L.noticeBody(usdText(learning.budget.maxUsd), learning.budget.windowDays)}</p>
+        <p className="muted small">{L.noticeBody(usdText(learning.budget.maxUsd), learning.budget.windowDays)}</p>
       </div>
       <div className="row">
         <button type="button" className="ghost" onClick={() => ui.openSettings()} data-testid="learning-notice-settings">

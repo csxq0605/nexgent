@@ -1,5 +1,6 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { T } from '../strings.js'
+import { Icon } from './Icon.js'
 
 interface Props {
   readonly title: string
@@ -27,8 +28,8 @@ export function Modal({ title, onClose, children, wide, testId }: Props): JSX.El
         <header className="modal-head">
           <h2>{title}</h2>
           {onClose !== undefined && (
-            <button type="button" className="icon" aria-label={T.close} onClick={onClose}>
-              ×
+            <button type="button" className="icon close" aria-label={T.close} title={T.close} onClick={onClose}>
+              <Icon name="close" />
             </button>
           )}
         </header>
