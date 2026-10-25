@@ -225,6 +225,14 @@ button.icon {
   color: var(--muted);
 }
 
+/* Close buttons of dialogs and the drawer: a 32px target around the 16px icon. */
+button.icon.close {
+  width: 32px;
+  height: 32px;
+  justify-content: center;
+  padding: 0;
+}
+
 button.icon:hover:not(:disabled) {
   background: var(--hover);
   color: var(--fg);
@@ -1157,10 +1165,13 @@ a {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  /* The scrollbar takes room on both sides, so the column stays centred over the composer. */
+  scrollbar-gutter: stable both-edges;
 }
 
 .timeline-inner {
-  max-width: 720px;
+  /* 720px of content, like the composer and the cards above it. */
+  max-width: calc(720px + 48px);
   margin: 0 auto;
   padding: 24px 24px 16px;
   display: flex;
@@ -1983,6 +1994,11 @@ button.chip {
   z-index: 15;
 }
 
+/* The drawer is the third column (design system: 布局): what sits under the title bar narrows beside it instead of being covered. */
+.conversation:has(> .drawer) > :not(.topbar, .drawer) {
+  margin-right: min(380px, 100%);
+}
+
 .drawer-head {
   display: flex;
   align-items: center;
@@ -2134,6 +2150,10 @@ button.chip {
   color: var(--on-accent);
 }
 
+.version-pill.active:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
 .drop-hint {
   margin-top: 8px;
   border: 1px dashed var(--line);
@@ -2181,13 +2201,21 @@ button.chip {
 
 .modal.wide {
   width: min(960px, 100%);
+  /* A fixed height: switching versions or tabs does not move the dialog. */
+  height: min(720px, 100%);
+}
+
+.modal.wide > .modal-body {
+  flex: 1;
+  min-height: 0;
 }
 
 .modal-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 18px 6px;
+  gap: 12px;
+  padding: 10px 10px 6px 18px;
 }
 
 .modal-head h2 {
@@ -2225,6 +2253,10 @@ button.chip {
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
+}
+
+.deliverable-toolbar .versions {
+  padding-left: 0;
 }
 
 .preview {
@@ -2568,8 +2600,14 @@ button.chip {
   max-width: 900px;
 }
 
+.page-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: none;
+}
+
 .save-state {
-  align-self: center;
   min-width: 56px;
   text-align: right;
 }
@@ -2680,6 +2718,15 @@ button.chip {
   align-items: center;
   gap: 8px;
   margin-top: 8px;
+}
+
+.usage-caps.head {
+  margin-top: 12px;
+}
+
+.usage-caps.head > span {
+  font-size: 12px;
+  color: var(--muted);
 }
 
 .usage-caps label {
@@ -3206,13 +3253,30 @@ textarea.check-commands {
   list-style: none;
 }
 
-.settings-group.folded > summary h3 {
-  display: inline;
-  color: var(--muted);
+.settings-group.folded > summary::-webkit-details-marker {
+  display: none;
 }
 
-.settings-group.folded[open] > summary h3 {
-  color: inherit;
+/* A folded group reads as a heading with a chevron, not a greyed-out one. */
+.settings-group.folded > summary h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-group.folded > summary .fold-mark {
+  color: var(--muted);
+  transition: transform 0.15s ease-out;
+}
+
+.settings-group.folded[open] > summary .fold-mark {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-group.folded > summary .fold-mark {
+    transition: none;
+  }
 }
 
 .record {

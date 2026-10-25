@@ -154,7 +154,7 @@ export function Drawer(): JSX.Element | null {
           ))}
         </div>
         <span className="grow" />
-        <button type="button" className="icon" aria-label={T.drawerClose} title={T.drawerClose} onClick={() => setDrawer(undefined)} data-testid="drawer-close">
+        <button type="button" className="icon close" aria-label={T.drawerClose} title={T.drawerClose} onClick={() => setDrawer(undefined)} data-testid="drawer-close">
           <Icon name="close" />
         </button>
       </div>

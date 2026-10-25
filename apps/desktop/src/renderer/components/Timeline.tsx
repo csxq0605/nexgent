@@ -413,6 +413,16 @@ export function Timeline({
     const el = ref.current
     if (el !== null && stick.current) el.scrollTop = el.scrollHeight
   }, [entries])
+  // A card that appears above the composer shortens the list: stay at the bottom if the reader was there.
+  useEffect(() => {
+    const el = ref.current
+    if (el === null || typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(() => {
+      if (stick.current) el.scrollTop = el.scrollHeight
+    })
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
   const files = turnFiles(entries)
   const rewindable = readOnly || onRewind === undefined ? new Set<number>() : rewindableTurns(entries)
   // A message sent while its turn ran is not where that turn starts: only the turn's first message takes the files back.
