@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
-import { rewindableTurns, shownEntries, type TimelineEntry } from '../timeline.js'
+import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
 import { T, changeNoteText, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
 import { Icon } from './Icon.js'
@@ -215,12 +215,15 @@ function EntryView({
   readOnly,
   files,
   onRewind,
+  mark,
 }: {
   readonly entry: Entry
   readonly deliverables: readonly DeliverableSummary[]
   readonly readOnly: boolean
   readonly files: ReturnType<typeof turnFiles>
   readonly onRewind?: ((turn: number) => void) | undefined
+  /** `kept`: the last compaction keeps this message word for word; `steered`: sent while its turn ran. */
+  readonly mark?: 'kept' | 'steered' | undefined
 }): JSX.Element | null {
   switch (entry.kind) {
     case 'user': {
@@ -246,6 +249,16 @@ function EntryView({
       return (
         <div className="msg user" data-testid="user-message">
           <div className="bubble">
+            {mark === 'kept' && (
+              <div className="bubble-meta" title={T.wordsKeptTitle} data-testid="words-kept">
+                {T.wordsKept}
+              </div>
+            )}
+            {mark === 'steered' && (
+              <div className="bubble-meta" title={T.steeredTitle} data-testid="steered">
+                {T.steered}
+              </div>
+            )}
             <p className="text">{entry.text}</p>
             {entry.materials.length > 0 && (
               <div className="chips">
@@ -317,7 +330,11 @@ function EntryView({
         </div>
       )
     case 'compaction':
-      return <div className="divider">{T.compacted}</div>
+      return (
+        <div className="divider" data-testid="compaction">
+          {entry.userWords === undefined ? T.compacted : T.compactedKept(entry.userWords.turns.length, entry.userWords.dropped)}
+        </div>
+      )
     case 'change':
       return <div className="turn-change small muted" data-testid="turn-change">{changeNoteText(entry.change)}</div>
     case 'turn.end': {
@@ -386,13 +403,8 @@ export function Timeline({
   const files = turnFiles(entries)
   const rewindable = readOnly || onRewind === undefined ? new Set<number>() : rewindableTurns(entries)
   // A message sent while its turn ran is not where that turn starts: only the turn's first message takes the files back.
-  const opening = new Set<string>()
-  const seenTurns = new Set<number>()
-  for (const entry of entries) {
-    if (entry.kind !== 'user' || seenTurns.has(entry.turn)) continue
-    seenTurns.add(entry.turn)
-    opening.add(entry.key)
-  }
+  const opening = openingMessages(entries)
+  const marks = userMarks(entries, opening)
   return (
     <div
       className="timeline"
@@ -419,6 +431,7 @@ export function Timeline({
               readOnly={readOnly}
               files={files}
               onRewind={block.entry.kind === 'user' && rewindable.has(block.entry.turn) && opening.has(block.entry.key) ? onRewind : undefined}
+              mark={marks.get(block.entry.key)}
             />
           ),
         )}

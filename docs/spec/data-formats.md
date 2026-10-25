@@ -270,7 +270,7 @@
 | `goal.set` | 宿主设定持久目标 | `turn?`、`goal: Goal` |
 | `goal.update` | 宿主更新目标状态或文本 | `turn?`、`goalId`、`status`、`text?`、`note?` |
 | `session.title` | 用户给对话改名（`sessions.rename`）；桌面应用在第一轮正常结束后、对话还没有标题时，用执行模型一次短请求（`purpose: auxiliary`，带 `sessionId`，计入账本与 `perProject`）生成的标题 | `turn?`、`title`（非空，宿主已去掉首尾空白） |
-| `compaction` | 压缩成功后、使用压缩历史的那次模型请求之前 | `turn`、`step`、`summary`、`keepMessages`、`compactedMessages`、`requestId`、`usage`、`trigger: { inputTokens, threshold }` |
+| `compaction` | 压缩成功后、使用压缩历史的那次模型请求之前 | `turn`、`step`、`summary`、`keepMessages`、`compactedMessages`、`requestId`、`usage`、`trigger: { inputTokens, threshold }`、可选 `userWords: { turns, dropped }` |
 | `fork.seed` | fork 子会话创建后，必为 `seq: 2` | `fromSessionId`、`throughSeq`、`messages` |
 | `subagent.start` | 父会话里一次成员运行开始 | `turn`、`toolCallId?`、`childSessionId`、`childTurn`、`name`、`executionForm`、`mode?`、`preset?`、`workflowId?`、`task`（≤500 字符）、`materialIds?`、`queuedMs?`（协调者：开始前排队等空位的毫秒数，有等待时写） |
 | `subagent.end` | 父会话里一次成员运行结束（恢复时补 `interrupted`） | `turn`、`childSessionId`、`childTurn`、`result: MemberResult` |
@@ -794,6 +794,7 @@ turn.start → [feedback] → user.message(inject)* → user.message(user|feedba
 | `requestId` | string | 产生摘要的辅助请求，与账本 `purpose: "auxiliary"` 的记录相关联 |
 | `usage` | `LLMUsage` | 该请求的用量 |
 | `trigger` | `{ inputTokens, threshold }` | 触发时的计费输入与阈值 |
+| `userWords`（可选） | `{ turns: integer[], dropped: integer ≥ 0 }` | 摘要末尾逐字附上的用户原话：每条一项、按从旧到新记其轮次；`dropped` 是因长度被略去的更早原话条数。没有原话时不写 |
 
 投影：`messages` 变为 `[{ role: "user", content: renderCompactionSummary(summary) }]` 加 `compactionTail(压缩前 messages, keepMessages)`，即最后 `keepMessages` 条，其中的助手回复去掉 `providerContent`；`metadata.lastCompactionSeq` 记下该记录的 `seq`。`renderCompactionSummary` 的文本是契约的一部分：
 

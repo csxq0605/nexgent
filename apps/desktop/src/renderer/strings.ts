@@ -136,6 +136,12 @@ export const T = {
   threadApprovalHint: '有一步操作要你批准，进入讨论串处理',
   fromCoordinator: '协调者交代',
   compacted: '较早的对话已压缩为摘要',
+  compactedKept: (kept: number, dropped: number) =>
+    `较早的对话已压缩为摘要，你说过的 ${kept} 句话逐字留在摘要里${dropped > 0 ? `（更早的 ${dropped} 句因长度略去）` : ''}`,
+  wordsKept: '你说过 · 逐字保留',
+  wordsKeptTitle: '对话压缩后，这句话仍原样留给模型',
+  steered: '插话 · 带进了正在进行的这一轮',
+  steeredTitle: '这一轮还在进行时发出；正在运行的成员也会收到',
   turnCost: (usd: string, partial: boolean) => (partial ? `本轮至少 ${usd} 美元（有的请求没有用量）` : `本轮 ${usd} 美元`),
   turnCostTitle: '按模型价目表估算，含缓存读写',
   planTitle: '计划',

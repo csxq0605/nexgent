@@ -1125,7 +1125,7 @@ export class LocalNexgentSdk implements NexgentSdk {
         send({ type: 'turn.files', turn: record.turn, changes: record.changes })
         return
       case 'compaction':
-        send({ type: 'compaction', turn: record.turn, compactedMessages: record.compactedMessages })
+        send({ type: 'compaction', turn: record.turn, compactedMessages: record.compactedMessages, ...(record.userWords === undefined ? {} : { userWords: record.userWords }) })
         return
       case 'user.message': {
         if (record.source === 'thread') {

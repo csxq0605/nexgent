@@ -14,7 +14,7 @@ import type {
   TurnEndReason,
   OrganizationChangeNote,
 } from '@nexgent/kernel'
-import type { CheckRetryView, HistoryItem, MemberRunView, OrganizationView, RewindRecordView, SdkEvent, TurnCost, WorkflowView } from '@nexgent/sdk'
+import type { CheckRetryView, CompactionUserWords, HistoryItem, MemberRunView, OrganizationView, RewindRecordView, SdkEvent, TurnCost, WorkflowView } from '@nexgent/sdk'
 
 export type TimelineEntry =
   | { readonly kind: 'user'; readonly key: string; readonly turn: number; readonly text: string; readonly feedback: boolean; readonly materials: readonly string[]; readonly thread?: true }
@@ -37,7 +37,8 @@ export type TimelineEntry =
   | { readonly kind: 'deliverable'; readonly key: string; readonly turn: number; readonly deliverable: DeliverableVersionRef }
   | { readonly kind: 'files'; readonly key: string; readonly turn: number; readonly changes: readonly FileChange[] }
   | { readonly kind: 'feedback'; readonly key: string; readonly turn: number; readonly deliverableId: string; readonly version: number; readonly rating?: number; readonly comment: string }
-  | { readonly kind: 'compaction'; readonly key: string; readonly turn: number }
+  /** `userWords`: the user's messages the summary keeps word for word (their turns) and how many older ones it left out. */
+  | { readonly kind: 'compaction'; readonly key: string; readonly turn: number; readonly userWords?: CompactionUserWords }
   /** `cost`: rework D3, the turn's estimated dollars (shown under the turn). */
   | { readonly kind: 'turn.end'; readonly key: string; readonly turn: number; readonly reason: TurnEndReason; readonly cost?: TurnCost }
   | { readonly kind: 'error'; readonly key: string; readonly turn?: number; readonly error: ErrorInfo }
@@ -142,7 +143,7 @@ export function fromHistory(items: readonly HistoryItem[]): TimelineEntry[] {
         })
         break
       case 'compaction':
-        out.push({ kind: 'compaction', key: `c:${item.turn}:${index}`, turn: item.turn })
+        out.push({ kind: 'compaction', key: `c:${item.turn}:${index}`, turn: item.turn, ...(item.userWords === undefined ? {} : { userWords: item.userWords }) })
         break
       case 'change':
         out.push({ kind: 'change', key: `ch:${item.turn}`, turn: item.turn, change: item.change })
@@ -274,7 +275,7 @@ export function applyEvent(list: readonly TimelineEntry[], event: SdkEvent): Tim
       if (event.changes.length === 0) return [...list]
       return [...list, { kind: 'files', key: `f:${event.turn}:${event.eventSeq}`, turn: event.turn, changes: event.changes }]
     case 'compaction':
-      return [...list, { kind: 'compaction', key: `c:${event.turn}:${event.eventSeq}`, turn: event.turn }]
+      return [...list, { kind: 'compaction', key: `c:${event.turn}:${event.eventSeq}`, turn: event.turn, ...(event.userWords === undefined ? {} : { userWords: event.userWords }) }]
     case 'error':
       return [...list, { kind: 'error', key: `x:${event.eventSeq}`, ...(event.turn === undefined ? {} : { turn: event.turn }), error: event.error }]
     case 'turn.end':
@@ -383,4 +384,39 @@ export function rewindableTurns(entries: readonly TimelineEntry[]): Set<number> 
   const changed = entries.flatMap(entry => (entry.kind === 'files' && entry.changes.length > 0 ? [entry.turn] : []))
   const last = changed.length === 0 ? 0 : Math.max(...changed)
   return new Set(entries.flatMap(entry => (entry.kind === 'user' && entry.turn <= last ? [entry.turn] : [])))
+}
+
+/** The keys of the user messages that start their turn (later ones in a turn were sent while it ran). */
+export function openingMessages(entries: readonly TimelineEntry[]): Set<string> {
+  const opening = new Set<string>()
+  const seenTurns = new Set<number>()
+  for (const entry of entries) {
+    if (entry.kind !== 'user' || seenTurns.has(entry.turn)) continue
+    seenTurns.add(entry.turn)
+    opening.add(entry.key)
+  }
+  return opening
+}
+
+/**
+ * What a user message's bubble says about it: kept word for word by the last
+ * compaction (its turn is in that compaction's `userWords`), or sent while
+ * its turn ran (not the turn's first message).
+ */
+export function userMarks(entries: readonly TimelineEntry[], opening: ReadonlySet<string>): Map<string, 'kept' | 'steered'> {
+  const marks = new Map<string, 'kept' | 'steered'>()
+  const before: Extract<TimelineEntry, { kind: 'user' }>[] = []
+  let kept = new Set<string>()
+  for (const entry of entries) {
+    if (entry.kind === 'user' && entry.thread !== true) {
+      before.push(entry)
+      if (!entry.feedback && !opening.has(entry.key)) marks.set(entry.key, 'steered')
+    }
+    if (entry.kind === 'compaction') {
+      const turns = new Set(entry.userWords?.turns ?? [])
+      kept = new Set(before.filter(user => turns.has(user.turn)).map(user => user.key))
+    }
+  }
+  for (const key of kept) marks.set(key, 'kept')
+  return marks
 }

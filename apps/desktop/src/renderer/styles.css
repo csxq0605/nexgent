@@ -1090,6 +1090,15 @@ a {
   margin-bottom: 2px;
 }
 
+/* 「你说过」/ 插话: one quiet line on top of the user's own bubble. */
+.bubble-meta {
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+  opacity: 0.8;
+  margin-bottom: 2px;
+}
+
 /* Inside the user's indigo bubble, secondary text, links and code take the bubble's own ink. */
 .bubble .muted,
 .bubble .faint {

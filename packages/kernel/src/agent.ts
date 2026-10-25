@@ -540,12 +540,11 @@ export const USER_WORDS_MAX_CHARS = 60_000
 export const USER_WORDS_HEADING = "## The user's own words (verbatim, oldest first)"
 
 /**
- * The section a compaction appends to its summary: the user's messages word
- * for word, oldest first. When they exceed {@link USER_WORDS_MAX_CHARS} the
- * newest are kept (the oldest kept one may be cut at its start). Empty when
- * there are none.
+ * Which of the user's messages a compaction keeps word for word: the newest
+ * ones up to {@link USER_WORDS_MAX_CHARS}, oldest first (the oldest kept one
+ * may be cut at its start), and how many older ones were left out.
  */
-export function renderUserWords(words: readonly UserWords[], maxChars = USER_WORDS_MAX_CHARS): string {
+export function pickUserWords(words: readonly UserWords[], maxChars = USER_WORDS_MAX_CHARS): { readonly picked: readonly UserWords[]; readonly dropped: number } {
   const picked: UserWords[] = []
   let left = maxChars
   let dropped = 0
@@ -558,6 +557,19 @@ export function renderUserWords(words: readonly UserWords[], maxChars = USER_WOR
     picked.unshift(entry.text.length <= left ? entry : { turn: entry.turn, text: `…${entry.text.slice(entry.text.length - left)}` })
     left -= entry.text.length
   }
+  return { picked, dropped }
+}
+
+/**
+ * The section a compaction appends to its summary: the messages
+ * {@link pickUserWords} keeps, word for word, oldest first. Empty when there
+ * are none.
+ */
+export function renderUserWords(words: readonly UserWords[], maxChars = USER_WORDS_MAX_CHARS): string {
+  return renderPickedUserWords(pickUserWords(words, maxChars))
+}
+
+function renderPickedUserWords({ picked, dropped }: { readonly picked: readonly UserWords[]; readonly dropped: number }): string {
   if (picked.length === 0) return ''
   const lines = [
     '',
@@ -1873,7 +1885,8 @@ export class Agent {
       const kept = result.keepMessages
       const tail = compactionTail(this.messages, kept)
       // Everything the user said stays word for word, not only as the summary retells it.
-      const summary = result.summary + renderUserWords(await this.userWordsOutside(tail))
+      const words = pickUserWords(await this.userWordsOutside(tail))
+      const summary = result.summary + renderPickedUserWords(words)
       // The summary request is a model request of this task (`requestCount` counts every request).
       this.charge(1, result.usage)
       await this.append({
@@ -1886,6 +1899,7 @@ export class Agent {
         requestId: result.requestId,
         usage: result.usage,
         trigger: result.trigger,
+        ...(words.picked.length === 0 ? {} : { userWords: { turns: words.picked.map(entry => entry.turn), dropped: words.dropped } }),
       })
       this.messages.splice(0, this.messages.length, { role: 'user', content: renderCompactionSummary(summary) }, ...tail)
       this.lastUsage = undefined

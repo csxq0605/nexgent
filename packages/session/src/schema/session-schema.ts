@@ -449,6 +449,10 @@ export const sessionRecordSchema: JsonObject = {
           { inputTokens: { type: 'integer', minimum: 0 }, threshold: { type: 'integer', minimum: 1 } },
           ['inputTokens', 'threshold'],
         ),
+        userWords: closedObject(
+          { turns: { type: 'array', minItems: 1, items: turn }, dropped: { type: 'integer', minimum: 0 } },
+          ['turns', 'dropped'],
+        ),
       },
       ['turn', 'step', 'summary', 'keepMessages', 'compactedMessages', 'requestId', 'usage', 'trigger'],
     ),

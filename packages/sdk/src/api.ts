@@ -196,6 +196,12 @@ export interface TurnCost {
 }
 
 /** One item of a session's display history, derived from the records (not from the compacted model history). */
+/** What a compaction kept of the user's own words (`CompactionRecord.userWords`). */
+export interface CompactionUserWords {
+  readonly turns: readonly number[]
+  readonly dropped: number
+}
+
 export type HistoryItem =
   | { readonly kind: 'user'; readonly turn: number; readonly text: string; readonly source: Exclude<UserMessageSource, 'inject'>; readonly materials: readonly string[] }
   | { readonly kind: 'assistant'; readonly turn: number; readonly step: number; readonly text: string; readonly finishReason: FinishReason; readonly interrupted: boolean }
@@ -204,7 +210,8 @@ export type HistoryItem =
   | { readonly kind: 'deliverable'; readonly turn: number; readonly deliverable: DeliverableVersionRef }
   | { readonly kind: 'files'; readonly turn: number; readonly changes: readonly FileChange[] }
   | { readonly kind: 'feedback'; readonly turn: number; readonly deliverableId: string; readonly version: number; readonly rating?: number; readonly comment: string }
-  | { readonly kind: 'compaction'; readonly turn: number }
+  /** `userWords`: the user's messages the summary keeps word for word (their turns, oldest first) and how many older ones it left out. */
+  | { readonly kind: 'compaction'; readonly turn: number; readonly userWords?: CompactionUserWords }
   | { readonly kind: 'member'; readonly turn: number; readonly run: MemberRunView }
   | { readonly kind: 'workflow'; readonly turn: number; readonly workflow: WorkflowView }
   | { readonly kind: 'organization'; readonly turn: number; readonly organization: OrganizationView }
@@ -330,7 +337,7 @@ export type SdkEvent =
   | EventBase & { readonly type: 'assistant.message'; readonly turn: number; readonly step: number; readonly text: string; readonly finishReason: FinishReason; readonly interrupted: boolean; readonly usage: LLMUsage }
   | EventBase & { readonly type: 'deliverable.presented'; readonly turn: number; readonly deliverable: DeliverableVersionRef }
   | EventBase & { readonly type: 'turn.files'; readonly turn: number; readonly changes: readonly FileChange[] }
-  | EventBase & { readonly type: 'compaction'; readonly turn: number; readonly compactedMessages: number }
+  | EventBase & { readonly type: 'compaction'; readonly turn: number; readonly compactedMessages: number; readonly userWords?: CompactionUserWords }
   | EventBase & { readonly type: 'goal'; readonly goal: Goal }
   | EventBase & { readonly type: 'material.added'; readonly material: MaterialMetadata }
   | EventBase & { readonly type: 'error'; readonly turn?: number; readonly error: ErrorInfo; readonly fatal: boolean }
