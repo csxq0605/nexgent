@@ -1088,11 +1088,23 @@ a {
 
 .bubble.feedback .muted {
   margin-bottom: 2px;
-  color: inherit;
-  opacity: 0.75;
 }
 
-.bubble a {
+/* Inside the user's indigo bubble, secondary text, links and code take the bubble's own ink. */
+.bubble .muted,
+.bubble .faint {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.bubble a,
+.bubble .markdown a {
+  color: inherit;
+}
+
+.bubble code,
+.bubble .markdown code {
+  background: rgba(255, 255, 255, 0.16);
   color: inherit;
 }
 
