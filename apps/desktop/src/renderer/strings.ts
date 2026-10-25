@@ -138,6 +138,7 @@ export const T = {
   compacted: '较早的对话已压缩为摘要',
   compactedKept: (kept: number, dropped: number) =>
     `较早的对话已压缩为摘要，你说过的 ${kept} 句话逐字留在摘要里${dropped > 0 ? `（更早的 ${dropped} 句因长度略去）` : ''}`,
+  learnedBadge: '已学到',
   wordsKept: '你说过 · 逐字保留',
   wordsKeptTitle: '对话压缩后，这句话仍原样留给模型',
   steered: '插话 · 带进了正在进行的这一轮',
@@ -324,9 +325,44 @@ function actionText(action: OrganizationChangeNote['action'], target: ChangeTarg
   }
 }
 
+function changeNowText(action: OrganizationChangeNote['action'], target: ChangeTarget): string {
+  return `这次比上次改了一处：${actionText(action, target)}（上次${targetPartText(target)}${causeText(target)}）`
+}
+
+function targetPartText(target: ChangeTarget): string {
+  return target.kind === 'thread' ? `讨论串「${target.part}」` : partText(target.kind)
+}
+
+function measureText(target: ChangeTarget, before: number, after: number): string {
+  const percent = (value: number) => `${Math.round(value * 100)}%`
+  const count = (value: number) => `${Math.round(value * 10) / 10}`
+  const part = targetPartText(target)
+  switch (target.cause) {
+    case 'failures': return `${part}失败或重做从 ${count(before)} 次降到 ${count(after)} 次`
+    case 'wasted': return `${part}做的活不再被重写`
+    case 'cost': return `${part}占的花费从 ${percent(before)} 降到 ${percent(after)}`
+    case 'time': return `${part}占的时间从 ${percent(before)} 降到 ${percent(after)}`
+    case 'idle': return `${part}排队等的时间从 ${percent(before)} 降到 ${percent(after)}`
+  }
+}
+
+/**
+ * 「已学到」: a kept organization change with what it was judged on, or
+ * `undefined` when the note is not a kept change or carries no measure
+ * (nothing is called learned without a number).
+ */
+export function learnedNote(note: OrganizationChangeNote): { readonly title: string; readonly evidence: string; readonly next?: string } | undefined {
+  if (note.status !== 'kept' || note.measured === undefined) return undefined
+  return {
+    title: `留下了一处分工改动：${actionText(note.action, note.target)}`,
+    evidence: `${measureText(note.target, note.measured.before, note.measured.after)}；以后同类任务组队时照这样做`,
+    ...(note.next === undefined ? {} : { next: changeNowText(note.next.action, note.next.target) }),
+  }
+}
+
 /** Coordinator: the team card's one line on how this organization differs from the last similar task, and why. */
 export function changeNoteText(note: OrganizationChangeNote): string {
-  const now = (action: OrganizationChangeNote['action'], target: ChangeTarget) => `这次比上次改了一处：${actionText(action, target)}（上次${target.kind === 'thread' ? `讨论串「${target.part}」` : partText(target.kind)}${causeText(target)}）`
+  const now = changeNowText
   if (note.status === 'trying') return now(note.action, note.target)
   const verdict = note.status === 'kept' ? `上次的改动变好了，已留下：${actionText(note.action, note.target)}` : '上次的改动没变好，已退回'
   return note.next === undefined ? verdict : `${verdict}；${now(note.next.action, note.next.target)}`

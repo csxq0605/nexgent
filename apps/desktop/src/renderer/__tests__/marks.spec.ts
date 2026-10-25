@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { HistoryItem } from '@nexgent/sdk'
-import { fromHistory, openingMessages, userMarks } from '../src/renderer/timeline.js'
+import { fromHistory, openingMessages, userMarks } from '../timeline.js'
 
 const user = (turn: number, text: string): HistoryItem => ({ kind: 'user', turn, text, source: 'user', materials: [] })
 

@@ -2741,9 +2741,9 @@ button.chip {
   width: calc(100% - 48px);
   max-width: 720px;
   padding: 12px 16px;
-  border: 1px solid transparent;
+  border: 1px solid var(--line);
   border-radius: var(--radius);
-  background: var(--coral-soft);
+  background: var(--raise);
 }
 
 .learning-notice p {
@@ -3081,4 +3081,44 @@ textarea.check-commands {
 
 .turn-change {
   padding: 2px 0 6px;
+}
+
+/* 「已学到」: the one place the signature coral speaks — a kept change with its measured evidence. */
+.learned-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 4px 0 8px;
+  padding: 12px 16px;
+  background: var(--coral-soft);
+  border-radius: var(--radius);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.learned-title {
+  font-weight: 600;
+}
+
+.learned-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-top: 1px;
+  padding: 1px 8px 1px 6px;
+  border-radius: 999px;
+  background: var(--coral);
+  color: var(--on-coral);
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 500;
+}
+
+.learned-badge::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
 }

@@ -328,6 +328,12 @@ export interface OrganizationChangeNote {
   readonly target: OrganizationHotspot
   /** With `kept` / `reverted`: the change tried now, if any. */
   readonly next?: { readonly action: OrganizationChangeAction; readonly target: OrganizationHotspot }
+  /**
+   * With `kept`: what it was judged on, in the target's measure
+   * (`OrganizationHotspot.value`): the median before the change (its
+   * `baseline`) and over the runs that kept it.
+   */
+  readonly measured?: { readonly before: number; readonly after: number }
 }
 
 /** Step 3: what the library says about one class of similar tasks. */

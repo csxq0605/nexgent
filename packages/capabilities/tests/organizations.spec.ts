@@ -287,6 +287,8 @@ describe('coordinator reflection', () => {
       const after = await library.suggest({ text: KEY.join(' '), random: () => 0.9 })
       expect(after.kept?.map(item => item.id)).toEqual([id])
       expect(after.note).toMatchObject({ status: 'kept', action: 'split' })
+      expect(after.note?.measured?.before).toBe(0.6)
+      expect(after.note?.measured?.after).toBeCloseTo(0.35)
       expect((await library.summary())[0]).toMatchObject({ classId: 'c-reflect', changesKept: 1 })
     } finally {
       await rm(dir, { recursive: true, force: true })

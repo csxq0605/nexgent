@@ -277,7 +277,7 @@
 | `workflow.start` | 父会话里 `workflow` 调用开始 | `turn`、`toolCallId`、`workflowId`、`kind: "script" \| "graph"`、`architecture?`、`title?` |
 | `workflow.phase` | 脚本调用 `phase(name)` | `turn`、`workflowId`、`phase` |
 | `workflow.end` | 工作流结束（恢复时补 `interrupted`） | `turn`、`workflowId`、`status`、`members`、`error?` |
-| `organization` | `organize` 调用开始运行一个分工，在它的 `workflow.start` 之前 | `turn`、`toolCallId`、`organizationId`、`name: OrganizationName`、`roles: { name, kind, after }[]`、`workflowId`、`replaces?`（被换掉的上一个分工）、`reason?`（换分工的原因）、`change?`（这一轮第一个分工上的 `OrganizationChangeNote`：`{ status: trying \| kept \| reverted, action, target, next? }`，小组卡据此显示一行） |
+| `organization` | `organize` 调用开始运行一个分工，在它的 `workflow.start` 之前 | `turn`、`toolCallId`、`organizationId`、`name: OrganizationName`、`roles: { name, kind, after }[]`、`workflowId`、`replaces?`（被换掉的上一个分工）、`reason?`（换分工的原因）、`change?`（这一轮第一个分工上的 `OrganizationChangeNote`：`{ status: trying \| kept \| reverted, action, target, next?, measured? }`，小组卡据此显示一行；`measured: { before, after }` 只随 `kept`，是判定所依据的目标值：改动前的中位数与留下它的那几次运行的中位数） |
 | `capability.version` | 会话的能力版本变化：恢复时记录的版本缺失或校验失败（`unavailable`），或打开时装载失败（`load-failure`） | `turn?`、`version`、`previous`、`reason`、`detail?` |
 | `capability.draft` | `capability_draft` 改动草稿区的一个组件后，在该调用的 `tool.result` 之前 | `turn`、`step`、`toolCallId`、`component: { kind, name }`、`files: CapabilityFile[]`、`revision` |
 | `capability.try` | `capability_try` 把草稿组件装进本会话后 | `turn`、`step`、`toolCallId`、`component`、`revision`、`tools?` |

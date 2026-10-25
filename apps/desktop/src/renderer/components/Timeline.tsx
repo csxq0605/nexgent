@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
 import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
-import { T, changeNoteText, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
+import { T, changeNoteText, learnedNote, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
@@ -336,7 +336,20 @@ function EntryView({
         </div>
       )
     case 'change':
-      return <div className="turn-change small muted" data-testid="turn-change">{changeNoteText(entry.change)}</div>
+    {
+      const learned = learnedNote(entry.change)
+      if (learned === undefined) return <div className="turn-change small muted" data-testid="turn-change">{changeNoteText(entry.change)}</div>
+      return (
+        <div className="learned-note" role="note" data-testid="learned-note">
+          <span className="learned-badge">{T.learnedBadge}</span>
+          <div className="grow">
+            <div className="learned-title">{learned.title}</div>
+            <div className="small">{learned.evidence}</div>
+            {learned.next !== undefined && <div className="small muted" data-testid="turn-change">{learned.next}</div>}
+          </div>
+        </div>
+      )
+    }
     case 'turn.end': {
       const text = turnEndText(entry.reason)
       // Rework D3: what the turn cost, quietly under it (nothing when no price is known).

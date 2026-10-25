@@ -1485,6 +1485,24 @@
                       }
                     }
                   }
+                },
+                "measured": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "before",
+                    "after"
+                  ],
+                  "properties": {
+                    "before": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "after": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  }
                 }
               }
             }
@@ -2570,6 +2588,24 @@
                       "minimum": 0
                     }
                   }
+                }
+              }
+            },
+            "measured": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "before",
+                "after"
+              ],
+              "properties": {
+                "before": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "after": {
+                  "type": "number",
+                  "minimum": 0
                 }
               }
             }

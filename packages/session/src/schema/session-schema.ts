@@ -54,6 +54,12 @@ const ORGANIZATION_CHANGE_NOTE: JsonObject = {
       required: ['action', 'target'],
       properties: { action: { enum: [...ORGANIZATION_CHANGE_ACTIONS] }, target: ORGANIZATION_HOTSPOT },
     },
+    measured: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['before', 'after'],
+      properties: { before: { type: 'number', minimum: 0 }, after: { type: 'number', minimum: 0 } },
+    },
   },
 }
 import { evaluateSchema, type EvaluateOptions, type SchemaIssue } from './evaluator.js'
