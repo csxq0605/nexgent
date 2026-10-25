@@ -197,7 +197,7 @@ function createWindow(tokens: TokenRegistry): BrowserWindow {
     title: 'Nexgent',
     show: false,
     // The renderer's --bg in light / dark (styles.css), so the window does not flash white in dark mode.
-    backgroundColor: nativeTheme.shouldUseDarkColors ? '#17181d' : '#fbfbfc',
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#10131c' : '#f6f7fa',
     webPreferences: secureWebPreferences({ preload: preloadPath, token, dev }),
   })
   tokens.register(window.id, token)

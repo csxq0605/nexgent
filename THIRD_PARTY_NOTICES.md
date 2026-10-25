@@ -17,6 +17,8 @@ Nexgent 以 [MIT](LICENSE) 许可发布。本文件列出 Nexgent 使用、参�
 | [`@joplin/turndown-plugin-gfm`](https://www.npmjs.com/package/@joplin/turndown-plugin-gfm) | 1.0.67 | `@nexgent/web`：GitHub 风格表格（npm 依赖） | MIT | Copyright (c) 2017 Dom Christie |
 | [`@anthropic-ai/sandbox-runtime`](https://www.npmjs.com/package/@anthropic-ai/sandbox-runtime) | 0.0.80（钉死） | `@nexgent/workspace`：命令的系统沙箱（Linux bubblewrap、macOS seatbelt），ADR 0022（npm 依赖） | Apache-2.0 | Copyright Anthropic PBC |
 | [PDF.js](https://github.com/mozilla/pdf.js)（打包在 `unpdf` 内） | 6.1.x（随 `unpdf` 1.8.1） | `.pdf` 解析 | Apache-2.0 | Copyright Mozilla Foundation |
+| [Instrument Sans](https://github.com/Instrument/instrument-sans)（经 [`@fontsource-variable/instrument-sans`](https://www.npmjs.com/package/@fontsource-variable/instrument-sans)） | 5.3.0 | 桌面应用的界面字体，随应用打包 | OFL-1.1 | Copyright 2022 The Instrument Sans Project Authors |
+| [JetBrains Mono](https://github.com/JetBrains/JetBrainsMono)（经 [`@fontsource/jetbrains-mono`](https://www.npmjs.com/package/@fontsource/jetbrains-mono)） | 5.3.0 | 桌面应用的等宽字体（代码、路径），随应用打包 | OFL-1.1 | Copyright 2020 The JetBrains Mono Project Authors |
 
 `@deepseek-ai/cordis` 与 `@deepseek-ai/schemastery` 是 DeepSeek 对上游 `cordis` / `schemastery` 的再发布，包内保留上游 LICENSE。
 
@@ -104,3 +106,7 @@ LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING
 NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## SIL Open Font License 1.1
+
+上表中标为 OFL-1.1 的字体（Instrument Sans、JetBrains Mono）按 SIL Open Font License, Version 1.1 授权，全文见 <https://openfontlicense.org/open-font-license-official-text/>，npm 包内也附有 LICENSE。Nexgent 未修改字体文件，只随桌面应用原样打包，不单独出售。
