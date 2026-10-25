@@ -69,7 +69,6 @@ function MemberRow({ entry, readOnly, role, reassignedTo }: { readonly entry: Me
             {version.title} · {T.versionLong(version.version)}
           </button>
         ))}
-        {run.status !== 'running' && run.deliverables.length === 0 && !stuck && run.error === undefined && (role === undefined || !NO_DELIVERABLE_ROLES.has(role)) && <span>{T.memberNoDeliverables}</span>}
         {!readOnly && (
           <button type="button" className="link small" data-testid="open-member" onClick={() => void store.openMember(run.childSessionId, run.name)}>
             {T.openMember}

@@ -112,7 +112,7 @@ describe('能力 → 经验', () => {
     const bridge = new FakeBridge()
     await renderApp(bridge)
     fireEvent.click(screen.getByTestId('nav-capabilities'))
-    expect(await screen.findByTestId('handbook-empty')).toBeTruthy()
+    expect(screen.getByTestId('capabilities-page').textContent).toContain(L.empty)
     expect(screen.getByTestId('capabilities-page').textContent).toContain(L.leadNone)
     // Not acknowledged yet: the card says learning waits for it.
     fireEvent.click(screen.getByTestId('learning-acknowledge'))
@@ -154,7 +154,7 @@ describe('the learning notice', () => {
     emit(bridge, { type: 'turn.start', turn: 1, source: 'user' })
     emit(bridge, { type: 'text.delta', turn: 1, step: 1, text: '好的' })
     const notice = await screen.findByTestId('learning-notice')
-    expect(notice.textContent).toContain('每个项目每 30 天最多花 3.00 美元')
+    expect(notice.textContent).toContain('每 30 天最多 3.00 美元')
     fireEvent.click(within(notice).getByTestId('learning-notice-settings'))
     expect(screen.getByTestId('settings-page')).toBeTruthy()
     fireEvent.click(screen.getByTestId('page-back'))

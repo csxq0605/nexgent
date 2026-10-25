@@ -35,7 +35,7 @@ export function Page({ title, lead, onClose, testId, bar, aside, children }: Pro
           <div className="page-head-row">
             <div className="grow">
               <h2 className="page-title">{title}</h2>
-              {lead !== undefined && <p>{lead}</p>}
+              {lead !== undefined && lead !== '' && <p>{lead}</p>}
             </div>
             <div className="page-head-actions">
               {aside}

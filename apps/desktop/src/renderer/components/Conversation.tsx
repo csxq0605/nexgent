@@ -222,7 +222,6 @@ function MainConversation(): JSX.Element {
         </header>
         <div className="empty">
           <h2>{T.noSessionTitle}</h2>
-          <p className="muted">{T.noSessionBody}</p>
         </div>
         <Drawer />
       </section>
@@ -250,7 +249,6 @@ function MainConversation(): JSX.Element {
       ) : state.timeline.length === 0 ? (
         <div className="empty">
           <h2>{T.emptyConversationTitle}</h2>
-          <p className="muted">{T.emptyConversationBody}</p>
         </div>
       ) : (
         <Timeline entries={state.timeline} deliverables={state.deliverables} onRewind={state.running ? undefined : setRewindTurn} />

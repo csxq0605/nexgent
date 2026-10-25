@@ -40,9 +40,7 @@ export function StartScreen(): JSX.Element {
             <span className="wordmark">{T.appName}</span>
           </div>
           <h1 className="display">{T.tagline}</h1>
-          <p className="start-lead muted">{T.startHint}</p>
         </header>
-        <h2 className="start-title">{T.startTitle}</h2>
         {picker && (
           <div className="start-actions">
             <button type="button" className="primary" onClick={() => void store.pickAndOpenProject(false)} data-testid="pick-directory">
@@ -77,11 +75,9 @@ export function StartScreen(): JSX.Element {
             </div>
           </form>
         </details>
-        <div className="stack">
-          <div className="section-title">{T.recentProjects}</div>
-          {state.recent.length === 0 ? (
-            <p className="muted">{T.noRecent}</p>
-          ) : (
+        {state.recent.length > 0 && (
+          <div className="stack">
+            <div className="section-title">{T.recentProjects}</div>
             <ul className="recent" data-testid="recent-projects">
               {state.recent.map(project => (
                 <li key={project.root}>
@@ -96,9 +92,8 @@ export function StartScreen(): JSX.Element {
                 </li>
               ))}
             </ul>
-          )}
-        </div>
-        {state.appVersion !== undefined && <p className="faint small app-version">v{state.appVersion}</p>}
+          </div>
+        )}
       </div>
     </main>
   )

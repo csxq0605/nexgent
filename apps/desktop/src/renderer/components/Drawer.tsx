@@ -59,7 +59,6 @@ function Materials(): JSX.Element {
         </button>
       </form>
       {invalid && <p className="field-error">{T.pathMustBeAbsolute}</p>}
-      <p className="muted small">{T.dropHint}</p>
     </div>
   )
 }

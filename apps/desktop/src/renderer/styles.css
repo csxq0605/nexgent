@@ -579,12 +579,14 @@ a {
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 96px 16px 32px;
+  padding: 48px 16px;
   background: var(--bg);
 }
 
 .start-card {
   width: min(560px, 100%);
+  /* Centred in the window; a long recent list still scrolls from the top. */
+  margin-block: auto;
   display: flex;
   flex-direction: column;
   gap: 16px;

@@ -308,7 +308,6 @@ export function SettingsPage({ onClose, initialGroup }: { readonly onClose: () =
   return (
     <Page
       title={T.settingsTitle}
-      lead={L.settingsLead}
       onClose={onClose}
       testId="settings-page"
       aside={
