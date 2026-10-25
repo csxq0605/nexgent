@@ -181,6 +181,20 @@ describe('approvals', () => {
     expect(turnEnds(t.events)).toHaveLength(1)
   })
 
+  it('lists a session as not running once its turn.end is out, while the turn still finishes its bookkeeping', async () => {
+    const t = await testSdk([{ content: 'Done.', usage }])
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const session = await t.sdk.call('sessions.create', { projectId: project.projectId })
+    let listed: Promise<readonly { readonly sessionId: string; readonly running: boolean }[]> | undefined
+    t.sdk.subscribe(event => {
+      // Read right when turn.end arrives, as the desktop app does.
+      if (event.type === 'turn.end' && listed === undefined) listed = t.sdk.call('sessions.list', { projectId: project.projectId })
+    })
+    await t.sdk.call('turns.send', { projectId: project.projectId, sessionId: session.sessionId, text: 'go' })
+    await waitForEvent(t, event => event.type === 'turn.end')
+    expect((await listed!).find(item => item.sessionId === session.sessionId)?.running).toBe(false)
+  })
+
   it('accepts an answer given synchronously from the approval.request callback', async () => {
     const t = await testSdk(sensitiveWrite)
     const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })

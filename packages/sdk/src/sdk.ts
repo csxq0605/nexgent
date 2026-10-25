@@ -475,6 +475,16 @@ export class LocalNexgentSdk implements NexgentSdk {
     void done.finally(() => this.titling.delete(job))
   }
 
+  /**
+   * What a session summary says about running: a turn whose `turn.end` was
+   * already emitted is only finishing its bookkeeping, so it is not shown as
+   * running (a list read right after `turn.end` would otherwise keep it so).
+   */
+  private shownRunning(projectId: string, sessionId: string): boolean {
+    const running = this.projects.get(projectId)?.sessions.get(sessionId)?.running
+    return running?.tally.ended === true ? false : this.isRunning(projectId, sessionId)
+  }
+
   /** Whether the session has a running turn in this instance (a member: its parent's tool is running one). */
   isRunning(projectId: string, sessionId: string): boolean {
     const entry = this.projects.get(projectId)?.sessions.get(sessionId)
@@ -805,7 +815,7 @@ export class LocalNexgentSdk implements NexgentSdk {
 
   private async summary(project: ProjectEntry, sessionId: string): Promise<SessionSummary> {
     const records = await this.records(project, sessionId)
-    return this.marked(project, sessionSummary(records, projectSession(records), this.isRunning(project.projectId, sessionId)))
+    return this.marked(project, sessionSummary(records, projectSession(records), this.shownRunning(project.projectId, sessionId)))
   }
 
   /** Every summary of the coordinator conversation carries `coordinator` (the list, open, view and refreshes alike). */
@@ -827,7 +837,7 @@ export class LocalNexgentSdk implements NexgentSdk {
     const commandSandbox = start?.type === 'session.start' ? start.commandSandbox : undefined
     const model = entry?.agent.model ?? state.metadata.model
     return {
-      summary: await this.marked(project, sessionSummary(records, state, this.isRunning(project.projectId, sessionId))),
+      summary: await this.marked(project, sessionSummary(records, state, this.shownRunning(project.projectId, sessionId))),
       sandboxMode: entry?.agent.executionMode ?? state.metadata.sandboxMode,
       plan: entry?.agent.plan ?? state.metadata.plan === true,
       ...(commandSandbox === undefined ? {} : { commandSandbox }),
@@ -845,7 +855,7 @@ export class LocalNexgentSdk implements NexgentSdk {
         // `summary.json` answers while it matches the file; otherwise this reads the file and refreshes it.
         const entry = await readSessionSummary(project.app.ctx.workspace.layout.sessions, sessionId)
         if (entry === undefined) continue
-        summaries.push(summaryOfEntry(entry, this.isRunning(project.projectId, sessionId)))
+        summaries.push(summaryOfEntry(entry, this.shownRunning(project.projectId, sessionId)))
       } catch (error) {
         if (!isNexgentError(error)) throw error
         // an unreadable session is skipped in the list; opening it reports why

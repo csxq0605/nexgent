@@ -102,6 +102,18 @@ describe('threads', () => {
     expect(screen.getByTestId('turn-change').textContent).toBe('这次比上次改了一处：讨论串「docs」的活拆成两个讨论串（上次讨论串「docs」占了 60% 的花费）')
   })
 
+  it('shows a kept change with its measure as a learned notice, and the change tried next under it', async () => {
+    const bridge = new FakeBridge()
+    await renderApp(bridge)
+    const target = { part: 'builder', kind: 'implement' as const, cause: 'cost' as const, value: 0.55 }
+    emit(bridge, { type: 'turn.start', turn: 1, source: 'user', change: { status: 'kept', action: 'split', target, measured: { before: 0.55, after: 0.3 }, next: { action: 'narrow-reading', target: { ...target, part: 'checker', kind: 'review' } } } })
+    emit(bridge, { type: 'member.start', turn: 1, run: memberRun({ name: 'builder', childSessionId: 'm1', executionForm: 'thread' }) })
+    const note = screen.getByTestId('learned-note')
+    expect(note.querySelector('.learned-badge')?.textContent).toBe('已学到')
+    expect(note.textContent).toContain('“实现”占的花费从 55% 降到 30%')
+    expect(within(note).getByTestId('turn-change').textContent).toContain('“审查”只读相关的文件')
+  })
+
   it('keeps a conversation the user creates while the project is still loading, instead of switching to the coordinator', async () => {
     const bridge = new FakeBridge()
     bridge.sessions = [{ ...SESSION, coordinator: true as const }]
