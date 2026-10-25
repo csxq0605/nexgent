@@ -419,7 +419,11 @@ export function SettingsPage({ onClose, initialGroup }: { readonly onClose: () =
                 {capRow('perConversation', L.perConversation, L.perConversationHelp, 'cap-conversation')}
                 {capRow('perProject', L.perProject, L.perProjectHelp(Number(caps.perProject.windowDays) || 30), 'cap-project')}
                 <details className="usage-more" open={hasUsageCaps(settings.costCaps)}>
-                  <summary className="muted small">{L.usageCaps}</summary>
+                  <summary className="muted small">
+                    <Icon name="chevronRight" className="fold-mark closed" />
+                    <Icon name="chevronDown" className="fold-mark opened" />
+                    {L.usageCaps}
+                  </summary>
                   <div className="usage-caps head" aria-hidden="true">
                     <span />
                     <span>{L.maxTokens}</span>
@@ -506,7 +510,8 @@ function Group({ id, children }: { readonly id: (typeof GROUPS)[number]; readonl
       <details className="settings-group folded" id={`settings-${id}`} aria-labelledby={`settings-${id}-title`} data-testid={`settings-group-${id}`}>
         <summary>
           <h3 id={`settings-${id}-title`}>
-            <Icon name="chevronRight" className="fold-mark" />
+            <Icon name="chevronRight" className="fold-mark closed" />
+            <Icon name="chevronDown" className="fold-mark opened" />
             {L.groups[id]}
             <HelpTip text={L.groupHelp[id]} />
           </h3>

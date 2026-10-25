@@ -1080,6 +1080,9 @@ a {
 .empty p {
   margin: 0;
   font-size: 15px;
+  max-width: 36em;
+  /* Wrapped lines come out even: no single character left on the last line. */
+  text-wrap: balance;
 }
 
 .page {
@@ -2710,6 +2713,14 @@ button.chip {
 
 .usage-more summary {
   cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.usage-more summary::-webkit-details-marker {
+  display: none;
 }
 
 .usage-caps {
@@ -3264,20 +3275,17 @@ textarea.check-commands {
   gap: 6px;
 }
 
-.settings-group.folded > summary .fold-mark {
+/* Folded parts of the settings page: a right chevron when closed, a down one when open (two icons, no rotation). */
+.fold-mark {
   color: var(--muted);
-  transition: transform 0.15s ease-out;
 }
 
-.settings-group.folded[open] > summary .fold-mark {
-  transform: rotate(90deg);
+details:not([open]) > summary .fold-mark.opened,
+details[open] > summary .fold-mark.closed {
+  display: none;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .settings-group.folded > summary .fold-mark {
-    transition: none;
-  }
-}
+
 
 .record {
   margin-top: 24px;
