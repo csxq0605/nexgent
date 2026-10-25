@@ -4,6 +4,7 @@ import { useAppState, useAppStore } from '../hooks.js'
 import { T, formatTime, sessionGroup, sessionTitle } from '../strings.js'
 import { useUi, useView } from '../ui.js'
 import { Icon } from './Icon.js'
+import { State } from './State.js'
 
 const GROUPS = [
   { id: 'today', label: T.groupToday },
@@ -81,14 +82,15 @@ export function Sidebar(): JSX.Element {
     )
   }
 
+  // Where a conversation stands, as a dot and its words (nothing when it is idle).
   const dot = (session: SessionSummary): JSX.Element | null => {
     const active = session.sessionId === state.sessionId
-    if (active && state.pendingApprovals.length > 0) return <span className="dot warn" title={T.needsApproval} aria-label={T.needsApproval} />
+    if (active && state.pendingApprovals.length > 0) return <State tone="warn">{T.needsApproval}</State>
     // Coordinator step three: a thread in the background waits for the user to allow something.
-    if (!active && state.threads.some(t => t.threadId === session.sessionId && t.needsApproval === true)) return <span className="dot warn" title={T.needsApproval} aria-label={T.needsApproval} />
-    if (session.running) return <span className="dot run" title={T.running} aria-label={T.running} />
-    if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'waiting')) return <span className="dot warn" title={T.threadWaiting} aria-label={T.threadWaiting} />
-    if (session.interrupted) return <span className="dot" title={T.interrupted} aria-label={T.interrupted} />
+    if (!active && state.threads.some(t => t.threadId === session.sessionId && t.needsApproval === true)) return <State tone="warn">{T.needsApproval}</State>
+    if (session.running) return <State tone="run">{T.running}</State>
+    if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'waiting')) return <State tone="warn">{T.threadWaiting}</State>
+    if (session.interrupted) return <State tone="idle">{T.interrupted}</State>
     return null
   }
 

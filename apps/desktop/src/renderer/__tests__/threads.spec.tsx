@@ -47,7 +47,7 @@ describe('threads', () => {
     emit(bridge, { type: 'approval.request', sessionId: 't1', turn: 1, request: { ...approvalRequest(['once']), sessionId: 't1' } })
     expect(screen.getByTestId('thread-status').textContent).toBe('等你批准')
     expect(screen.getByTestId('thread-approval').textContent).toContain('进入讨论串')
-    expect(within(screen.getByTestId('thread-item')).getByLabelText('等你批准')).toBeTruthy()
+    expect(screen.getByTestId('thread-item').querySelector('.state')?.textContent).toBe('等你批准')
 
     // Answered (in the thread): back to running.
     bridge.threads = [running]
@@ -66,7 +66,7 @@ describe('threads', () => {
     await waitFor(() => expect(screen.getAllByTestId('thread-item')).toHaveLength(1))
     const item = screen.getByTestId('thread-item')
     expect(item.textContent).toContain('Summary')
-    expect(within(item).getByLabelText('等你回复')).toBeTruthy()
+    expect(item.querySelector('.state')?.textContent).toBe('等你回复')
     expect(screen.getAllByTestId('session-item')).toHaveLength(1)
 
     await store.openSession('t1')

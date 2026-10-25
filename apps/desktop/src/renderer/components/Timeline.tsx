@@ -8,6 +8,7 @@ import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import { TeamCard, ThreadCard, WorkflowBlock } from './MemberBlock.js'
 import { ToolBlock, toolSummary } from './ToolBlock.js'
+import { State } from './State.js'
 
 type Entry = TimelineEntry
 type MemberEntry = Extract<Entry, { kind: 'member' }>
@@ -295,8 +296,7 @@ function EntryView({
       if (entry.decision === undefined) return null
       return (
         <div className="approval-note" data-testid="approval-note">
-          <span className={entry.decision.decision === 'allow' ? 'dot ok' : 'dot bad'} aria-hidden="true" />
-          <span>{entry.decision.decision === 'allow' ? T.approvalAllowed : T.approvalDenied}</span>
+          <State tone={entry.decision.decision === 'allow' ? 'ok' : 'bad'}>{entry.decision.decision === 'allow' ? T.approvalAllowed : T.approvalDenied}</State>
           {entry.request.member !== undefined && <span>{entry.request.member.name}</span>}
           <span>
             {toolVerb(entry.request.tool)} · {T.approvalRiskLine(riskText(entry.request.risk))}

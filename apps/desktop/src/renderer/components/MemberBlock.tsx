@@ -3,13 +3,14 @@ import { useAppState, useAppStore } from '../hooks.js'
 import { T, errorText, memberFormText, memberStatusText, organizationText, roleKindText, threadRunState, threadStatusText, usageText } from '../strings.js'
 import type { OrganizationRoleKind } from '@nexgent/kernel'
 import { useUi } from '../ui.js'
+import { State, type Tone } from './State.js'
 
 type MemberEntry = Extract<TimelineEntry, { kind: 'member' }>
 type WorkflowEntry = Extract<TimelineEntry, { kind: 'workflow' }>
 type OrganizationEntry = Extract<TimelineEntry, { kind: 'organization' }>
 
-/** The status dot's colour: running, done, stopped, failed. */
-function dotClass(status: string): string {
+/** A run status's tone: running, done, stopped, failed. */
+function toneOf(status: string): Tone {
   return status === 'running' ? 'run' : status === 'completed' ? 'ok' : status === 'interrupted' || status === 'cancelled' ? 'warn' : 'bad'
 }
 
@@ -38,19 +39,14 @@ function MemberRow({ entry, readOnly, role, reassignedTo }: { readonly entry: Me
   return (
     <div className="member-row" data-testid="member-block" data-member={run.name} data-status={run.status} {...(stuck ? { 'data-stuck': '' } : {})}>
       <div className="member-line">
-        <span className={`dot ${stuck ? 'warn' : dotClass(run.status)}`} aria-hidden="true" />
-        <span className="member-name">{run.name}</span>
-        <span className="member-doing" data-testid="member-doing">
-          {role !== undefined ? roleKindText(role) : (
-            <>
-              {memberFormText(run.executionForm)}
-              {run.preset !== undefined && ` · ${run.preset}`}
-            </>
-          )}
+        <span className="role-label" data-testid="member-doing">
+          {role !== undefined ? roleKindText(role) : memberFormText(run.executionForm)}
         </span>
-        <span className="member-status small" data-testid="member-status">
+        <span className="member-name ellipsis">{run.name}</span>
+        {role === undefined && run.preset !== undefined && <span className="member-preset">{run.preset}</span>}
+        <State tone={stuck ? 'warn' : toneOf(run.status)} testId="member-status">
           {stuck ? T.memberStuck : memberStatusText(run.status)}
-        </span>
+        </State>
       </div>
       {stuck && (
         <div className="member-stuck small wrap" data-testid="member-stuck">
@@ -109,9 +105,15 @@ export function TeamCard({ members, organizations = [], readOnly = false }: {
   return (
     <section className="team-card" data-testid="team-card">
       <header>
-        {T.teamProgress}
+        <span className="team-title">{T.teamProgress}</span>
         {latest !== undefined && <span className="muted small" data-testid="team-organization">{organizationText(latest.name)}</span>}
-        <span className="muted small">{T.teamDone(done, members.length)}</span>
+        <span className="team-count small">
+          {/* The relay bar only shows a measured share: members done of members started. */}
+          <span className="relay" aria-hidden="true">
+            <i style={{ width: `${members.length === 0 ? 0 : Math.round((done / members.length) * 100)}%` }} />
+          </span>
+          <span className="muted">{T.teamDone(done, members.length)}</span>
+        </span>
       </header>
       {organizations.flatMap(o => (o.organization.reason === undefined ? [] : [
         <div key={o.key} className="team-change small" data-testid="team-change">{T.reorganized(o.organization.reason)}</div>,
@@ -130,10 +132,9 @@ export function WorkflowBlock({ entry }: { readonly entry: WorkflowEntry }): JSX
   const { workflow } = entry
   return (
     <div className="workflow-note" data-testid="workflow-block" data-status={workflow.status}>
-      <span className={`dot ${dotClass(workflow.status)}`} aria-hidden="true" />
       <span>{T.workflow}</span>
       {workflow.title !== undefined && <strong className="ellipsis">{workflow.title}</strong>}
-      <span>{memberStatusText(workflow.status)}</span>
+      <State tone={toneOf(workflow.status)}>{memberStatusText(workflow.status)}</State>
       {workflow.phases.length > 0 && (
         <span className="ellipsis">
           {T.workflowPhases}：{workflow.phases.join('，')}
@@ -159,14 +160,13 @@ export function ThreadCard({ entry, readOnly = false }: { readonly entry: Member
   const state = threadRunState(run.status, run.blocker)
   // Coordinator step three: the running thread waits for the user to allow a tool call; the answer is given in the thread.
   const approval = state === 'running' && app.threads.some(t => t.threadId === run.childSessionId && t.needsApproval === true)
-  const dot = approval ? 'warn' : state === 'running' ? 'run' : state === 'done' ? 'ok' : state === 'failed' ? 'bad' : 'warn'
+  const tone: Tone = approval ? 'warn' : state === 'running' ? 'run' : state === 'done' ? 'ok' : state === 'failed' ? 'bad' : state === 'stopped' ? 'idle' : 'warn'
   return (
     <section className="thread-card" data-testid="thread-card" data-thread={run.childSessionId} data-status={approval ? 'approval' : state}>
       <div className="member-line">
-        <span className={`dot ${dot}`} aria-hidden="true" />
-        <span className="small muted">{T.threadLabel}</span>
+        <span className="role-label">{T.threadLabel}</span>
         <span className="member-name ellipsis" data-testid="thread-title">{thread?.thread?.title ?? thread?.title ?? run.name}</span>
-        <span className="member-status small" data-testid="thread-status">{approval ? T.threadApproval : threadStatusText(state)}</span>
+        <State tone={tone} testId="thread-status">{approval ? T.threadApproval : threadStatusText(state)}</State>
       </div>
       {approval && <div className="member-stuck small wrap" data-testid="thread-approval">{T.threadApprovalHint}</div>}
       {state === 'waiting' && run.blocker !== undefined && <div className="member-stuck small wrap" data-testid="thread-ask">{T.threadAsk(run.blocker)}</div>}

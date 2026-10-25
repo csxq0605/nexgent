@@ -7,7 +7,7 @@ import type { ApprovalRequest, CredentialInfo, ErrorInfo, FileChange, GoalStatus
 
 export const T = {
   appName: 'Nexgent',
-  tagline: '把资料交给它，拿回成果',
+  tagline: '一个项目，一支会学习的团队。',
 
   backendUnavailableTitle: '无法连接后端',
   backendUnavailableBody: '界面没有拿到桌面应用主进程的接口。请从 Nexgent 桌面应用启动，或重启应用。',
@@ -25,7 +25,7 @@ export const T = {
   loading: '加载中…',
 
   startTitle: '打开一个项目',
-  startHint: '选一个文件夹，Nexgent 就在里面帮你做事：读你给的资料，把成果交回给你。',
+  startHint: '选一个项目文件夹。Nexgent 在里面把任务拆开、派讨论串去做；做完复盘，记下同类任务上顺利的分工。',
   startMore: '用路径打开或新建',
   recentProjects: '最近的项目',
   noRecent: '还没有打开过项目。',

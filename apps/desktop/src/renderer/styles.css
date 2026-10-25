@@ -387,12 +387,65 @@ a {
   background: var(--ok);
 }
 
+.dot.learned {
+  background: var(--coral);
+}
+
 .dot.warn {
   background: var(--warn);
 }
 
 .dot.bad {
   background: var(--bad);
+}
+
+/* A status: its dot and its words together. */
+.state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  flex: none;
+}
+
+.state::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.state.run {
+  color: var(--fg);
+}
+
+.state.run::before {
+  background: var(--coral);
+  box-shadow: 0 0 0 3px var(--coral-soft);
+}
+
+.state.ok {
+  color: var(--ok);
+}
+
+.state.warn {
+  color: var(--warn);
+}
+
+.state.bad {
+  color: var(--bad);
+}
+
+.state.idle {
+  color: var(--muted);
+}
+
+.state.idle::before {
+  background: var(--faint);
 }
 
 .badge {
@@ -518,7 +571,7 @@ a {
   display: flex;
   justify-content: center;
   align-items: flex-start;
-  padding: 72px 16px 32px;
+  padding: 96px 16px 32px;
   background: var(--bg);
 }
 
@@ -529,23 +582,69 @@ a {
   gap: 16px;
 }
 
+.start-hero {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding-bottom: 8px;
+}
+
 .brand-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
-.brand-row h1 {
-  margin: 0;
-}
-
-.brand-row p {
-  margin: 2px 0 0;
+.wordmark {
+  font-size: 17px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.02em;
 }
 
 .brand-mark {
-  width: 36px;
-  height: 36px;
+  width: 28px;
+  height: 28px;
+}
+
+/* The mark has a dark-surface version; show the one that fits the theme. */
+.brand-mark.on-dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-mark.on-light {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-mark.on-dark {
+  display: inline;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) .brand-mark.on-light {
+    display: none;
+  }
+
+  :root:not([data-theme='light']) .brand-mark.on-dark {
+    display: inline;
+  }
+}
+
+/* The one display line: the brand's promise, set large. */
+.start h1.display {
+  margin: 8px 0 0;
+  font-size: 40px;
+  line-height: 48px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-wrap: balance;
+}
+
+.start .start-title {
+  margin: 8px 0 0;
+  font-size: 15px;
+  line-height: 22px;
+  font-weight: 600;
 }
 
 .brand-mark.small {
@@ -556,7 +655,8 @@ a {
 .start-lead {
   font-size: 15px;
   line-height: 1.7;
-  margin: 8px 0 0;
+  margin: 0;
+  max-width: 480px;
 }
 
 .start-actions {
@@ -650,8 +750,9 @@ a {
 }
 
 .recent-root {
-  color: var(--faint);
-  font-size: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -669,6 +770,9 @@ a {
 
 .app-version {
   margin-top: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
 }
 
 /* --- two columns -------------------------------------------------------------- */
@@ -823,8 +927,10 @@ a {
   font-weight: 500;
 }
 
-.session-item .dot {
+.session-item .state {
   margin-left: auto;
+  font-size: 11px;
+  font-weight: 400;
 }
 
 .session-title {
@@ -1293,6 +1399,18 @@ button.chip {
   gap: 4px;
 }
 
+/* Threads started together read as one list: adjacent cards share their edge. */
+.thread-card + .thread-card {
+  margin-top: -19px;
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+.thread-card:has(+ .thread-card) {
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
 .thread-note {
   text-align: center;
   padding: 2px 0;
@@ -1333,11 +1451,35 @@ button.chip {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding-bottom: 4px;
+}
+
+.team-title {
   font-weight: 600;
 }
 
-.team-card > header .muted {
-  font-weight: 400;
+.team-count {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The relay bar: members done of members started, nothing estimated. */
+.relay {
+  display: inline-block;
+  width: 72px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--line);
+  overflow: hidden;
+}
+
+.relay > i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
 }
 
 .team-change {
@@ -1359,24 +1501,33 @@ button.chip {
 .member-line {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   min-width: 0;
+}
+
+/* Who a row is (讨论串, 实现, 审查 …): a fixed column so the names line up. */
+.role-label {
+  flex: none;
+  width: 52px;
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .member-name {
   font-weight: 500;
-}
-
-.member-doing {
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
   min-width: 0;
-  flex: 1;
 }
 
-.member-line .member-status {
+.member-preset {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.member-line .state {
   margin-left: auto;
 }
 
@@ -1384,13 +1535,13 @@ button.chip {
   display: flex;
   flex-wrap: wrap;
   gap: 4px 12px;
-  padding-left: 17px;
+  padding-left: 64px;
   font-size: 12px;
   color: var(--muted);
 }
 
 .member-stuck {
-  padding-left: 17px;
+  padding-left: 64px;
   color: var(--warn);
   line-height: 1.5;
 }
@@ -1486,10 +1637,12 @@ button.chip {
   color: var(--on-accent);
   display: grid;
   place-items: center;
-  font-size: 12px;
-  font-weight: 600;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
   flex: none;
-  letter-spacing: -0.02em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .file-badge::after {
@@ -1966,7 +2119,10 @@ button.chip {
 }
 
 .version-pill {
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
   padding: 1px 8px;
   border-radius: 999px;
   color: var(--muted);

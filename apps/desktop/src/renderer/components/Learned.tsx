@@ -240,7 +240,8 @@ function EntryRow({ entry }: { readonly entry: HandbookEntryView }): JSX.Element
   const state = useAppState()
   const store = useAppStore()
   const detail = state.handbookDetail?.entry.id === entry.id ? state.handbookDetail : undefined
-  const dot = entry.status === 'active' ? 'ok' : entry.status === 'trial' ? 'run' : ''
+  // Coral marks what was learned and kept (在用); a practice on trial is not running, so it stays quiet.
+  const dot = entry.status === 'active' ? 'learned' : ''
   return (
     <li className="entry" data-testid="handbook-entry" data-entry={entry.id} data-status={entry.status}>
       <span className={`dot ${dot}`} aria-hidden="true" />
@@ -270,7 +271,7 @@ function RuleRow({ entry }: { readonly entry: HandbookEntryView }): JSX.Element 
   const store = useAppStore()
   return (
     <li className="entry" data-testid="handbook-rule" data-entry={entry.id} data-pending={entry.pending === true ? 'true' : 'false'}>
-      <span className={`dot ${entry.pending === true ? 'run' : 'ok'}`} aria-hidden="true" />
+      <span className={`dot ${entry.pending === true ? 'warn' : 'ok'}`} aria-hidden="true" />
       <div className="grow">
         <span className="entry-text">{entry.text}</span>
         <div className="muted small">{L.ruleMeta(entry.appliesTo, dayText(entry.createdAt))}</div>
