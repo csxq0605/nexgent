@@ -12,9 +12,17 @@ import { RewindDialog } from './RewindDialog.js'
 import { Timeline } from './Timeline.js'
 
 /** The conversation's title; the pencil turns it into a field (Enter saves, Esc cancels). */
-function Title({ sessionId, title, initial }: { readonly sessionId: string; readonly title: string; readonly initial: string }): JSX.Element {
+function Title({ sessionId, title, initial, fixed = false }: { readonly sessionId: string; readonly title: string; readonly initial: string; readonly fixed?: boolean }): JSX.Element {
   const store = useAppStore()
   const [draft, setDraft] = useState<string | undefined>(undefined)
+  // The project's coordinator conversation is always 总对话, as in the sidebar.
+  if (fixed) {
+    return (
+      <h2 className="ellipsis" data-testid="session-title" title={title}>
+        {title}
+      </h2>
+    )
+  }
   if (draft === undefined) {
     return (
       <>
@@ -228,7 +236,8 @@ function MainConversation(): JSX.Element {
           key={state.sessionId}
           sessionId={state.sessionId}
           initial={session?.title ?? ''}
-          title={sessionTitle(session === undefined ? undefined : { ...session, ...(state.goal === null ? {} : { goal: state.goal }) }, first?.kind === 'user' ? first.text : undefined)}
+          fixed={session?.coordinator === true}
+          title={session?.coordinator === true ? T.coordinatorConversation : sessionTitle(session === undefined ? undefined : { ...session, ...(state.goal === null ? {} : { goal: state.goal }) }, first?.kind === 'user' ? first.text : undefined)}
         />
         <GoalLine key={`goal:${state.sessionId}`} />
         <span className="grow" />

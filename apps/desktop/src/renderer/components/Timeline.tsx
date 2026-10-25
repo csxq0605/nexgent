@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
+import { useAppState } from '../hooks.js'
 import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
 import { T, changeNoteText, learnedNote, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
@@ -210,6 +211,28 @@ function turnFiles(entries: readonly Entry[]): { readonly changes: Map<number, F
   return { changes: new Map([...byPath].map(([turn, map]) => [turn, [...map.values()]])), lastCard }
 }
 
+/**
+ * A message's materials. A message sent here carries their names; one read back from the
+ * session's history carries their ids, so ids are looked up among the project's materials.
+ */
+function MaterialChips({ materials }: { readonly materials: readonly string[] }): JSX.Element {
+  const known = useAppState().materials
+  return (
+    <div className="chips">
+      {materials.map(ref => {
+        const name = known.find(m => m.id === ref)?.originalName ?? (MATERIAL_ID.test(ref) ? T.materialGone : ref)
+        return (
+          <span key={ref} className="chip" title={name}>
+            <span className="ellipsis">@{name}</span>
+          </span>
+        )
+      })}
+    </div>
+  )
+}
+
+const MATERIAL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
 function EntryView({
   entry,
   deliverables,
@@ -261,15 +284,7 @@ function EntryView({
               </div>
             )}
             <p className="text">{entry.text}</p>
-            {entry.materials.length > 0 && (
-              <div className="chips">
-                {entry.materials.map(name => (
-                  <span key={name} className="chip">
-                    @{name}
-                  </span>
-                ))}
-              </div>
-            )}
+            {entry.materials.length > 0 && <MaterialChips materials={entry.materials} />}
           </div>
           {onRewind !== undefined && (
             <button type="button" className="link small msg-action" title={T.rewindActionTitle} onClick={() => onRewind(entry.turn)} data-testid="rewind-open">

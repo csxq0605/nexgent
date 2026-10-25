@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { SessionSummary } from '@nexgent/sdk'
 import { useAppState, useAppStore } from '../hooks.js'
 import { T, formatTime, sessionGroup, sessionTitle } from '../strings.js'
@@ -19,6 +19,24 @@ export function Sidebar(): JSX.Element {
   const ui = useUi()
   const { view } = useView()
   const [switching, setSwitching] = useState(false)
+  const switcher = useRef<HTMLDivElement>(null)
+  // The project menu closes on Escape, on a click anywhere outside it, and when the view changes.
+  useEffect(() => {
+    if (!switching) return undefined
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setSwitching(false)
+    }
+    const onPointer = (event: PointerEvent): void => {
+      if (switcher.current !== null && !switcher.current.contains(event.target as Node)) setSwitching(false)
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('pointerdown', onPointer, true)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('pointerdown', onPointer, true)
+    }
+  }, [switching])
+  useEffect(() => setSwitching(false), [view, state.sessionId])
   const project = state.project
   const others = state.recent.filter(p => p.root !== project?.root && p.exists)
   const firstMessage = state.timeline.find(entry => entry.kind === 'user')
@@ -96,7 +114,7 @@ export function Sidebar(): JSX.Element {
 
   return (
     <aside className="sidebar" data-testid="sidebar">
-      <div className="project-switcher">
+      <div className="project-switcher" ref={switcher}>
         <button
           type="button"
           className="nav-item project-button"

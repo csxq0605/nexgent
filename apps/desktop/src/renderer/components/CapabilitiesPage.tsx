@@ -2,6 +2,7 @@ import { useAppState } from '../hooks.js'
 import { L } from '../strings.js'
 import { useUi } from '../ui.js'
 import { hasPendingRules, InUseList, LearningCard, learnedLead, organizationLead, PendingRules, RulesList, useLearningRefresh } from './Learned.js'
+import { Icon } from './Icon.js'
 import { Page } from './Page.js'
 import { T } from '../strings.js'
 
@@ -31,9 +32,12 @@ export function CapabilitiesPage(): JSX.Element {
         <RulesList />
         <InUseList />
         <details className="entry-group folded record" data-testid="capabilities-record">
-          <summary className="group-title">{L.recordTitle}</summary>
+          <summary className="group-title">
+            <FoldMarks />
+            {L.recordTitle}
+          </summary>
           <RecordPart title={L.recordLearning} testId="record-learning">
-            {state.learning !== undefined && <LearningCard learning={state.learning} />}
+            {state.learning !== undefined ? <LearningCard learning={state.learning} /> : <p className="muted small record-empty">{L.recordNone}</p>}
           </RecordPart>
         </details>
       </div>
@@ -41,10 +45,21 @@ export function CapabilitiesPage(): JSX.Element {
   )
 }
 
+/** A right chevron while folded, a down one when open. */
+function FoldMarks(): JSX.Element {
+  return (
+    <>
+      <Icon name="chevronRight" className="fold-mark closed" />
+      <Icon name="chevronDown" className="fold-mark opened" />
+    </>
+  )
+}
+
 function RecordPart({ title, help, open, testId, children }: { readonly title: string; readonly help?: string; readonly open?: boolean; readonly testId: string; readonly children: JSX.Element | null | false | undefined | readonly (JSX.Element | null | false | undefined)[] }): JSX.Element {
   return (
     <details className="record-part" open={open} data-testid={testId}>
       <summary className="small">
+        <FoldMarks />
         {title}
         {help !== undefined && (
           <span className="help-tip" title={help} aria-label={help}>
