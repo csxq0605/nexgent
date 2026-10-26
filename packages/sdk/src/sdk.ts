@@ -592,6 +592,18 @@ export class LocalNexgentSdk implements NexgentSdk {
     }
   }
 
+  /**
+   * A thread the coordinator gives work to while the coordinator is in plan
+   * mode works in plan mode too, so nothing changes before the user approves
+   * a plan (the thread's own `exit_plan`).
+   */
+  private async followCoordinatorPlan(project: ProjectEntry, threadSessionId: string): Promise<void> {
+    const thread = (await this.rootSession(project, threadSessionId)).agent
+    const coordinatorSessionId = thread.thread?.coordinatorSessionId
+    if (coordinatorSessionId === undefined || thread.plan) return
+    if (project.sessions.get(coordinatorSessionId)?.agent.plan === true) await thread.setMode({ plan: true })
+  }
+
   /** Coordinator step two: what the project's thread host needs from the SDK. */
   private threadRuntime(ref: () => ProjectEntry | undefined): ThreadRuntime {
     const project = (): ProjectEntry => {
@@ -602,8 +614,10 @@ export class LocalNexgentSdk implements NexgentSdk {
     return {
       create: async ({ title, thread }) => {
         const entry = project()
-        const sandboxMode = entry.sessions.get(thread.coordinatorSessionId)?.agent.executionMode
-        const agent = await entry.app.agents.create({ title, thread, ...(sandboxMode === undefined ? {} : { sandboxMode }) })
+        const coordinator = entry.sessions.get(thread.coordinatorSessionId)?.agent
+        const sandboxMode = coordinator?.executionMode
+        // A coordinator still in plan mode gives its threads plan mode too: they change nothing until a plan is approved.
+        const agent = await entry.app.agents.create({ title, thread, ...(sandboxMode === undefined ? {} : { sandboxMode }), ...(coordinator?.plan === true ? { plan: true } : {}) })
         this.track(entry, agent)
         return agent.sessionId
       },
@@ -616,13 +630,16 @@ export class LocalNexgentSdk implements NexgentSdk {
         await entry.agent.appendHostRecord(record)
       },
       startTurn: async (sessionId, text, materialIds) => {
+        await this.followCoordinatorPlan(project(), sessionId)
         const started = await this.startTurn({ source: 'thread', projectId: project().projectId, sessionId, text, ...(materialIds === undefined ? {} : { materialIds }) })
         return { turn: started.turn, done: started.done }
       },
       steer: async (sessionId, text) => {
         const entry = await this.rootSession(project(), sessionId)
         const running = entry.running
-        return running !== undefined && !running.tally.ended && entry.agent.steer(text, { source: 'thread' })
+        if (running === undefined || running.tally.ended) return false
+        await this.followCoordinatorPlan(project(), sessionId)
+        return entry.agent.steer(text, { source: 'thread' })
       },
       running: sessionId => this.isRunning(project().projectId, sessionId),
       turnDone: async (sessionId, turn) => {

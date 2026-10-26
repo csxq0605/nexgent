@@ -12,8 +12,13 @@
  *   tree once (`lstat` only, `.gitignore` honoured, never descending into
  *   ignored directories) and reports files whose mtime or ctime is at or
  *   after the turn start. Such a file is `added` when its birth time is at or
- *   after the start (less the clock-skew allowance) (file systems without a birth time report `modified`),
- *   otherwise `modified`. A shell-made deletion is only found when a baseline
+ *   after the start (file systems without a birth time report `modified`),
+ *   otherwise `modified`. The turn start is taken on the file system's own
+ *   clock too: `beginTurn` writes {@link TURN_CLOCK_FILE} in the project's
+ *   data directory and reads its modification time, since file times can
+ *   lag the wall clock by more than a few milliseconds (coarse kernel
+ *   clocks, file systems that store whole seconds); the earlier of the two,
+ *   less {@link CLOCK_SKEW_MS}, is the start. A shell-made deletion is only found when a baseline
  *   is available: a path of the baseline that the complete walk no longer
  *   finds.
  *
@@ -24,9 +29,9 @@
  * reported goes to every session whose shell tool ran in the window, and to
  * nobody when none did.
  */
-import { lstat } from 'node:fs/promises'
+import { lstat, stat, writeFile } from 'node:fs/promises'
 import * as nodePath from 'node:path'
-import { isInsideRoot, toPortablePath, type FileChange, type ToolCallObservation, type TurnFileTracker } from '@nexgent/kernel'
+import { isInsideRoot, NEXGENT_DIR, toPortablePath, type FileChange, type ToolCallObservation, type TurnFileTracker } from '@nexgent/kernel'
 import { realpathNative } from './files-util.js'
 import { walkProject } from './project-walk.js'
 import { isInDataDir } from './project-paths.js'
@@ -43,8 +48,11 @@ export const SHELL_TOOL_NAMES: readonly string[] = ['bash', 'pwsh', 'run_code']
 /** Default cap on entries one scan records; beyond it the scan reports itself incomplete. */
 export const DEFAULT_SCAN_LIMIT = 200_000
 
-/** Timestamps up to this far before the turn start still count (coarse file-system clocks). */
+/** Timestamps up to this far before the turn start still count (on top of reading the file system's clock at the start). */
 export const CLOCK_SKEW_MS = 5
+
+/** Written at each turn start to read the file system's clock (in the project's data directory, which the tracker never reports). */
+export const TURN_CLOCK_FILE = `${NEXGENT_DIR}/turn-clock`
 
 /** Options of {@link LocalTurnFileTracker}. */
 export interface LocalTurnFileTrackerOptions {
@@ -71,6 +79,8 @@ interface Touch {
 interface OpenTurn {
   readonly sessionId: string
   readonly startedAtMs: number
+  /** File times at or after this count as the turn's: the turn start on the earlier of the wall clock and the file system's clock, less {@link CLOCK_SKEW_MS}. */
+  readonly sinceMs: number
   readonly baseline: ReadonlySet<string> | undefined
   /** Portable paths this session's write tools reported. */
   readonly touched: Map<string, Touch>
@@ -114,7 +124,22 @@ export class LocalTurnFileTracker implements TurnFileTracker {
     } catch {
       baseline = undefined
     }
-    this.turns.set(key(sessionId, turn), { sessionId, startedAtMs: this.clock(), baseline, touched: new Map(), shell: false })
+    const startedAtMs = this.clock()
+    const fileClock = await this.fileClock()
+    const sinceMs = Math.min(startedAtMs, fileClock ?? startedAtMs) - CLOCK_SKEW_MS
+    this.turns.set(key(sessionId, turn), { sessionId, startedAtMs, sinceMs, baseline, touched: new Map(), shell: false })
+  }
+
+  /** The file system's clock now: the modification time of {@link TURN_CLOCK_FILE} just written (`undefined` when it cannot be written, e.g. no data directory). */
+  private async fileClock(): Promise<number | undefined> {
+    const root = (await this.realRootPath()) ?? this.root
+    const file = nodePath.join(root, ...TURN_CLOCK_FILE.split('/'))
+    try {
+      await writeFile(file, '')
+      return (await stat(file)).mtimeMs
+    } catch {
+      return undefined
+    }
   }
 
   observe(observation: ToolCallObservation): void {
@@ -148,7 +173,7 @@ export class LocalTurnFileTracker implements TurnFileTracker {
         continue
       }
       const path = await this.canonical(reported)
-      changes.set(path, touch.created || (stat.birthtimeMs > 0 && stat.birthtimeMs >= open.startedAtMs - CLOCK_SKEW_MS) ? 'added' : 'modified')
+      changes.set(path, touch.created || (stat.birthtimeMs > 0 && stat.birthtimeMs >= open.sinceMs) ? 'added' : 'modified')
     }
 
     if (open.shell && signal?.aborted !== true) await this.scanShellChanges(open, changes, signal)
@@ -168,7 +193,7 @@ export class LocalTurnFileTracker implements TurnFileTracker {
   private async scanShellChanges(open: OpenTurn, changes: Map<string, FileChange['change']>, signal: AbortSignal | undefined): Promise<void> {
     const root = await this.realRootPath()
     if (root === undefined) return
-    const since = open.startedAtMs - CLOCK_SKEW_MS
+    const since = open.sinceMs
     const reportedByOthers = (path: string): boolean => {
       const owner = this.owners.get(path)
       return owner !== undefined && owner.sessionId !== open.sessionId && owner.at >= since
@@ -191,8 +216,8 @@ export class LocalTurnFileTracker implements TurnFileTracker {
   /** Drop owner entries no open turn could still need. */
   private pruneOwners(): void {
     let oldest = Number.POSITIVE_INFINITY
-    for (const open of this.turns.values()) oldest = Math.min(oldest, open.startedAtMs)
-    const floor = oldest - CLOCK_SKEW_MS
+    for (const open of this.turns.values()) oldest = Math.min(oldest, open.sinceMs)
+    const floor = oldest
     for (const [path, owner] of this.owners) if (owner.at < floor) this.owners.delete(path)
   }
 

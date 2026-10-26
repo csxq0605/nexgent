@@ -32,8 +32,10 @@ export interface TaskRun {
   readonly toTurn: number
   /** First turn not seen by an earlier reflection (the record still shows the turns before it, for context). */
   readonly newFromTurn: number
-  /** The first user message of the session (the task). */
+  /** The first user message of the session (the task); in a thread, the first message its coordinator gave it. */
   readonly task: string
+  /** The task came from the thread's coordinator, not from the user's own words. */
+  readonly taskFromThread?: true
   /** User messages of the turns read (feedback prompts included), in order. */
   readonly messages: readonly { readonly turn: number; readonly source: string; readonly text: string }[]
   /** One line per tool call. */
@@ -66,7 +68,9 @@ function oneLine(text: string): string {
 export function taskRunOf(records: readonly SessionRecord[], fromTurn: number, toTurn: number, newFromTurn = fromTurn): TaskRun {
   const start = records.find(record => record.type === 'session.start')
   const isRootTask = start !== undefined && start.type === 'session.start' && start.parentSessionId === undefined
-  const firstUser = records.find(record => record.type === 'user.message' && record.source === 'user')
+  // The task: the user's first message; in a thread, the first message its coordinator gave it.
+  const isThread = start !== undefined && start.type === 'session.start' && start.thread !== undefined
+  const firstUser = records.find(record => record.type === 'user.message' && (record.source === 'user' || (isThread && record.source === 'thread')))
   const inRange = (turn: number) => turn >= fromTurn && turn <= toTurn
   const messages: { turn: number; source: string; text: string }[] = []
   const steps: string[] = []
@@ -134,6 +138,7 @@ export function taskRunOf(records: readonly SessionRecord[], fromTurn: number, t
     toTurn,
     newFromTurn,
     task: firstUser !== undefined && firstUser.type === 'user.message' ? firstUser.content : '',
+    ...(firstUser !== undefined && firstUser.type === 'user.message' && firstUser.source === 'thread' ? { taskFromThread: true as const } : {}),
     messages,
     steps: kept,
     toolCalls,
@@ -159,7 +164,7 @@ export async function readTaskRun(sessions: Pick<SessionStore, 'readAll'>, sessi
 export function renderTaskRun(run: TaskRun): string {
   const parts: string[] = []
   parts.push(`## Task (first user message)\n${clipText(run.task, RUN_RECORD_LIMITS.maxMessageChars)}`)
-  const later = run.messages.filter(message => !(message.turn === 1 && message.source === 'user' && message.text === clipText(run.task, RUN_RECORD_LIMITS.maxMessageChars)))
+  const later = run.messages.filter(message => !(message.turn === 1 && (message.source === 'user' || message.source === 'thread') && message.text === clipText(run.task, RUN_RECORD_LIMITS.maxMessageChars)))
   if (run.newFromTurn > run.fromTurn) parts.push(`## Turns ${run.newFromTurn}–${run.toTurn} are new since the last reflection on this task; earlier turns are shown for context.`)
   if (later.length > 0) parts.push(`## Messages of turns ${run.fromTurn}–${run.toTurn}\n${later.map(message => `- turn ${message.turn} (${message.source}): ${message.text}`).join('\n')}`)
   if (run.feedback.length > 0) parts.push(`## User feedback\n${run.feedback.map(entry => `- ${entry.rating === undefined ? 'no rating' : `rating ${entry.rating}/5`}: ${clipText(oneLine(entry.comment), 600)}`).join('\n')}`)

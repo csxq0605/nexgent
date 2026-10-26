@@ -6,6 +6,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   asContext,
+  relayedCoordinatorNote,
   relayedUserNote,
   renderCompactionSummary,
   pickUserWords,
@@ -159,6 +160,45 @@ describe('messages sent while a turn runs', () => {
     expect(store.of(members[0]!.sessionId, 'user.message').filter(record => record.source === 'inject')).toHaveLength(1)
     expect(conversation(llm.requests[4]!).at(-1)).toEqual({ role: 'user', content: 'use metric units' })
     await root.close()
+  })
+
+  it('in a thread, the coordinator\'s message reaches the member working now and one that starts after it', async () => {
+    let thread: Agent | undefined
+    harness = await bootHarness({
+      script: [
+        toolCallReply('c1', 'pair', {}),
+        during(() => thread!.steer('use metric units', { source: 'thread' }), textReply('measured')),
+        textReply('measured in metres'),
+        textReply('checked in metres'),
+        textReply('done'),
+      ],
+    })
+    const { app, llm, store } = harness
+    const members: Agent[] = []
+    app.ctx.tools.register({
+      definition: { name: 'pair', description: 'Two members, one after the other.', inputSchema: { type: 'object', properties: {} }, effects: ['read'], approval: 'never' },
+      handler: async (_input, context) => {
+        const ctx = context as KernelToolContext
+        for (const [name, task] of [['measurer', 'measure the room'], ['checker', 'check the measures']] as const) {
+          const member = await app.agents.create({ child: { parentSessionId: ctx.sessionId, member: { name, executionForm: 'delegated' } } })
+          members.push(member)
+          await member.run(task, { signal: context.signal })
+          await member.close()
+        }
+        return { content: 'both done' }
+      },
+    })
+    thread = await app.agents.create({ thread: { coordinatorSessionId: 'coordinator-session', title: 'Measurements' } })
+    await thread.run({ source: 'thread', text: 'plan the room' })
+    const note = relayedCoordinatorNote('use metric units')
+    // The member working when the message came gets it with its next request.
+    expect(conversation(llm.requests[2]!).at(-1)).toEqual({ role: 'user', content: note })
+    expect(store.of(members[0]!.sessionId, 'user.message').filter(record => record.source === 'inject')).toEqual([expect.objectContaining({ content: note })])
+    // The member started after it was briefed without it: its first request carries it.
+    expect(conversation(llm.requests[3]!).slice(-2)).toEqual([{ role: 'user', content: 'check the measures' }, { role: 'user', content: note }])
+    // The thread itself reads it as the coordinator's message.
+    expect(store.of(thread.sessionId, 'user.message').at(-1)).toMatchObject({ source: 'thread', content: 'use metric units' })
+    await thread.close()
   })
 })
 

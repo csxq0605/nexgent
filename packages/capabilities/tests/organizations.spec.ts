@@ -63,6 +63,30 @@ describe('organization library', () => {
     expect(suggestOrganization(['typo', 'readme', 'title'], runs, () => 0.9).classId).not.toBe('c1')
   })
 
+  it('does not count a run still waiting for its threads, or one whose thread run failed, as gone well', async () => {
+    const at = '2026-10-19T00:00:01.000Z'
+    const runs = foldOrganizationLog([
+      { type: 'run', ...run({ sessionId: 'waiting', waiting: true }) },
+      { type: 'run', ...run({ sessionId: 'failed', waiting: true }) },
+      { type: 'run', ...run({ sessionId: 'done', waiting: true }) },
+      { type: 'profile', sessionId: 'failed', turn: 1, profile: profile(0.5), completed: false, at },
+      { type: 'profile', sessionId: 'done', turn: 1, profile: profile(0.5), at },
+    ])
+    expect(runs.map(r => [r.sessionId, wentWell(r)])).toEqual([['waiting', false], ['failed', false], ['done', true]])
+    const dir = await mkdtemp(join(tmpdir(), 'org-threads-'))
+    try {
+      const library = new OrganizationLibrary(dir)
+      const { id: _id, at: _at, reworked: _reworked, ...recorded } = run({ sessionId: 's-threads', waiting: true })
+      await library.record(recorded)
+      await library.noteProfile({ sessionId: 's-threads', turn: 1, profile: profile(0.5), completed: false })
+      const [stored] = await library.runs()
+      expect(stored).toMatchObject({ completed: false })
+      expect(wentWell(stored!)).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
   it('takes an external review of a run with no other signal: a low score means it did not go well', async () => {
     const runs = foldOrganizationLog([
       { type: 'run', ...run({ sessionId: 'a', turn: 1 }) },

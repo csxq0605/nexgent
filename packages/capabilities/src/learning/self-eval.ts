@@ -302,8 +302,10 @@ function taskView(records: readonly SessionRecord[], turn: number): Omit<TaskVie
   let answer = ''
   const feedbackIds: string[] = []
   let rating: 1 | 2 | 3 | 4 | 5 | undefined
+  // A thread's task and later instructions come from its coordinator.
+  const asked = (source: string) => source === 'user' || source === 'feedback' || (start.thread !== undefined && source === 'thread')
   for (const record of records) {
-    if (record.type === 'user.message' && record.turn <= turn && (record.source === 'user' || record.source === 'feedback')) messages.push(record.content)
+    if (record.type === 'user.message' && record.turn <= turn && asked(record.source)) messages.push(record.content)
     else if (record.type === 'user.message' && record.turn <= turn && record.source === 'inject') rules.push(...givenRules(record.content))
     else if (record.type === 'assistant.message' && record.turn <= turn && record.content.trim() !== '') answer = record.content
     else if (record.type === 'feedback') {

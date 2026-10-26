@@ -110,4 +110,25 @@ describe('member workdirs (rework K4 D4)', () => {
     expect(await new LocalMemberWorkdirs(p.root, { base }).open({ sessionId: A, sandboxMode: 'read-only' })).toBeUndefined()
     expect(await new LocalMemberWorkdirs(p.root, { base, maxFiles: 1 }).open({ sessionId: A, sandboxMode: 'workspace-write' })).toBeUndefined()
   })
+
+  it('keeps a resumed session\'s copy with its unmerged changes, and the next merge brings them in', async () => {
+    const p = await project()
+    await p.write('file.txt', 'original\n')
+    const base = await tempDir('nxwd-')
+    const first = (await new LocalMemberWorkdirs(p.root, { base }).open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    // A turn that failed (or a process that stopped) left this change unmerged.
+    await writeFile(nodePath.join(first.root, 'file.txt'), 'unfinished edit\n')
+    await first.close()
+    expect(existsSync(nodePath.join(first.root, 'file.txt'))).toBe(true)
+    // The session is opened again, as after a restart.
+    const second = (await new LocalMemberWorkdirs(p.root, { base }).open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    expect(second.root).toBe(first.root)
+    expect(await readFile(nodePath.join(second.root, 'file.txt'), 'utf8')).toBe('unfinished edit\n')
+    expect(await readFile(p.abs('file.txt'), 'utf8')).toBe('original\n')
+    expect(await second.merge()).toMatchObject({ applied: ['file.txt'], conflicts: [] })
+    expect(await readFile(p.abs('file.txt'), 'utf8')).toBe('unfinished edit\n')
+    // Nothing is left unmerged: closing removes the copy.
+    await second.close()
+    expect(existsSync(second.root)).toBe(false)
+  })
 })

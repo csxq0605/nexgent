@@ -34,8 +34,10 @@ import {
   projectNames,
   quotedRequests,
   readLearningQueue,
+  renderTaskRun,
   revertedTasks,
   taskOutcome,
+  taskRunOf,
   tokenize,
   type CurationContext,
 } from '../src/index.js'
@@ -316,6 +318,13 @@ describe('project rules (ADR 0024)', () => {
     ])
   })
 
+  it('does not take a coordinator\'s wording in a thread as the user\'s: the rule waits for the user', () => {
+    const requests = ['以后所有接口一律返回整数分。']
+    const rule = { op: 'rule' as const, text: '接口返回金额用整数分。', confirmed: true, supersedes: [] }
+    expect(curateReflection([rule], base({ requests })).changes).toEqual([expect.objectContaining({ kind: 'rule', status: 'active' })])
+    expect(curateReflection([rule], base({ requests, ruleRequests: [] })).changes).toEqual([expect.objectContaining({ kind: 'rule', status: 'trial', pending: true })])
+  })
+
   it('lets a rule keep the file pattern the user named', () => {
     const named = 'Every new function needs its own test file test/<name>.test.mjs (here test/quote.test.mjs), and node --test must pass.'
     const result = curateReflection([
@@ -553,5 +562,20 @@ describe('layer-1 learning, scripted end to end', () => {
     // The later reflection still sees the earlier turns, marked as context.
     expect(s.requests[1]!.request.messages[1]!.content).toContain('Turns 3–3 are new since the last reflection')
     expect(s.requests[1]!.request.messages[1]!.content).toContain('Add the upgrade steps')
+  })
+})
+
+describe('run record of a thread (coordinator step two)', () => {
+  it('takes the coordinator\'s first message to a thread as its task, but not a wake note in the coordinator', () => {
+    const asThread = (records: SessionRecord[], thread: boolean) => records.map(record => {
+      if (record.type === 'session.start') return (thread ? { ...record, thread: { coordinatorSessionId: 'coordinator', title: 'Part' } } : record) as SessionRecord
+      return (record.type === 'user.message' ? { ...record, source: 'thread' } : record) as SessionRecord
+    })
+    const records = sessionRecords('t1', [{ text: 'Rename the helpers in src/util.' }])
+    const run = taskRunOf(asThread(records, true), 1, 1)
+    expect(run.task).toBe('Rename the helpers in src/util.')
+    expect(run.taskFromThread).toBe(true)
+    expect(renderTaskRun(run)).not.toContain('## Messages of turns')
+    expect(taskRunOf(asThread(records, false), 1, 1).task).toBe('')
   })
 })

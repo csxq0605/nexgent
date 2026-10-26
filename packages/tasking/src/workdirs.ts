@@ -27,14 +27,21 @@
  * copy (`open({ from })`): it is made from it and merges back into it; the
  * thread merges into the project at the end of its own turn.
  *
+ * The copy's base (which content each file had when the copy was last in
+ * sync) is saved in the copy's own `.nexgent/workdir-base.json` (the walk
+ * skips the root `.nexgent/`, so it is never merged). Opening the same
+ * session again (a resumed thread or member) keeps the copy as it is, with
+ * changes a stopped or failed turn left unmerged, and the next merge brings
+ * them in. Closing removes the copy only when it holds no unmerged change.
+ *
  * Symbolic links are copied as links (not on Windows) and never merged.
  */
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import type { MemberWorkdir, MemberWorkdirs, SandboxMode, WorkdirConflict, WorkdirMerge } from '@nexgent/kernel'
-import { MEMBER_WORKDIRS_DIR } from '@nexgent/kernel'
+import { MEMBER_WORKDIRS_DIR, NEXGENT_DIR } from '@nexgent/kernel'
 import { isNotFound } from './files-util.js'
 import { mergeText } from './merge3.js'
 import { walkProject } from './project-walk.js'
@@ -57,6 +64,9 @@ export interface LocalMemberWorkdirsOptions {
   readonly maxBytes?: number
   readonly maxFiles?: number
 }
+
+/** Where a copy keeps its base, relative to the copy's root (inside the root `.nexgent/`, which the walk skips). */
+export const WORKDIR_BASE_FILE = `${NEXGENT_DIR}/workdir-base.json`
 
 /** A file's content as compared: its hash and executable bit. */
 interface FileState {
@@ -181,11 +191,13 @@ export class LocalMemberWorkdirs implements MemberWorkdirs {
     if (!complete || files.length > this.options.maxFiles) return undefined
     if (files.reduce((sum, file) => sum + (file.symlink ? 0 : file.size), 0) > this.options.maxBytes) return undefined
     const root = nodePath.join(home, input.sessionId)
-    await rm(root, { recursive: true, force: true })
-    await mkdir(root, { recursive: true })
     const objects = nodePath.join(home, 'objects')
     await mkdir(objects, { recursive: true })
     const workdir = new LocalMemberWorkdir(this, project, root, objects, nodePath.join(home, 'conflicts', input.sessionId))
+    // The session's copy from before (it was resumed): keep it with what its last turns left unmerged.
+    if (await this.serial(() => workdir.resume())) return workdir
+    await rm(root, { recursive: true, force: true })
+    await mkdir(root, { recursive: true })
     try {
       await this.serial(() => workdir.copyIn(files, skipped))
     } catch (error) {
@@ -240,6 +252,46 @@ export class LocalMemberWorkdir implements MemberWorkdir {
     private readonly conflictDir: string,
   ) {}
 
+  /**
+   * Take over the copy an earlier open of the same session left, when its
+   * saved base belongs to this project (inside the owner's queue). Returns
+   * whether it did.
+   */
+  async resume(): Promise<boolean> {
+    let saved: { project?: unknown; base?: unknown }
+    try {
+      saved = JSON.parse(await readFile(abs(this.root, WORKDIR_BASE_FILE), 'utf8')) as typeof saved
+    } catch {
+      return false
+    }
+    if (saved.project !== this.project || typeof saved.base !== 'object' || saved.base === null) return false
+    for (const [path, state] of Object.entries(saved.base as Record<string, unknown>)) {
+      const { sha256: digest, executable } = (state ?? {}) as { sha256?: unknown; executable?: unknown }
+      if (typeof digest !== 'string' || typeof executable !== 'boolean') return false
+      this.base.set(path, { sha256: digest, executable })
+    }
+    // In use again: not pruned as old.
+    const now = new Date()
+    await utimes(this.root, now, now).catch(() => undefined)
+    return true
+  }
+
+  /** Save the base next to the copy, so a later open of the session can take the copy over. */
+  private async saveBase(): Promise<void> {
+    const file = abs(this.root, WORKDIR_BASE_FILE)
+    await mkdir(nodePath.dirname(file), { recursive: true })
+    const temp = `${file}.${process.pid}.tmp`
+    await writeFile(temp, JSON.stringify({ project: this.project, base: Object.fromEntries(this.base) }))
+    await rename(temp, file)
+  }
+
+  /** Whether the copy holds a change that is not in the project yet (compared with its base). */
+  private async unmerged(): Promise<boolean> {
+    const copy = await scan(this.root, this.copySeen)
+    for (const path of new Set([...this.base.keys(), ...copy.keys()])) if (!same(copy.get(path), this.base.get(path))) return true
+    return false
+  }
+
   /** Copy the walked files and link the skipped dependency directories (inside the owner's queue). */
   async copyIn(files: Awaited<ReturnType<typeof walkProject>>['files'], skipped: readonly string[]): Promise<void> {
     for (const file of files) {
@@ -278,6 +330,7 @@ export class LocalMemberWorkdir implements MemberWorkdir {
         // Without the link the member reinstalls what it needs.
       }
     }
+    await this.saveBase()
   }
 
   /** Store a base body once per project. */
@@ -302,21 +355,29 @@ export class LocalMemberWorkdir implements MemberWorkdir {
   }
 
   refresh(): Promise<void> {
-    return this.owner.serial(() => this.refreshNow())
+    return this.owner.serial(async () => {
+      await this.refreshNow()
+      if (!this.closed) await this.saveBase()
+    })
   }
 
   merge(): Promise<WorkdirMerge> {
     return this.owner.serial(async () => {
       const result = await this.mergeNow()
       await this.refreshNow()
+      if (!this.closed) await this.saveBase()
       return result
     })
   }
 
+  /** Remove the copy, unless it holds changes not merged yet (a stopped or failed turn's): those wait for the session's next open. */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
-    await this.owner.serial(() => rm(this.root, { recursive: true, force: true }))
+    await this.owner.serial(async () => {
+      if (await this.unmerged().catch(() => false)) return
+      await rm(this.root, { recursive: true, force: true })
+    })
   }
 
   /** Copy into the copy every file the project changed since the last sync that the member left alone. */
