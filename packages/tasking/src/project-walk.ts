@@ -31,6 +31,10 @@ export interface WalkOptions {
   readonly symlinks?: boolean
   /** Rework K4 D4: told of each directory the walk does not enter (`.gitignore`d, or always skipped such as `node_modules/`). */
   readonly onSkippedDir?: (portable: string) => void
+  /** Also walk what `.gitignore` ignores (members' copies: the copy holds what the project holds); the always-skipped directories stay skipped. */
+  readonly ignored?: boolean
+  /** Directory names skipped at any depth besides the always-skipped ones (reported to {@link onSkippedDir}). */
+  readonly skipDirNames?: readonly string[]
 }
 
 /** What {@link walkProject} found, sorted by path when complete or not. */
@@ -74,7 +78,7 @@ export async function walkProject(root: string, options: WalkOptions = {}): Prom
     for (const entry of entries) {
       const portable = dir === '' ? entry.name : `${dir}/${entry.name}`
       if (entry.isDirectory()) {
-        if (isAlwaysSkipped(entry.name, dir === '') || scope.ignores(portable, true)) {
+        if (isAlwaysSkipped(entry.name, dir === '') || options.skipDirNames?.includes(entry.name) === true || (options.ignored !== true && scope.ignores(portable, true))) {
           options.onSkippedDir?.(portable)
           continue
         }
@@ -84,7 +88,7 @@ export async function walkProject(root: string, options: WalkOptions = {}): Prom
       const symlink = entry.isSymbolicLink()
       if (!entry.isFile() && !(symlink && options.symlinks === true)) continue
       if (dir === '' && isAlwaysSkipped(entry.name, true)) continue
-      if (scope.ignores(portable, false)) continue
+      if (options.ignored !== true && scope.ignores(portable, false)) continue
       leaves.push({ portable, symlink })
     }
     for (let i = 0; i < leaves.length; i += STAT_BATCH) {

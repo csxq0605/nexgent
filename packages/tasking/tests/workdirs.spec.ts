@@ -2,6 +2,7 @@
  * Rework K4 D4: members' own copies of the project, merged back file by
  * file at the end of each member turn; overlapping changes are conflicts.
  */
+import { execFileSync } from 'node:child_process'
 import { existsSync, lstatSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import * as nodePath from 'node:path'
@@ -57,7 +58,8 @@ describe('member workdirs (rework K4 D4)', () => {
     const inA = (path: string) => nodePath.join(a.root, ...path.split('/'))
     const inB = (path: string) => nodePath.join(b.root, ...path.split('/'))
     expect(await readFile(inA('a.txt'), 'utf8')).toBe('a1\n')
-    expect(existsSync(inA('build/out.js'))).toBe(false)
+    // What .gitignore ignores is in the copy too (the member finds what the project holds); dependencies are linked.
+    expect(await readFile(inA('build/out.js'), 'utf8')).toBe('built')
     expect(lstatSync(inA('node_modules')).isSymbolicLink()).toBe(true)
 
     // Each writes its own file; both edit shared.md (different lines); A deletes a file.
@@ -130,5 +132,83 @@ describe('member workdirs (rework K4 D4)', () => {
     // Nothing is left unmerged: closing removes the copy.
     await second.close()
     expect(existsSync(second.root)).toBe(false)
+  })
+
+  it('leaves ignored files out of the copy when they would take it over the limit', async () => {
+    const p = await project()
+    await p.write('a.txt', 'a')
+    await p.write('.gitignore', 'big/\n')
+    await p.write('big/blob.bin', 'x'.repeat(4096))
+    const workdirs = new LocalMemberWorkdirs(p.root, { base: await tempDir('nxwd-'), maxBytes: 1024 })
+    const copy = (await workdirs.open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    expect(await readFile(nodePath.join(copy.root, 'a.txt'), 'utf8')).toBe('a')
+    expect(existsSync(nodePath.join(copy.root, 'big', 'blob.bin'))).toBe(false)
+    await copy.close()
+  })
+})
+
+describe('member workdirs of a git project', () => {
+  const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', '-c', 'init.defaultBranch=main', ...args], { cwd, encoding: 'utf8' }).trim()
+  async function repo() {
+    const p = await project()
+    await p.write('.gitignore', '.nexgent/\ndata/\n')
+    await p.write('app.txt', 'one\n')
+    git(p.root, 'init', '-q')
+    git(p.root, 'add', '-A')
+    git(p.root, 'commit', '-q', '-m', 'first')
+    return p
+  }
+
+  it('lets a member use git in its copy and brings its commits, branches and index back', async () => {
+    const p = await repo()
+    // A commit only the reflog still knows (as when a reset dropped it).
+    await p.write('app.txt', 'lost\n')
+    git(p.root, 'commit', '-q', '-am', 'lost work')
+    git(p.root, 'reset', '-q', '--hard', 'HEAD~1')
+    await p.write('data/input.csv', 'a,b\n')
+    const copy = (await new LocalMemberWorkdirs(p.root, { base: await tempDir('nxwd-') }).open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    expect(git(copy.root, 'log', '--format=%s')).toBe('first')
+    expect(git(copy.root, 'reflog', '--format=%gs')).toContain('commit: lost work')
+    expect(git(copy.root, 'status', '--porcelain')).toBe('')
+    expect(await readFile(nodePath.join(copy.root, 'data', 'input.csv'), 'utf8')).toBe('a,b\n')
+    // The member commits on main and starts a branch.
+    await writeFile(nodePath.join(copy.root, 'app.txt'), 'two\n')
+    git(copy.root, 'commit', '-q', '-am', 'second')
+    git(copy.root, 'branch', 'feature')
+    const head = git(copy.root, 'rev-parse', 'HEAD')
+    const present = (() => { try { git(p.root, 'cat-file', '-e', head); return true } catch { return false } })()
+    expect(present).toBe(false)
+
+    expect((await copy.merge()).conflicts).toEqual([])
+    expect(git(p.root, 'rev-parse', 'HEAD')).toBe(head)
+    expect(git(p.root, 'rev-parse', 'feature')).toBe(head)
+    expect(await readFile(p.abs('app.txt'), 'utf8')).toBe('two\n')
+    expect(git(p.root, 'status', '--porcelain')).toBe('')
+    await copy.close()
+    expect(existsSync(copy.root)).toBe(false)
+  })
+
+  it('brings the project\'s new commits into the copy, and reports a branch both moved as a conflict', async () => {
+    const p = await repo()
+    const copy = (await new LocalMemberWorkdirs(p.root, { base: await tempDir('nxwd-') }).open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    await p.write('other.txt', 'x\n')
+    git(p.root, 'add', 'other.txt')
+    git(p.root, 'commit', '-q', '-m', 'project side')
+    await copy.refresh()
+    expect(git(copy.root, 'rev-parse', 'HEAD')).toBe(git(p.root, 'rev-parse', 'HEAD'))
+    expect(git(copy.root, 'status', '--porcelain')).toBe('')
+
+    // Both commit on main: the project keeps its own.
+    await writeFile(nodePath.join(copy.root, 'app.txt'), 'member\n')
+    git(copy.root, 'commit', '-q', '-am', 'member side')
+    await p.write('third.txt', 'y\n')
+    git(p.root, 'add', 'third.txt')
+    git(p.root, 'commit', '-q', '-m', 'project again')
+    const ours = git(p.root, 'rev-parse', 'HEAD')
+    const merge = await copy.merge()
+    expect(merge.conflicts).toContainEqual({ path: '.git/refs/heads/main', kind: 'both-changed' })
+    expect(git(p.root, 'rev-parse', 'HEAD')).toBe(ours)
+    // The member's commit stays reachable from the project (its objects came along).
+    await copy.close()
   })
 })
