@@ -5,6 +5,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   asContext,
+  BASELINE_VERSION,
+  HANDBOOK_RULES_HEADER,
+  type CapabilityHost,
+  type Context,
   renderCompactionSummary,
   renderUserWords,
   renderFeedbackPrompt,
@@ -461,5 +465,30 @@ describe('system prompt sections', () => {
       sections: [{ id: 'a', title: 'Project instructions', body: 'Be brief.' }],
     })
     expect(prompt).toMatch(/# Working with files\n- When the user asks for a result file[^\n]*\n\n# Project instructions\nBe brief\.\n\nS$/)
+  })
+})
+
+describe('handbook entries for a thread (coordinator step two)', () => {
+  it('are picked for the task a coordinator gives a thread, not for a wake note in the coordinator', async () => {
+    harness = await bootHarness({ script: [textReply('done'), textReply('noted')] })
+    const asked: string[] = []
+    const host: CapabilityHost = {
+      current: async () => BASELINE_VERSION,
+      verify: async () => ({ ok: true }),
+      attach: async () => ({ components: [] }),
+      handbookForTurn: async input => {
+        asked.push(input.text)
+        return { ids: ['r1'], text: `${HANDBOOK_RULES_HEADER}\n- [r1] Keep amounts in whole units.` }
+      },
+    }
+    await harness.app.ctx.plugin({ name: 'fake-capabilities', apply: (ctx: Context) => { ctx.provide('capabilityHost', host) } })
+    const thread = await harness.app.agents.create({ thread: { coordinatorSessionId: 'coordinator-session', title: 'Part' } })
+    await thread.run({ source: 'thread', text: 'Do the delegated part.' })
+    expect(harness.store.of(thread.sessionId, 'turn.start')[0]).toMatchObject({ handbook: ['r1'] })
+    const coordinator = await harness.app.agents.create()
+    await coordinator.run({ source: 'thread', text: 'Thread "Part" finished.' })
+    expect(asked).toEqual(['Do the delegated part.'])
+    await thread.close()
+    await coordinator.close()
   })
 })

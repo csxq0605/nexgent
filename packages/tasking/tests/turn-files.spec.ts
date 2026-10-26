@@ -211,4 +211,20 @@ describe('turn file tracker', () => {
     await p.write('Dir/Sub.txt', 'x')
     expect(await tracker.endTurn(SESSION_A, 1)).toEqual([{ path: 'Dir/Sub.txt', change: 'added' }])
   })
+
+  it('reports a shell change whose file time lags the wall clock (reads the file system\'s clock at turn start)', async () => {
+    const p = await project()
+    await p.write('a.txt', 'old')
+    await settle()
+    // The wall clock runs ahead of the file times, as with a coarse kernel clock.
+    const tracker = new LocalTurnFileTracker(p.root, { clock: () => Date.now() + 50 })
+    await tracker.beginTurn(SESSION_A, 1)
+    await p.write('a.txt', 'new')
+    await p.write('b.txt', 'made')
+    tracker.observe(shellCall(SESSION_A, 1))
+    const changes = await tracker.endTurn(SESSION_A, 1)
+    expect(changes.map(change => change.path)).toEqual(['a.txt', 'b.txt'])
+    expect(changes.find(change => change.path === 'a.txt')?.change).toBe('modified')
+  })
 })
+

@@ -148,10 +148,11 @@ export interface OrganizationMemory {
    * Coordinator step two: the measured organization of a recorded turn once
    * the threads it started have all ended (the turn's own profile was taken
    * before they did); replaces that run's profile, adds the threads' cost
-   * (`addUsd`) to the run's and reflects on its class. Only a run recorded
-   * as `waiting` takes it.
+   * (`addUsd`) to the run's and reflects on its class. `completed: false`:
+   * a thread run of the turn did not complete, so the run did not either.
+   * Only a run recorded as `waiting` takes it.
    */
-  noteProfile?(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number }): Promise<void>
+  noteProfile?(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void>
 }
 
 /** What {@link CapabilityHost.attach} gets for one opened agent. */

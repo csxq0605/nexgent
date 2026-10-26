@@ -346,10 +346,18 @@ export interface AgentInit {
   readonly parentSessionId?: string
   /** Step 3: a member's own share of the tree's cost cap. */
   readonly budget?: BudgetShare
+  /**
+   * What every agent of the project in this process has spent since it
+   * started, counted as each request goes out (shared and updated in
+   * place), so `costCaps.perProject` holds across sessions that run at the
+   * same time. Absent: only this agent's own spending is added to the
+   * ledger's total.
+   */
+  readonly projectSpend?: Spend
   /** Step 3: the open members this agent started (cancelled with `parent` when its turn ends). */
   readonly children?: () => readonly Agent[]
-  /** A member: its parent's {@link Agent.unreadSteers} (the user's messages the parent has not read yet). */
-  readonly parentSteers?: () => readonly string[]
+  /** A member: its parent's {@link Agent.unreadSteers} (messages the parent got while working and has not read yet). */
+  readonly parentSteers?: () => readonly RelayedSteer[]
   /**
    * Step 4: the capability version the session runs on (stamped on every
    * ledger record); absent when no capability host is installed.
@@ -476,6 +484,8 @@ interface StreamOutcome {
   readonly providerContent?: JsonValue
   /** Set with `finish: 'refusal'`. */
   readonly refusal?: RefusalInfo
+  /** The reasoning text the reply streamed (absent when none). */
+  readonly reasoning?: string
 }
 
 interface Authorization {
@@ -593,6 +603,24 @@ export function relayedUserNote(text: string): string {
   return `${RELAYED_USER_NOTE_PREFIX}\n\n${text}`
 }
 
+/** Opens a message the coordinator sent to a thread while the thread's member was working ({@link Agent.steer}). */
+export const RELAYED_COORDINATOR_NOTE_PREFIX = '[Nexgent] The coordinator sent this to your thread while you were working (it may pass on what the user said); follow it where it concerns your work:'
+
+/** The note a working member of a thread gets for a message the coordinator sent the thread meanwhile. */
+export function relayedCoordinatorNote(text: string): string {
+  return `${RELAYED_COORDINATOR_NOTE_PREFIX}\n\n${text}`
+}
+
+/** A message passed on to members: its words and who sent them (the user, or the coordinator of the thread). */
+export interface RelayedSteer {
+  readonly text: string
+  readonly from: 'user' | 'coordinator'
+}
+
+function relayedNote(steer: RelayedSteer): string {
+  return steer.from === 'coordinator' ? relayedCoordinatorNote(steer.text) : relayedUserNote(steer.text)
+}
+
 /** Redesign 3.2: a project check command may run this long (the shell tool's own cap still applies). */
 export const CHECK_COMMAND_TIMEOUT_MS = 300_000
 
@@ -672,8 +700,8 @@ export class Agent {
   private outcomeWritten = false
   private lastReason: TurnEndReason | undefined
   private budgetError: ErrorInfo | undefined
-  /** `perProject` usage read from the ledger at turn start, and this task's totals at that moment. */
-  private projectUsage: { requests: number; tokens: number; usd: number; estimated: boolean; ownRequests: number; ownTokens: number; ownUsd: number } | undefined
+  /** `perProject` usage read from the ledger at turn start, and the live totals (the project's in this process, else this agent's) at that moment. */
+  private projectUsage: { requests: number; tokens: number; usd: number; estimated: boolean; liveRequests: number; liveTokens: number; liveUsd: number } | undefined
   private turnDenials = new Set<string>()
   /** Approval questions run one at a time, also when calls of one step run concurrently (ADR 0017 decision 5). */
   private approvalQueue: Promise<unknown> = Promise.resolve()
@@ -692,8 +720,8 @@ export class Agent {
   /** The turn's snapshot, not started yet: it starts once the first request is out ({@link startSnapshot}). */
   private snapshotStart: (() => Promise<unknown>) | undefined
   /** Messages sent while the turn runs ({@link steer}), waiting for the next model request. */
-  /** `relay`: the user's own words, passed on to a member that starts before this agent reads them ({@link unreadSteers}). */
-  private pendingSteers: { readonly content: string; readonly source: 'user' | 'inject' | 'thread'; readonly materialIds?: readonly string[]; readonly relay?: string }[] = []
+  /** `relay`: the words (the user's, or in a thread its coordinator's), passed on to a member that starts before this agent reads them ({@link unreadSteers}). */
+  private pendingSteers: { readonly content: string; readonly source: 'user' | 'inject' | 'thread'; readonly materialIds?: readonly string[]; readonly relay?: RelayedSteer }[] = []
   /** The user's mid-turn messages this member already got from its parent, so none arrives twice. */
   private readonly relayedSeen = new Set<string>()
   /** The session state the turn's context providers got (a message sent mid-turn with materials is rendered against it). */
@@ -810,7 +838,24 @@ export class Agent {
       this.planTool = undefined
     }
     this.planning = plan
+    for (const listener of [...this.modeListeners]) {
+      try {
+        listener({ sandboxMode, plan, reason })
+      } catch {
+        // a listener's failure does not undo the switch
+      }
+    }
   }
+
+  /** Listen for {@link setMode} switches (after `session.mode` is written); returns the unsubscribe. */
+  onModeChange(listener: (change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void): () => void {
+    this.modeListeners.add(listener)
+    return () => {
+      this.modeListeners.delete(listener)
+    }
+  }
+
+  private readonly modeListeners = new Set<(change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void>()
 
   private offerExitPlan(): void {
     if (this.planTool !== undefined) return
@@ -1005,31 +1050,45 @@ export class Agent {
    * on until the model has answered it. The members working now get it too
    * (relayed, as an `inject` note). Returns `false` when no turn is running
    * or the running one is already finishing: the caller starts a new turn.
+   *
+   * `source: 'thread'` (coordinator step two): in a thread, a message from
+   * its coordinator (often a correction it passes on from the user); its
+   * members get it like a user message, as the coordinator's. In the
+   * coordinator, a thread's wake note; it has no members to pass it to.
    */
-  steer(text: string, options: { readonly relayed?: boolean; readonly materialIds?: readonly string[]; readonly source?: 'thread' } = {}): boolean {
+  steer(text: string, options: { readonly relayed?: boolean; readonly from?: RelayedSteer['from']; readonly materialIds?: readonly string[]; readonly source?: 'thread' } = {}): boolean {
     if (this.closed || this.running === undefined || !this.acceptingSteers) return false
-    // Coordinator step two: a thread's wake note joins the running turn; members do not get it.
+    let relay: RelayedSteer
     if (options.source === 'thread') {
-      this.pendingSteers.push({ content: text, source: 'thread' })
-      return true
+      if (this.thread === undefined) {
+        this.pendingSteers.push({ content: text, source: 'thread' })
+        return true
+      }
+      relay = { text, from: 'coordinator' }
+      this.pendingSteers.push({ content: text, source: 'thread', relay })
+    } else if (options.relayed === true) {
+      relay = { text, from: options.from ?? 'user' }
+      this.relayedSeen.add(text)
+      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relay })
+    } else {
+      relay = { text, from: 'user' }
+      const materialIds = [...new Set(options.materialIds ?? [])]
+      this.pendingSteers.push({ content: text, source: 'user', relay, ...(materialIds.length > 0 ? { materialIds } : {}) })
     }
-    const relayed = options.relayed === true
-    const materialIds = relayed ? [] : [...new Set(options.materialIds ?? [])]
-    if (relayed) this.relayedSeen.add(text)
-    this.pendingSteers.push(relayed ? { content: relayedUserNote(text), source: 'inject', relay: text } : { content: text, source: 'user', relay: text, ...(materialIds.length > 0 ? { materialIds } : {}) })
     for (const member of this.members()) {
-      if (member.busy) member.steer(text, { relayed: true })
+      if (member.busy) member.steer(relay.text, { relayed: true, from: relay.from })
     }
     return true
   }
 
   /**
-   * The user's messages sent during the running turn that this agent has not
-   * read yet (they wait for its next request, e.g. while a tool that runs
-   * members is going). A member that starts now was briefed without them,
-   * so it gets them relayed at its turn's start.
+   * The messages sent during the running turn that this agent has not read
+   * yet (they wait for its next request, e.g. while a tool that runs
+   * members is going): the user's, and in a thread its coordinator's. A
+   * member that starts now was briefed without them, so it gets them
+   * relayed at its turn's start.
    */
-  unreadSteers(): readonly string[] {
+  unreadSteers(): readonly RelayedSteer[] {
     return this.pendingSteers.flatMap(steer => steer.relay === undefined ? [] : [steer.relay])
   }
 
@@ -1127,15 +1186,22 @@ export class Agent {
     if (usage !== undefined) this.stats.totalUsage = addUsage(this.stats.totalUsage, usage)
     this.init.tree.requests += requests
     this.init.tree.tokens += tokens
+    const project = this.init.projectSpend
+    if (project !== undefined) {
+      project.requests += requests
+      project.tokens += tokens
+    }
     if (usage !== undefined) {
       // Rework D3 (ADR 0017 decision 6): dollars from the provider's price table.
       const { usd, estimated } = usageUsd(this.init.llm, this.model, usage)
       this.stats.usd += usd
       this.init.tree.usd += usd
       this.init.tree.turnUsd += usd
+      if (project !== undefined) project.usd += usd
       if (estimated) {
         this.init.tree.usdEstimated = true
         this.init.tree.turnUsdEstimated = true
+        if (project !== undefined) project.estimated = true
       }
     }
     if (this.member !== undefined) this.init.tree.chargeMember(this.sessionId, requests, usage)
@@ -1555,10 +1621,10 @@ export class Agent {
     this.pendingSteers = []
     this.acceptingSteers = true
     // A member started while its parent has not yet read the user's latest messages gets them too.
-    for (const text of this.init.parentSteers?.() ?? []) {
-      if (this.relayedSeen.has(text)) continue
-      this.relayedSeen.add(text)
-      this.pendingSteers.push({ content: relayedUserNote(text), source: 'inject', relay: text })
+    for (const relay of this.init.parentSteers?.() ?? []) {
+      if (this.relayedSeen.has(relay.text)) continue
+      this.relayedSeen.add(relay.text)
+      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relay })
     }
     const services = this.init.services?.() ?? {}
     // Providers get the state before this turn. It is read before `turn.start`:
@@ -1802,7 +1868,9 @@ export class Agent {
   }
 
   private async handbookForTurn(host: CapabilityHost | undefined, turn: number, source: 'user' | 'feedback' | 'thread', text: string): Promise<HandbookTurnSelection | undefined> {
-    if (host?.handbookForTurn === undefined || this.member !== undefined || source !== 'user') return undefined
+    // A thread's task from its coordinator is a task like the user's; a wake note in the coordinator is not.
+    const task = source === 'user' || (source === 'thread' && this.thread !== undefined)
+    if (host?.handbookForTurn === undefined || this.member !== undefined || !task) return undefined
     try {
       const selection = await host.handbookForTurn({ sessionId: this.sessionId, turn, text })
       return selection === undefined || selection.text.trim() === '' ? undefined : selection
@@ -1981,7 +2049,9 @@ export class Agent {
    * ledger (`permissions.md` §费用上限): every `llm.request.start` counts as a
    * request, `llm.request.end` usage adds its known `inputTokens +
    * outputTokens` and its estimated dollars. Read once per turn; requests
-   * this task sends later in the turn are added from its own totals. An
+   * sent later in the turn are added from the live totals: every agent's of
+   * the project in this process ({@link AgentInit.projectSpend}), so
+   * sessions running at the same time share the cap. An
    * unknown total is not under the cap: a failed read returns the error that
    * ends the turn before any request is sent. A root turn also reads the
    * conversation's spending for `perConversation` (rework D3) and the
@@ -2041,7 +2111,8 @@ export class Agent {
       return { ...info, message: `the per-project cost cap cannot be checked because the ledger could not be read (${info.message}); no model request was sent` }
     }
     if (needsProject) {
-      this.projectUsage = { ...projectSpend, ownRequests: this.stats.requestCount, ownTokens: this.stats.tokens, ownUsd: this.stats.usd }
+      const live = this.liveProjectSpend()
+      this.projectUsage = { ...projectSpend, liveRequests: live.requests, liveTokens: live.tokens, liveUsd: live.usd }
     }
     if (conversation !== undefined) {
       let base = rootSpend
@@ -2066,14 +2137,20 @@ export class Agent {
       case 'perProject': {
         const base = this.projectUsage
         if (base === undefined) return undefined
+        const live = this.liveProjectSpend()
         return {
-          requests: base.requests + this.stats.requestCount - base.ownRequests,
-          tokens: base.tokens + this.stats.tokens - base.ownTokens,
-          usd: base.usd + this.stats.usd - base.ownUsd,
-          estimated: base.estimated || tree.usdEstimated,
+          requests: base.requests + live.requests - base.liveRequests,
+          tokens: base.tokens + live.tokens - base.liveTokens,
+          usd: base.usd + live.usd - base.liveUsd,
+          estimated: base.estimated || live.estimated || tree.usdEstimated,
         }
       }
     }
+  }
+
+  /** What the project has spent in this process so far (every agent's), or this agent's own spending without a shared count. */
+  private liveProjectSpend(): Spend {
+    return this.init.projectSpend ?? { requests: this.stats.requestCount, tokens: this.stats.tokens, usd: this.stats.usd, estimated: false }
   }
 
   /** Rework D3: the caps that apply to this agent, by scope. */
@@ -2157,6 +2234,13 @@ export class Agent {
       if (!paused) await this.drainSteers(turn)
       paused = false
       if (step === maxSteps && maxSteps >= 4 && this.messages.at(-1)?.role !== 'assistant') await this.injectNote(turn, stepLimitNote(maxSteps))
+      // Checked again with nothing awaited before the request is counted: another session of the project may have spent meanwhile.
+      const spent = this.budgetExhausted()
+      if (spent !== undefined) {
+        this.budgetError = spent
+        await this.appendError(spent, false, turn)
+        return { kind: 'cancelled', cause: 'cost-cap' }
+      }
 
       let outcome = await this.requestModel(turn, step, signal)
       // A transient failure (dropped stream or connection, overload) after part of the reply came: the provider could not
@@ -2187,6 +2271,7 @@ export class Agent {
           finishReason: outcome.finish,
           ...(interrupted ? { interrupted: true as const } : {}),
           ...(outcome.refusal === undefined ? {} : { refusal: outcome.refusal }),
+          ...(outcome.reasoning === undefined ? {} : { reasoning: outcome.reasoning }),
         })
         if (!(interrupted && outcome.content === '')) {
           this.messages.push({ role: 'assistant', content: outcome.content, ...extras })
@@ -2285,6 +2370,7 @@ export class Agent {
     this.emit({ type: 'request.start', sessionId: this.sessionId, turn, step, requestId, model: this.model })
 
     let content = ''
+    let reasoning = ''
     const calls = new Map<number, ToolCall>()
     let usage: LLMUsage | undefined
     let finish: StreamOutcome['finish'] | undefined
@@ -2341,6 +2427,7 @@ export class Agent {
             this.emit({ type: 'text.delta', sessionId: this.sessionId, turn, step, text: event.text })
             break
           case 'reasoning.delta':
+            reasoning += event.text
             this.emit({ type: 'reasoning.delta', sessionId: this.sessionId, turn, step, text: event.text })
             break
           case 'tool-call.start':
@@ -2355,6 +2442,8 @@ export class Agent {
             usage = event.usage
             break
           case 'retry':
+            // The failed attempt's reasoning is dropped with it.
+            reasoning = ''
             this.emit({ type: 'request.retry', sessionId: this.sessionId, turn, step, requestId, attempt: event.attempt, delayMs: event.delayMs, error: event.error })
             break
           case 'done':
@@ -2387,7 +2476,7 @@ export class Agent {
     this.charge(0, reportedUsage)
     await this.warnCosts(turn)
     const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, call]) => call)
-    const base = { requestId, content, usage: reportedUsage }
+    const base = { requestId, content, usage: reportedUsage, ...(reasoning === '' ? {} : { reasoning }) }
 
     const modelTimeout = timeoutOf(whole.signal, MODEL_TIMEOUT)
     if (idleTimedOut || (modelTimeout !== undefined && !signal.aborted)) {

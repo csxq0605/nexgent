@@ -1236,6 +1236,9 @@
         },
         "refusal": {
           "$ref": "#/$defs/refusalInfo"
+        },
+        "reasoning": {
+          "type": "string"
         }
       }
     },

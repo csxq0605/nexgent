@@ -14,7 +14,9 @@
  *   similar things (its traits: file types changed, tools, checks; overlap
  *   at least {@link ORGANIZATION_TRAIT_MIN}), so tasks worded differently
  *   meet in one class and later tasks worded either way find it.
- * - A run went well when it completed, no check failed, the user made no
+ * - A run went well when it completed (a coordinator's run also needs every
+ *   thread it started to have completed; while it waits for them its
+ *   outcome is unknown, which is not a success), no check failed, the user made no
  *   correction and did not rework it, and, when an external reviewer
  *   scored it ({@link OrganizationLibrary.noteReview}), the review is good.
  *   Rework: a later feedback turn asking for changes, a later message saying the result is wrong or must be
@@ -86,8 +88,11 @@ export type OrganizationLogLine =
   | { readonly type: 'change'; readonly change: OrganizationChange; readonly at: string }
   /** Coordinator: the verdict on a change. */
   | { readonly type: 'verdict'; readonly classId: string; readonly changeId: string; readonly verdict: OrganizationChangeVerdict; readonly at: string }
-  /** Coordinator step two: the full profile of a run whose threads have all ended (replaces the run's profile and cost, ends its `waiting`). */
-  | { readonly type: 'profile'; readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly at: string }
+  /**
+   * Coordinator step two: the full profile of a run whose threads have all ended (replaces the run's profile and cost, ends its `waiting`).
+   * `completed: false`: a thread run of the turn did not complete, so neither did the run.
+   */
+  | { readonly type: 'profile'; readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly completed?: boolean; readonly at: string }
 
 /** A recorded run with what later lines said about it. */
 export interface FoldedRun extends OrganizationRun {
@@ -113,7 +118,7 @@ export function foldOrganizationLog(lines: readonly OrganizationLogLine[]): Fold
       const index = runs.findIndex(run => run.sessionId === line.sessionId && run.turn === line.turn)
       if (index >= 0) {
         const { waiting: _waiting, ...run } = runs[index]!
-        runs[index] = { ...run, usd: line.profile.usd, profile: line.profile }
+        runs[index] = { ...run, usd: line.profile.usd, profile: line.profile, ...(line.completed === false ? { completed: false } : {}) }
       }
     } else if (line.type === 'review') {
       const index = runs.findIndex(run => run.sessionId === line.sessionId && run.turn === line.turn)
@@ -163,7 +168,7 @@ export function reflectedRun(run: FoldedRun): ReflectedRun {
  * signals, the review is what tells a good result from a poor one.
  */
 export function wentWell(run: FoldedRun): boolean {
-  return run.completed && !run.reworked && run.corrections === 0 && (run.checks === undefined || run.checks.passed === run.checks.total)
+  return run.completed && run.waiting !== true && !run.reworked && run.corrections === 0 && (run.checks === undefined || run.checks.passed === run.checks.total)
     && (run.review === undefined || run.review >= ORGANIZATION_REVIEW_GOOD)
 }
 
@@ -423,7 +428,7 @@ export class OrganizationLibrary implements OrganizationMemory {
    * the threads' cost (`addUsd`) joins the run's cost. Reflects on its class
    * up to that run. A run that is not waiting for threads is left alone.
    */
-  async noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number }): Promise<void> {
+  async noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
     await this.idle()
     const run = (await this.runs()).find(item => item.sessionId === input.sessionId && item.turn === input.turn)
     if (run === undefined || run.waiting !== true) return
@@ -439,7 +444,7 @@ export class OrganizationLibrary implements OrganizationMemory {
         ...(part.kind === 'coordinator' ? { retries: Math.max(part.retries, retries) } : {}),
       })),
     }
-    await this.#append({ type: 'profile', sessionId: input.sessionId, turn: input.turn, profile, at: this.#now().toISOString() })
+    await this.#append({ type: 'profile', sessionId: input.sessionId, turn: input.turn, profile, ...(input.completed === false ? { completed: false } : {}), at: this.#now().toISOString() })
     await this.#reflect(run.classId, run.id)
   }
 

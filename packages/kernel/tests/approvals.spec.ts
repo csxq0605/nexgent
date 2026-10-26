@@ -444,6 +444,31 @@ describe('cost caps', () => {
     expect(harness.store.of(agent.sessionId, 'error')[0]!.error.details).toEqual({ scope: 'project', metric: 'requests', used: 2, limit: 2 })
   })
 
+  it('holds perProject across sessions running at the same time', async () => {
+    let entered = 0
+    let release: () => void = () => undefined
+    const gate = new Promise<void>(resolve => {
+      release = resolve
+    })
+    // Each session's first request waits until both are in flight.
+    const step = (id: string) => async function* () {
+      entered += 1
+      if (entered === 2) release()
+      await gate
+      yield* toolCallReply(id, 'echo', {})
+    }
+    harness = await bootHarness({ script: [step('a'), step('b'), toolCallReply('c', 'echo', {}), toolCallReply('d', 'echo', {}), textReply('never sent')] })
+    writeConfig(harness.root, { costCaps: { perProject: { maxRequests: 2 } } })
+    harness.app.ctx.tools.register({
+      definition: { name: 'echo', description: 'e', inputSchema: { type: 'object' }, effects: ['read'], approval: 'never' },
+      handler: async () => ({ content: 'ok' }),
+    })
+    const [a, b] = [await harness.app.agents.create(), await harness.app.agents.create()]
+    const results = await Promise.all([a.run('loop'), b.run('loop')])
+    expect(harness.llm.requests).toHaveLength(2)
+    expect(results.map(result => result.reason)).toEqual([{ kind: 'cancelled', cause: 'cost-cap' }, { kind: 'cancelled', cause: 'cost-cap' }])
+  })
+
   it('sends no request and ends the turn with a readable error when the ledger cannot be read', async () => {
     const ledger = new MemoryLedger()
     ledger.read = async function* () {

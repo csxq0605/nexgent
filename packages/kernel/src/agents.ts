@@ -8,6 +8,7 @@
  * shutdown) cancels running turns with cause `shutdown` and closes every
  * agent.
  */
+import { zeroSpend, type Spend } from './cost-caps.js'
 import { randomUUID } from 'node:crypto'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -203,6 +204,8 @@ export class AgentsService extends Service {
   private readonly home: Context
   private readonly config: AgentsConfig
   private readonly live = new Map<string, Agent>()
+  /** What the project's agents in this process have spent (`costCaps.perProject` across sessions running at the same time). */
+  private readonly projectSpend: Spend = zeroSpend()
   private readonly entries = new Map<Agent, AgentEntry>()
   private grantWriter: ProjectGrantWriter | undefined
   private readonly closeListeners = new Set<(sessionId: string) => void>()
@@ -430,6 +433,7 @@ export class AgentsService extends Service {
       sessionGrants: args.grants,
       projectGrantWriter: () => this.grantWriter,
       tree: args.tree,
+      projectSpend: this.projectSpend,
       attribution,
       ...(member === undefined
         ? {}

@@ -123,6 +123,12 @@ export interface CurationContext {
   readonly projectMessages: readonly ProjectTaskMessage[]
   /** User messages and feedback comments (copied-request check). */
   readonly requests: readonly string[]
+  /**
+   * The user's own words among {@link requests}, which alone decide whether a
+   * rule is standing (default: all of them). A coordinator's messages to a
+   * thread are left out: they are not the user's wording.
+   */
+  readonly ruleRequests?: readonly string[]
   /** Votes already in the logs from this task, as `entryId`. */
   readonly votedFromTask: ReadonlySet<string>
   /** Reflection edits each entry already received. */
@@ -271,7 +277,7 @@ export function curateReflection(proposed: readonly ProposedOp[], ctx: CurationC
         continue
       }
       // The user's own wording decides: a request for this result only is no rule; without lasting wording it waits for the user.
-      const standing = ruleStanding(text, ctx.requests)
+      const standing = ruleStanding(text, ctx.ruleRequests ?? ctx.requests)
       if (standing === 'one-off') {
         reject(op, 'one-off')
         continue

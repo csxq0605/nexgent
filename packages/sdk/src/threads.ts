@@ -215,6 +215,11 @@ export class SdkThreadHost implements ThreadHost {
     if (input.text.trim() === '') throw new NexgentError('tool/invalid-input', '"text" must not be empty')
     const info = await this.own(input.coordinatorSessionId, input.threadId)
     if (!(await this.rt.steer(input.threadId, input.text))) {
+      // Starting the thread's next turn counts against the threads running at once, like starting a new thread.
+      const running = (await this.list({ coordinatorSessionId: input.coordinatorSessionId })).filter(thread => thread.status === 'running' && thread.threadId !== input.threadId).length
+      if (running >= THREAD_LIMITS.maxRunning) {
+        throw new NexgentError('tool/denied', `${running} threads are running (at most ${THREAD_LIMITS.maxRunning} at once): wait for one to finish before giving this thread its next step`)
+      }
       const index = (await this.rt.threadIds(input.coordinatorSessionId)).indexOf(input.threadId) + 1
       await this.runFor(input, input.threadId, threadRunName(info.title, index), info.title, input.text)
     }
@@ -418,6 +423,9 @@ export class SdkThreadHost implements ThreadHost {
     const profile = buildOrganizationProfile({ turn, records, children, usd: 0, costOf })
     // The threads' cost: each run's own requests and its members'.
     let addUsd = 0
+    // The turn completed only when every thread run it started did, without a question left open (a thread waiting for an answer).
+    const completed = threadRuns.every(run => records.some(record => record.type === 'subagent.end' && record.childSessionId === run.childSessionId
+      && record.childTurn === run.childTurn && record.result.status === 'completed' && reportBlocker(record.result.text) === undefined))
     for (const run of threadRuns) {
       const child = children.get(run.childSessionId) ?? []
       let usage = ZERO_USAGE
@@ -428,7 +436,7 @@ export class SdkThreadHost implements ThreadHost {
       }
       addUsd += costOf(usage, model(child)) ?? 0
     }
-    await memory.noteProfile({ sessionId: coordinatorSessionId, turn, profile, addUsd })
+    await memory.noteProfile({ sessionId: coordinatorSessionId, turn, profile, addUsd, completed })
   }
 }
 

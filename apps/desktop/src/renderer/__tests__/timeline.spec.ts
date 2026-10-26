@@ -62,6 +62,17 @@ describe('timeline', () => {
     expect(list.map(e => e.kind)).toEqual(['user', 'tool', 'turn.end'])
   })
 
+  it('shows a step\'s saved reasoning again, also for a step with only tool calls', () => {
+    const list = fromHistory([
+      { kind: 'user', turn: 1, text: 'hi', source: 'user', materials: [] },
+      { kind: 'assistant', turn: 1, step: 1, text: '', finishReason: 'tool-calls', interrupted: false, reasoning: 'Look at the file first.' },
+      { kind: 'tool', turn: 1, step: 1, call: { id: 'c', name: 'read_file', arguments: '{}' }, content: 'ok', isError: false, durationMs: 3 },
+      { kind: 'assistant', turn: 1, step: 2, text: 'done', finishReason: 'stop', interrupted: false, reasoning: 'It is fine.' },
+    ])
+    expect(list.map(e => e.kind)).toEqual(['user', 'reasoning', 'tool', 'reasoning', 'assistant'])
+    expect(list[1]).toMatchObject({ kind: 'reasoning', turn: 1, step: 1, text: 'Look at the file first.', streaming: false })
+  })
+
   it('puts a replayed deliverable card after its present block, one card per successful present', () => {
     const d = (id: string) => ({ deliverableId: id, version: 1, title: id, summary: '', files: [] })
     const present = (id: string, isError = false) => ({ kind: 'tool' as const, turn: 1, step: 2, call: { id, name: 'present', arguments: '{}' }, content: 'ok', isError, durationMs: 1 })

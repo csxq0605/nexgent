@@ -2,12 +2,17 @@
  * Rework K4 D4: each member that may write works in its own copy of the
  * project (`ctx.workdirs`, see `MemberWorkdirs` in the kernel).
  *
- * - The copy is made when the member opens: the project files the snapshot
- *   walk sees (`.gitignore` honoured; `.git/` and the root `.nexgent/` left
- *   out). Dependency directories the walk skips (`node_modules/`, `.venv/`,
- *   `venv/`) are linked, not copied, so commands find installed packages.
- *   A project above {@link WORKDIR_MAX_BYTES} or {@link WORKDIR_MAX_FILES}
- *   gets no copy (the member works in the project directory, as before).
+ * - The copy is made when the member opens: the project's files, those
+ *   `.gitignore` ignores included, so the member finds what it would find
+ *   in the project (the root `.nexgent/` left out). Dependency directories
+ *   (`node_modules/`, `.venv/`, `venv/`) are linked, not copied, so commands
+ *   find installed packages. When the ignored files would take the copy
+ *   above {@link WORKDIR_MAX_BYTES} or {@link WORKDIR_MAX_FILES}, the copy
+ *   leaves them out (as the snapshot walk does); a project above the limits
+ *   even so gets no copy (the member works in the project directory).
+ * - A git project's repository comes along (`workdir-git.ts`): the member
+ *   can use git in its copy, and what it does there (commits, branches,
+ *   `HEAD`, the index) is merged back with its files.
  * - The copies live in `<tmp>/nexgent-workdirs/<project key>/<sessionId>/`;
  *   the base content of every copied file is kept once per project in
  *   `objects/` (content-addressed), for three-way merges.
@@ -27,17 +32,25 @@
  * copy (`open({ from })`): it is made from it and merges back into it; the
  * thread merges into the project at the end of its own turn.
  *
+ * The copy's base (which content each file had when the copy was last in
+ * sync) is saved in the copy's own `.nexgent/workdir-base.json` (the walk
+ * skips the root `.nexgent/`, so it is never merged). Opening the same
+ * session again (a resumed thread or member) keeps the copy as it is, with
+ * changes a stopped or failed turn left unmerged, and the next merge brings
+ * them in. Closing removes the copy only when it holds no unmerged change.
+ *
  * Symbolic links are copied as links (not on Windows) and never merged.
  */
 import { createHash } from 'node:crypto'
-import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import type { MemberWorkdir, MemberWorkdirs, SandboxMode, WorkdirConflict, WorkdirMerge } from '@nexgent/kernel'
-import { MEMBER_WORKDIRS_DIR } from '@nexgent/kernel'
+import { MEMBER_WORKDIRS_DIR, NEXGENT_DIR } from '@nexgent/kernel'
 import { isNotFound } from './files-util.js'
 import { mergeText } from './merge3.js'
-import { walkProject } from './project-walk.js'
+import { walkProject, type WalkOptions } from './project-walk.js'
+import { parseGitState, WorkdirGit, type GitState } from './workdir-git.js'
 
 /** A project larger than this (bytes of copied files) gets no member copies. */
 export const WORKDIR_MAX_BYTES = 200 * 1024 * 1024
@@ -57,6 +70,9 @@ export interface LocalMemberWorkdirsOptions {
   readonly maxBytes?: number
   readonly maxFiles?: number
 }
+
+/** Where a copy keeps its base, relative to the copy's root (inside the root `.nexgent/`, which the walk skips). */
+export const WORKDIR_BASE_FILE = `${NEXGENT_DIR}/workdir-base.json`
 
 /** A file's content as compared: its hash and executable bit. */
 interface FileState {
@@ -112,8 +128,8 @@ async function put(path: string, body: Buffer, executable: boolean): Promise<voi
  * hashing only files whose size or mtime differ from `cache` (updated in
  * place).
  */
-async function scan(root: string, cache: Map<string, Seen>): Promise<Map<string, Seen>> {
-  const { files } = await walkProject(root)
+async function scan(root: string, cache: Map<string, Seen>, walk: WalkOptions): Promise<Map<string, Seen>> {
+  const { files } = await walkProject(root, walk)
   const now = new Map<string, Seen>()
   for (const file of files) {
     if (file.symlink) continue
@@ -176,24 +192,40 @@ export class LocalMemberWorkdirs implements MemberWorkdirs {
       this.pruned = true
       await prune(home).catch(() => undefined)
     }
-    const skipped: string[] = []
-    const { files, complete } = await walkProject(project, { symlinks: !isWindows, limit: this.options.maxFiles + 1, onSkippedDir: path => skipped.push(path) })
-    if (!complete || files.length > this.options.maxFiles) return undefined
-    if (files.reduce((sum, file) => sum + (file.symlink ? 0 : file.size), 0) > this.options.maxBytes) return undefined
     const root = nodePath.join(home, input.sessionId)
+    const objects = nodePath.join(home, 'objects')
+    const conflicts = nodePath.join(home, 'conflicts', input.sessionId)
+    // The session's copy from before (it was resumed): keep it with what its last turns left unmerged.
+    const resumed = await this.serial(() => LocalMemberWorkdir.resume(this, project, root, objects, conflicts))
+    if (resumed !== undefined) return resumed
+    // Everything the project holds when it fits; else what the snapshot walk sees; else no copy.
+    let fitting: { readonly ignored: boolean; readonly files: Awaited<ReturnType<typeof walkProject>>['files']; readonly skipped: readonly string[] } | undefined
+    for (const ignored of [true, false]) {
+      const skipped: string[] = []
+      const { files, complete } = await walkProject(project, { ...walkOf(ignored), symlinks: !isWindows, limit: this.options.maxFiles + 1, onSkippedDir: path => skipped.push(path) })
+      if (!complete || files.length > this.options.maxFiles) continue
+      if (files.reduce((sum, file) => sum + (file.symlink ? 0 : file.size), 0) > this.options.maxBytes) continue
+      fitting = { ignored, files, skipped }
+      break
+    }
+    if (fitting === undefined) return undefined
+    await mkdir(objects, { recursive: true })
+    const workdir = new LocalMemberWorkdir(this, project, root, objects, conflicts, fitting.ignored)
     await rm(root, { recursive: true, force: true })
     await mkdir(root, { recursive: true })
-    const objects = nodePath.join(home, 'objects')
-    await mkdir(objects, { recursive: true })
-    const workdir = new LocalMemberWorkdir(this, project, root, objects, nodePath.join(home, 'conflicts', input.sessionId))
     try {
-      await this.serial(() => workdir.copyIn(files, skipped))
+      await this.serial(() => workdir.copyIn(fitting.files, fitting.skipped))
     } catch (error) {
       await rm(root, { recursive: true, force: true }).catch(() => undefined)
       throw error
     }
     return workdir
   }
+}
+
+/** How a copy walks itself and its project: with the ignored files or without, dependency directories always skipped (they are linked). */
+function walkOf(ignored: boolean): WalkOptions {
+  return ignored ? { ignored: true, skipDirNames: LINKED_DIR_NAMES } : {}
 }
 
 /** Remove copies and conflict copies of a project not touched for {@link WORKDIR_RETENTION_MS}. */
@@ -231,6 +263,11 @@ export class LocalMemberWorkdir implements MemberWorkdir {
   private readonly copySeen = new Map<string, Seen>()
   private merges = 0
   private closed = false
+  /** How both sides are walked ({@link walkOf}). */
+  private readonly walk: WalkOptions
+  /** The repository part, when the project is a git repository; its state when last in sync. */
+  private git: WorkdirGit | undefined
+  private gitBase: GitState | undefined
 
   constructor(
     private readonly owner: LocalMemberWorkdirs,
@@ -238,7 +275,55 @@ export class LocalMemberWorkdir implements MemberWorkdir {
     readonly root: string,
     private readonly objects: string,
     private readonly conflictDir: string,
-  ) {}
+    private readonly ignored: boolean,
+  ) {
+    this.walk = walkOf(ignored)
+  }
+
+  /**
+   * Take over the copy an earlier open of the same session left, when its
+   * saved base belongs to this project (run inside the owner's queue).
+   */
+  static async resume(owner: LocalMemberWorkdirs, project: string, root: string, objects: string, conflictDir: string): Promise<LocalMemberWorkdir | undefined> {
+    let saved: { project?: unknown; base?: unknown; ignored?: unknown; git?: unknown }
+    try {
+      saved = JSON.parse(await readFile(abs(root, WORKDIR_BASE_FILE), 'utf8')) as typeof saved
+    } catch {
+      return undefined
+    }
+    if (saved.project !== project || typeof saved.base !== 'object' || saved.base === null) return undefined
+    const workdir = new LocalMemberWorkdir(owner, project, root, objects, conflictDir, saved.ignored === true)
+    for (const [path, state] of Object.entries(saved.base as Record<string, unknown>)) {
+      const { sha256: digest, executable } = (state ?? {}) as { sha256?: unknown; executable?: unknown }
+      if (typeof digest !== 'string' || typeof executable !== 'boolean') return undefined
+      workdir.base.set(path, { sha256: digest, executable })
+    }
+    const gitBase = parseGitState(saved.git)
+    if (gitBase !== undefined) {
+      workdir.git = await WorkdirGit.resume(project, root)
+      if (workdir.git !== undefined) workdir.gitBase = gitBase
+    }
+    // In use again: not pruned as old.
+    const now = new Date()
+    await utimes(root, now, now).catch(() => undefined)
+    return workdir
+  }
+
+  /** Save the base next to the copy, so a later open of the session can take the copy over. */
+  private async saveBase(): Promise<void> {
+    const file = abs(this.root, WORKDIR_BASE_FILE)
+    await mkdir(nodePath.dirname(file), { recursive: true })
+    const temp = `${file}.${process.pid}.tmp`
+    await writeFile(temp, JSON.stringify({ project: this.project, ignored: this.ignored, base: Object.fromEntries(this.base), ...(this.gitBase === undefined ? {} : { git: this.gitBase }) }))
+    await rename(temp, file)
+  }
+
+  /** Whether the copy holds a change that is not in the project yet (compared with its base): a file, or the repository. */
+  private async unmerged(): Promise<boolean> {
+    const copy = await scan(this.root, this.copySeen, this.walk)
+    for (const path of new Set([...this.base.keys(), ...copy.keys()])) if (!same(copy.get(path), this.base.get(path))) return true
+    return this.git !== undefined && this.gitBase !== undefined && (await this.git.changed(this.gitBase))
+  }
 
   /** Copy the walked files and link the skipped dependency directories (inside the owner's queue). */
   async copyIn(files: Awaited<ReturnType<typeof walkProject>>['files'], skipped: readonly string[]): Promise<void> {
@@ -278,6 +363,12 @@ export class LocalMemberWorkdir implements MemberWorkdir {
         // Without the link the member reinstalls what it needs.
       }
     }
+    const repository = await WorkdirGit.create(this.project, this.root).catch(() => undefined)
+    if (repository !== undefined) {
+      this.git = repository.git
+      this.gitBase = repository.state
+    }
+    await this.saveBase()
   }
 
   /** Store a base body once per project. */
@@ -302,28 +393,36 @@ export class LocalMemberWorkdir implements MemberWorkdir {
   }
 
   refresh(): Promise<void> {
-    return this.owner.serial(() => this.refreshNow())
+    return this.owner.serial(async () => {
+      await this.refreshNow()
+      if (!this.closed) await this.saveBase()
+    })
   }
 
   merge(): Promise<WorkdirMerge> {
     return this.owner.serial(async () => {
       const result = await this.mergeNow()
       await this.refreshNow()
+      if (!this.closed) await this.saveBase()
       return result
     })
   }
 
+  /** Remove the copy, unless it holds changes not merged yet (a stopped or failed turn's): those wait for the session's next open. */
   async close(): Promise<void> {
     if (this.closed) return
     this.closed = true
-    await this.owner.serial(() => rm(this.root, { recursive: true, force: true }))
+    await this.owner.serial(async () => {
+      if (await this.unmerged().catch(() => false)) return
+      await rm(this.root, { recursive: true, force: true })
+    })
   }
 
   /** Copy into the copy every file the project changed since the last sync that the member left alone. */
   private async refreshNow(): Promise<void> {
     if (this.closed) return
-    const project = await scan(this.project, this.projectSeen)
-    const copy = await scan(this.root, this.copySeen)
+    const project = await scan(this.project, this.projectSeen, this.walk)
+    const copy = await scan(this.root, this.copySeen, this.walk)
     for (const path of new Set([...this.base.keys(), ...project.keys()])) {
       const before = this.base.get(path)
       const now = project.get(path)
@@ -348,6 +447,7 @@ export class LocalMemberWorkdir implements MemberWorkdir {
       this.copySeen.set(path, await seenAfterWrite(target, state))
       this.base.set(path, state)
     }
+    if (this.git !== undefined && this.gitBase !== undefined) this.gitBase = await this.git.refresh(this.gitBase)
   }
 
   private async mergeNow(): Promise<WorkdirMerge> {
@@ -355,8 +455,8 @@ export class LocalMemberWorkdir implements MemberWorkdir {
     const merged: string[] = []
     const conflicts: WorkdirConflict[] = []
     if (this.closed) return { applied, merged, conflicts }
-    const project = await scan(this.project, this.projectSeen)
-    const copy = await scan(this.root, this.copySeen)
+    const project = await scan(this.project, this.projectSeen, this.walk)
+    const copy = await scan(this.root, this.copySeen, this.walk)
     const paths = [...new Set([...this.base.keys(), ...copy.keys()])].sort()
     let conflictRun: string | undefined
     for (const path of paths) {
@@ -410,6 +510,12 @@ export class LocalMemberWorkdir implements MemberWorkdir {
       // The copy now counts as in sync with the member's version, so the refresh gives it the project's.
       if (theirs === undefined) this.base.delete(path)
       else this.base.set(path, theirs)
+    }
+    // The repository after the files: its refs and index then describe what the project holds. `applied` stays a list of files.
+    if (this.git !== undefined && this.gitBase !== undefined) {
+      const repository = await this.git.merge(this.gitBase)
+      this.gitBase = repository.base
+      conflicts.push(...repository.conflicts)
     }
     return { applied, merged, conflicts }
   }

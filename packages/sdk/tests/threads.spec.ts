@@ -13,7 +13,7 @@ import * as nodePath from 'node:path'
 import { resolveUserDataLayout, type Context, type LLMRequest, type SessionRecord } from '@nexgent/kernel'
 import { llmSessionText, scriptedProvider, type ScriptedProvider, type ScriptEntry } from '@nexgent/test-support'
 import { describe, expect, it } from 'vitest'
-import { COORDINATOR_NOTES_FILE, threadRunName, threadStatusOf, type SdkEvent } from '../src/index.js'
+import { COORDINATOR_NOTES_FILE, SdkThreadHost, threadRunName, threadStatusOf, type SdkEvent, type ThreadRuntime } from '../src/index.js'
 import { testSdk, waitForEvent, type TestSdk } from './helpers.js'
 
 const THREAD_LINE = /You are a thread of this project's coordinator conversation, working on "([^"]+)"/
@@ -244,5 +244,66 @@ describe('threads through the SDK', () => {
     expect(threadStatusOf([...base, reply(report('x', 'which file?')), ended('completed')], false)).toEqual({ status: 'waiting', blocker: 'which file?' })
     expect(threadStatusOf([...base, ended('cancelled')], false)).toEqual({ status: 'stopped' })
     expect(threadStatusOf([...base, ended('error')], false)).toEqual({ status: 'failed' })
+  })
+})
+
+describe('threads under the coordinator\'s limits', () => {
+  it('gives a thread plan mode while the coordinator is in plan mode, and releases it with the coordinator\'s approval', async () => {
+    const t = await threadSdk([
+      { toolCalls: [{ name: 'start_thread', arguments: { title: 'Worker', task: 'Write result.txt.' } }] },
+      { content: 'Assigned.' },
+      { content: 'Noted.' },
+    ], {
+      Worker: [
+        { toolCalls: [{ name: 'write_file', arguments: { path: 'result.txt', content: 'changed' } }] },
+        { content: report('tried to write result.txt') },
+      ],
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: true })
+    const started = await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Plan the change; wait for my approval before editing.' })
+    await started.done
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 2))
+    const threadId = (t.events.find(event => event.type === 'member.start' && event.sessionId === coordinator.sessionId) as Extract<SdkEvent, { type: 'member.start' }>).run.childSessionId
+    expect(existsSync(nodePath.join(project.root, 'result.txt'))).toBe(false)
+    const threadRecords = await recordsOf(t, project.projectId, threadId)
+    expect(threadRecords[0]).toMatchObject({ type: 'session.start', plan: true })
+    expect(threadRecords.find(record => record.type === 'tool.result' && record.name === 'write_file')).toMatchObject({ isError: true, error: { code: 'sandbox/denied' } })
+    // The user approves the coordinator's plan: its threads leave plan mode with it, without an approval of their own.
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: false })
+    await expect.poll(async () => (await recordsOf(t, project.projectId, threadId)).findLast(record => record.type === 'session.mode'), { timeout: 3_000 })
+      .toMatchObject({ plan: false, reason: 'plan-approved' })
+  })
+
+  it('does not start an idle thread\'s next turn through message_thread while the most threads are running', async () => {
+    const ids = ['t1', 't2', 't3', 't4']
+    const running = new Set(ids.slice(0, 3))
+    const records = (id: string): SessionRecord[] => [
+      { type: 'session.start', seq: 1, ts: '2026-10-26T00:00:00.000Z', sessionId: id, version: 1, projectRoot: '/p', model: 'm', sandboxMode: 'workspace-write', thread: { coordinatorSessionId: 'c', title: id } },
+      { type: 'turn.start', seq: 2, ts: '2026-10-26T00:00:00.000Z', sessionId: id, turn: 1 },
+      { type: 'turn.end', seq: 3, ts: '2026-10-26T00:00:00.000Z', sessionId: id, turn: 1, reason: { kind: 'completed' } },
+    ] as SessionRecord[]
+    let started = 0
+    const host = new SdkThreadHost({
+      threadIds: async () => ids,
+      records: async (id: string) => records(id),
+      running: (id: string) => running.has(id),
+      needsApproval: () => false,
+      steer: async () => false,
+      startTurn: async (id: string) => {
+        started += 1
+        running.add(id)
+        return { turn: 2, done: new Promise(() => undefined) }
+      },
+      append: async () => undefined,
+      report: () => undefined,
+    } as unknown as ThreadRuntime)
+    await expect(host.message({ coordinatorSessionId: 'c', turn: 1, threadId: 't4', text: 'Continue the work.' })).rejects.toMatchObject({ code: 'tool/denied' })
+    expect(started).toBe(0)
+    // Once a thread ends, the idle one gets its next turn.
+    running.delete('t3')
+    await host.message({ coordinatorSessionId: 'c', turn: 1, threadId: 't4', text: 'Continue the work.' })
+    expect(started).toBe(1)
   })
 })

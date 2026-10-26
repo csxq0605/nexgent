@@ -593,6 +593,7 @@ export class LearningHost {
       sources,
       projectMessages,
       requests: [run.task, ...run.messages.filter(message => message.source !== 'inject').map(message => message.text), ...run.feedback.map(entry => entry.comment)],
+      ruleRequests: [...(run.taskFromThread === true ? [] : [run.task]), ...run.messages.filter(message => message.source !== 'inject' && message.source !== 'thread').map(message => message.text), ...run.feedback.map(entry => entry.comment)],
       votedFromTask: new Set([...votesFromTask(userOps, item.taskId), ...votesFromTask(projectOps, item.taskId)]),
       edits: reflectionEdits([...userOps, ...projectOps]),
     })

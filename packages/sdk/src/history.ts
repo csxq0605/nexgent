@@ -191,6 +191,7 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
           text: record.content,
           finishReason: record.finishReason,
           interrupted: record.interrupted === true,
+          ...(record.reasoning === undefined || record.reasoning === '' ? {} : { reasoning: record.reasoning }),
         })
         break
       case 'tool.result':
