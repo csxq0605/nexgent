@@ -836,7 +836,24 @@ export class Agent {
       this.planTool = undefined
     }
     this.planning = plan
+    for (const listener of [...this.modeListeners]) {
+      try {
+        listener({ sandboxMode, plan, reason })
+      } catch {
+        // a listener's failure does not undo the switch
+      }
+    }
   }
+
+  /** Listen for {@link setMode} switches (after `session.mode` is written); returns the unsubscribe. */
+  onModeChange(listener: (change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void): () => void {
+    this.modeListeners.add(listener)
+    return () => {
+      this.modeListeners.delete(listener)
+    }
+  }
+
+  private readonly modeListeners = new Set<(change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void>()
 
   private offerExitPlan(): void {
     if (this.planTool !== undefined) return

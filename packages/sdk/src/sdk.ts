@@ -593,15 +593,28 @@ export class LocalNexgentSdk implements NexgentSdk {
   }
 
   /**
-   * A thread the coordinator gives work to while the coordinator is in plan
-   * mode works in plan mode too, so nothing changes before the user approves
-   * a plan (the thread's own `exit_plan`).
+   * A thread follows its coordinator's plan mode: while the coordinator is in
+   * plan mode, a thread it gives work to works in plan mode too, so nothing
+   * changes before the user approves the plan; once the coordinator is out
+   * of plan mode, the thread is too (one approval releases them together).
+   * Threads open now are released at once ({@link releaseThreads}); this
+   * catches one that was closed then.
    */
   private async followCoordinatorPlan(project: ProjectEntry, threadSessionId: string): Promise<void> {
     const thread = (await this.rootSession(project, threadSessionId)).agent
     const coordinatorSessionId = thread.thread?.coordinatorSessionId
-    if (coordinatorSessionId === undefined || thread.plan) return
-    if (project.sessions.get(coordinatorSessionId)?.agent.plan === true) await thread.setMode({ plan: true })
+    const coordinator = coordinatorSessionId === undefined ? undefined : project.sessions.get(coordinatorSessionId)?.agent
+    if (coordinator === undefined || coordinator.plan === thread.plan) return
+    await thread.setMode({ plan: coordinator.plan }, coordinator.plan ? 'host' : 'plan-approved')
+  }
+
+  /** The coordinator left plan mode: its open threads in plan mode leave it too. */
+  private async releaseThreads(project: ProjectEntry, coordinatorSessionId: string): Promise<void> {
+    for (const entry of [...project.sessions.values()]) {
+      const agent = entry.agent
+      if (agent.thread?.coordinatorSessionId !== coordinatorSessionId || !agent.plan || agent.isClosed) continue
+      await agent.setMode({ plan: false }, 'plan-approved')
+    }
   }
 
   /** Coordinator step two: what the project's thread host needs from the SDK. */
@@ -716,10 +729,18 @@ export class LocalNexgentSdk implements NexgentSdk {
   // -------------------------------------------------------------------------
 
   private track(project: ProjectEntry, agent: Agent, runStarts: Map<string, SubagentStartRecord> = new Map()): SessionEntry {
+    const unsubscribe = agent.subscribe(event => this.onEvent(project, entry, event))
+    // A coordinator leaving plan mode (its plan approved) releases its threads that are in plan mode with it.
+    const offMode = agent.onModeChange(change => {
+      if (!change.plan) void this.releaseThreads(project, agent.sessionId).catch(error => this.emit(project.projectId, agent.sessionId, { type: 'error', error: toErrorInfo(error), fatal: false }))
+    })
     const entry: SessionEntry = {
       agent,
       runStarts,
-      unsubscribe: agent.subscribe(event => this.onEvent(project, entry, event)),
+      unsubscribe: () => {
+        unsubscribe()
+        offMode()
+      },
     }
     project.sessions.set(agent.sessionId, entry)
     return entry

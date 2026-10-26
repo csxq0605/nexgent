@@ -248,7 +248,7 @@ describe('threads through the SDK', () => {
 })
 
 describe('threads under the coordinator\'s limits', () => {
-  it('gives a thread plan mode while the coordinator is in plan mode, so it changes nothing', async () => {
+  it('gives a thread plan mode while the coordinator is in plan mode, and releases it with the coordinator\'s approval', async () => {
     const t = await threadSdk([
       { toolCalls: [{ name: 'start_thread', arguments: { title: 'Worker', task: 'Write result.txt.' } }] },
       { content: 'Assigned.' },
@@ -270,6 +270,10 @@ describe('threads under the coordinator\'s limits', () => {
     const threadRecords = await recordsOf(t, project.projectId, threadId)
     expect(threadRecords[0]).toMatchObject({ type: 'session.start', plan: true })
     expect(threadRecords.find(record => record.type === 'tool.result' && record.name === 'write_file')).toMatchObject({ isError: true, error: { code: 'sandbox/denied' } })
+    // The user approves the coordinator's plan: its threads leave plan mode with it, without an approval of their own.
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: false })
+    await expect.poll(async () => (await recordsOf(t, project.projectId, threadId)).findLast(record => record.type === 'session.mode'), { timeout: 3_000 })
+      .toMatchObject({ plan: false, reason: 'plan-approved' })
   })
 
   it('does not start an idle thread\'s next turn through message_thread while the most threads are running', async () => {
