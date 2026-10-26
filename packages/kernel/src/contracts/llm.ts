@@ -264,7 +264,7 @@ export interface TextDeltaEvent {
   readonly text: string
 }
 
-/** A chunk of reasoning text (only when `thinking: 'on'`); never persisted to the session. */
+/** A chunk of reasoning text (only when `thinking: 'on'`); the step's whole text is kept in `assistant.message.reasoning`. */
 export interface ReasoningDeltaEvent {
   readonly type: 'reasoning.delta'
   readonly text: string

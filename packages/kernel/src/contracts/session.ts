@@ -107,6 +107,8 @@ export interface AssistantMessageRecord extends SessionRecordBase {
   readonly interrupted?: true
   /** Verbatim provider blocks replayed on resume; see `AssistantMessage.providerContent`. */
   readonly providerContent?: JsonValue
+  /** The reasoning text the reply streamed (`reasoning.delta`, thinking on), kept so the session shows it again; never sent back to the model. */
+  readonly reasoning?: string
   /** Present when `finishReason` is `'refusal'`. */
   readonly refusal?: RefusalInfo
 }

@@ -105,6 +105,7 @@ export function fromHistory(items: readonly HistoryItem[]): TimelineEntry[] {
         out.push({ kind: 'user', key: `u:${item.turn}:${index}`, turn: item.turn, text: item.text, feedback: item.source === 'feedback', materials: item.materials, ...(item.source === 'thread' ? { thread: true as const } : {}) })
         break
       case 'assistant':
+        if (item.reasoning !== undefined) out.push({ kind: 'reasoning', key: reasoningKey(item.turn, item.step), turn: item.turn, step: item.step, text: item.reasoning, streaming: false })
         if (item.text.length === 0 && !item.interrupted) break
         out.push({ kind: 'assistant', key: assistantKey(item.turn, item.step), turn: item.turn, step: item.step, text: item.text, streaming: false, interrupted: item.interrupted })
         break

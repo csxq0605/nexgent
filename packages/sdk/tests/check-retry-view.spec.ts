@@ -33,6 +33,17 @@ describe('check retries and rewinds in the history', () => {
     expect(historyItems(records)[1]).toEqual({ kind: 'rewind', rewind: { toTurn: 1, restored: ['a.txt'], deleted: ['b.txt'] } })
   })
 
+  it('carries a step\'s saved reasoning into the history', () => {
+    const base = { formatVersion: 1, sessionId: 's', ts: '2026-10-17T00:00:00.000Z', requestId: 'r', usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0, reasoningTokens: 0 } }
+    const records = [
+      { ...base, seq: 1, type: 'assistant.message', turn: 1, step: 1, content: 'ok', finishReason: 'stop', reasoning: 'Check the date first.' },
+      { ...base, seq: 2, type: 'assistant.message', turn: 2, step: 1, content: 'ok', finishReason: 'stop' },
+    ] as unknown as SessionRecord[]
+    const items = historyItems(records)
+    expect(items[0]).toMatchObject({ kind: 'assistant', reasoning: 'Check the date first.' })
+    expect(items[1]).not.toHaveProperty('reasoning')
+  })
+
   it('settings carry the retry count and the project check commands', async () => {
     const t = await testSdk([])
     const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })

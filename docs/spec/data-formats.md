@@ -253,7 +253,7 @@
 | `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
 | `turn.start` | 一轮开始（一条用户消息及其触发的全部模型调用与工具调用） | `turn`、`handbook?`（这一轮注入的经验手册条目 id，按检索顺序，至多 `HANDBOOK_TOP_K` 个；没注入时不写）、`organization?`（这一轮是否用成员，`{ decision: "solo" \| "team", chosenBy: "size" \| "control" \| "default" \| "memory" \| "retry", suggested?: OrganizationName, change? }`；只在根会话、装了 `ctx.organizer` 时写，见 §工作流“按任务组队”；`retry` 只出现在旧记录里；`change` 是协调者复盘给这一轮的改动说明 `OrganizationChangeNote`，见 §组织库“协调者复盘”） |
 | `user.message` | 用户消息进入会话，或注入的合成上下文，或反馈轮的提示，或对话与讨论串之间的消息 | `turn`、`content`、`source: "user" \| "inject" \| "feedback" \| "thread"`、`materials?` |
-| `assistant.message` | 一次模型调用的流结束（含被取消的流） | `turn`、`step`、`requestId`、`content`、`toolCalls?`、`usage`、`finishReason`、`interrupted?`、`providerContent?`、`refusal?` |
+| `assistant.message` | 一次模型调用的流结束（含被取消的流） | `turn`、`step`、`requestId`、`content`、`toolCalls?`、`usage`、`finishReason`、`interrupted?`、`providerContent?`、`refusal?`、`reasoning?` |
 | `tool.result` | 一次工具调用返回 | `turn`、`step`、`toolCallId`、`name`、`content`、`isError`、`error?`、`meta?`、`durationMs` |
 | `turn.end` | 一轮结束 | `turn`、`reason` |
 | `checkpoint` | 见“checkpoint” | `coversSeq`、`state` |
@@ -288,6 +288,7 @@
 - `assistant.message.usage`：`LLMUsage`，六个字段 `inputTokens / outputTokens / totalTokens / cacheReadTokens / cacheWriteTokens / reasoningTokens` 每个都是非负整数或字符串 `"unknown"`；provider 没报用量时全为 `"unknown"`，不写 0。`inputTokens` 只是未命中缓存的输入，计费输入 = `inputTokens + cacheReadTokens + cacheWriteTokens`；`totalTokens` = 输入 + 输出 + 缓存读 + 缓存写。`cacheWriteTokens` 是后加的字段，schema 中为可选：没有它的旧记录读出时按 `"unknown"` 补上，新写入的记录总是带它。
 - `assistant.message.finishReason`：`stop | tool-calls | max-tokens | aborted | refusal | pause | error`。`refusal` 时附 `refusal: { category?, explanation? }`，该回复的工具调用不执行。`pause`对应 Claude 的 `stop_reason: "pause_turn"`：回复照常记录（含 `providerContent`），loop 把它原样带回、再发一次请求让模型接着做，同一轮内的续跑次数有上限，超过时以可读错误结束轮次；账本 `llm.request.end` 的 `status` 为 `ok`、`finishReason` 为 `pause`。
 - `assistant.message.providerContent`：provider 返回的内容块原样（JSON），用于回放时保留 thinking 块；provider 没给则不写。
+- `assistant.message.reasoning`：这次调用流出的思考文字（`reasoning.delta` 拼起来；provider 重试时丢掉失败那次的），是会话记录的一部分，重开对话时界面照样能展开；不进投影的 `messages`，不发回模型（回放靠 `providerContent`）。没有思考文字时不写。
 - `assistant.message.interrupted: true`：该轮在流中被取消，`content` 是已流出的前缀，`toolCalls` 不写（未派发的调用不进入历史）。
 - `tool.result.error`：`ErrorInfo = { name, code, message, details? }`，仅当 `isError` 为真；`meta` 是工具私有的 JSON 值（如 diff），原样持久化。
 - `max-tokens` 且回复含工具调用时：工具调用记录在案但不执行，轮次以 `{ kind: "max-tokens" }` 结束；下一次请求由历史修复以合成的错误结果答复这些调用。

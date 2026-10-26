@@ -375,6 +375,7 @@ export const sessionRecordSchema: JsonObject = {
         interrupted: { const: true },
         providerContent: ref('jsonValue'),
         refusal: ref('refusalInfo'),
+        reasoning: { type: 'string' },
       },
       ['turn', 'step', 'requestId', 'content', 'usage', 'finishReason'],
     ),

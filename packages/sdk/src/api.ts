@@ -204,7 +204,7 @@ export interface CompactionUserWords {
 
 export type HistoryItem =
   | { readonly kind: 'user'; readonly turn: number; readonly text: string; readonly source: Exclude<UserMessageSource, 'inject'>; readonly materials: readonly string[] }
-  | { readonly kind: 'assistant'; readonly turn: number; readonly step: number; readonly text: string; readonly finishReason: FinishReason; readonly interrupted: boolean }
+  | { readonly kind: 'assistant'; readonly turn: number; readonly step: number; readonly text: string; readonly finishReason: FinishReason; readonly interrupted: boolean; readonly reasoning?: string }
   | { readonly kind: 'tool'; readonly turn: number; readonly step: number; readonly call: ToolCall; readonly content: string; readonly isError: boolean; readonly durationMs: number }
   | { readonly kind: 'approval'; readonly turn: number; readonly request: ApprovalRequest; readonly decision?: ApprovalDecision }
   | { readonly kind: 'deliverable'; readonly turn: number; readonly deliverable: DeliverableVersionRef }

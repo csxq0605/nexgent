@@ -281,6 +281,35 @@ describe('provider retries', () => {
     expect(result.reason).toEqual({ kind: 'completed' })
     expect(events.find(event => event.type === 'request.retry')).toMatchObject({ turn: 1, step: 1, attempt: 2, delayMs: 10 })
     expect(store.of(agent.sessionId, 'assistant.message')).toHaveLength(1)
+    // The failed attempt's reasoning is not kept.
+    expect(store.of(agent.sessionId, 'assistant.message')[0]).not.toHaveProperty('reasoning')
     await agent.close()
+  })
+})
+
+describe('reasoning text', () => {
+  it('is kept in the session record of its step, and not sent back to the model', async () => {
+    harness = await bootHarness({
+      script: [
+        [{ type: 'reasoning.delta', text: 'Read the file ' }, { type: 'reasoning.delta', text: 'first.' }, ...toolCallReply('c1', 'echo', {})],
+        textReply('done'),
+        textReply('again'),
+      ],
+    })
+    const { app, store, llm } = harness
+    app.ctx.tools.register({
+      definition: { name: 'echo', description: 'e', inputSchema: { type: 'object' }, effects: ['read'], approval: 'never' },
+      handler: async () => ({ content: 'ok' }),
+    })
+    const agent = await app.agents.create()
+    await agent.run('hi')
+    const replies = store.of(agent.sessionId, 'assistant.message')
+    expect(replies[0]).toMatchObject({ step: 1, reasoning: 'Read the file first.' })
+    expect(replies[1]).not.toHaveProperty('reasoning')
+    await agent.close()
+    const resumed = await app.agents.resume(agent.sessionId)
+    await resumed.run('more')
+    expect(JSON.stringify(llm.requests.at(-1)!.messages)).not.toContain('Read the file first.')
+    await resumed.close()
   })
 })

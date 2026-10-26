@@ -484,6 +484,8 @@ interface StreamOutcome {
   readonly providerContent?: JsonValue
   /** Set with `finish: 'refusal'`. */
   readonly refusal?: RefusalInfo
+  /** The reasoning text the reply streamed (absent when none). */
+  readonly reasoning?: string
 }
 
 interface Authorization {
@@ -2269,6 +2271,7 @@ export class Agent {
           finishReason: outcome.finish,
           ...(interrupted ? { interrupted: true as const } : {}),
           ...(outcome.refusal === undefined ? {} : { refusal: outcome.refusal }),
+          ...(outcome.reasoning === undefined ? {} : { reasoning: outcome.reasoning }),
         })
         if (!(interrupted && outcome.content === '')) {
           this.messages.push({ role: 'assistant', content: outcome.content, ...extras })
@@ -2367,6 +2370,7 @@ export class Agent {
     this.emit({ type: 'request.start', sessionId: this.sessionId, turn, step, requestId, model: this.model })
 
     let content = ''
+    let reasoning = ''
     const calls = new Map<number, ToolCall>()
     let usage: LLMUsage | undefined
     let finish: StreamOutcome['finish'] | undefined
@@ -2423,6 +2427,7 @@ export class Agent {
             this.emit({ type: 'text.delta', sessionId: this.sessionId, turn, step, text: event.text })
             break
           case 'reasoning.delta':
+            reasoning += event.text
             this.emit({ type: 'reasoning.delta', sessionId: this.sessionId, turn, step, text: event.text })
             break
           case 'tool-call.start':
@@ -2437,6 +2442,8 @@ export class Agent {
             usage = event.usage
             break
           case 'retry':
+            // The failed attempt's reasoning is dropped with it.
+            reasoning = ''
             this.emit({ type: 'request.retry', sessionId: this.sessionId, turn, step, requestId, attempt: event.attempt, delayMs: event.delayMs, error: event.error })
             break
           case 'done':
@@ -2469,7 +2476,7 @@ export class Agent {
     this.charge(0, reportedUsage)
     await this.warnCosts(turn)
     const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, call]) => call)
-    const base = { requestId, content, usage: reportedUsage }
+    const base = { requestId, content, usage: reportedUsage, ...(reasoning === '' ? {} : { reasoning }) }
 
     const modelTimeout = timeoutOf(whole.signal, MODEL_TIMEOUT)
     if (idleTimedOut || (modelTimeout !== undefined && !signal.aborted)) {
