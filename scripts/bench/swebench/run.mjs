@@ -189,6 +189,10 @@ async function runInstance(instance, server) {
     // The key goes in through the environment of `docker exec` (`-e NAME` without a value), never on its command line.
     const env = ['-e', `NEXGENT_HOME=${HOME_IN_CONTAINER}`, '-e', 'NEXGENT_API_KEY']
     if (EXTRA_CA !== undefined) env.push('-e', `NODE_EXTRA_CA_CERTS=${CA_IN_CONTAINER}`)
+    // The images install the repository into the conda env `testbed`, which only an interactive shell activates
+    // (~/.bashrc). Put it first on PATH so `python` and `pytest` in the agent's commands are the ones the tests use.
+    const testbedPath = docker(['exec', name, 'bash', '-c', 'test -d /opt/miniconda3/envs/testbed/bin && echo "/opt/miniconda3/envs/testbed/bin:$PATH"'], { check: false }).stdout.trim()
+    if (testbedPath !== '') env.push('-e', `PATH=${testbedPath}`, '-e', 'CONDA_DEFAULT_ENV=testbed', '-e', 'CONDA_PREFIX=/opt/miniconda3/envs/testbed')
     if (server !== undefined) env.push('-e', `NEXGENT_API_BASE_URL=${server.baseUrl}`)
     const started = Date.now()
     const cli = await run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/node/bin/node', '/opt/nexgent/apps/cli/bin/nexgent.mjs', 'run', '--project', '/testbed', '--task', taskText(instance), '--sandbox', 'full-access', '--json'], { timeoutMs: TIMEOUT_MS, env: { ...process.env, NEXGENT_API_KEY: real ? apiKey : SCRIPTED_KEY } })

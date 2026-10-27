@@ -10,7 +10,7 @@
  *
  * Usage:
  *   node scripts/bench/swebench/summarize.mjs --out <run dir> [--report <harness report json>]
- *     [--price 3,15,0.3,3.75] [--json]
+ *     [--price 2,10,0.2,2.5] [--json]
  */
 import { readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
@@ -20,7 +20,7 @@ const { values: args } = parseArgs({
   options: {
     out: { type: 'string' },
     report: { type: 'string' },
-    price: { type: 'string', default: '3,15,0.3,3.75' },
+    price: { type: 'string', default: '2,10,0.2,2.5' },
     json: { type: 'boolean', default: false },
   },
 })
