@@ -89,6 +89,8 @@ const TIMEOUT_MS = Number(args['timeout-min']) * 60_000
 const HOME_IN_CONTAINER = '/root/.nexgent-bench'
 /** Fixed test key for the scripted modes; the scripted server never checks it. */
 const SCRIPTED_KEY = 'nexgent-bench-scripted-key'
+const EXTRA_CA = process.env.NODE_EXTRA_CA_CERTS || undefined
+const CA_IN_CONTAINER = '/opt/nexgent-extra-ca.crt'
 
 function docker(argv, options = {}) {
   const result = spawnSync('docker', argv, { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, ...options })
@@ -130,9 +132,9 @@ function scriptFor(instance) {
   ]
 }
 
-function run(command, argv, { input, timeoutMs }) {
+function run(command, argv, { input, timeoutMs, env }) {
   return new Promise(resolvePromise => {
-    const child = spawn(command, argv, { stdio: ['pipe', 'pipe', 'pipe'] })
+    const child = spawn(command, argv, { stdio: ['pipe', 'pipe', 'pipe'], env })
     let stdout = ''
     let stderr = ''
     child.stdout.on('data', chunk => { stdout += chunk })
@@ -171,7 +173,9 @@ async function runInstance(instance, server) {
   await mkdir(dir, { recursive: true })
   ensureImage(instance.image)
   const name = `nexgent-bench-${instance.instance_id.replace(/[^a-zA-Z0-9_.-]/g, '-')}-${process.pid}`
-  docker(['run', '-d', '--name', name, '--network', 'host', '-v', `${REPO}:/opt/nexgent:ro`, '-v', `${NODE_DIR}:/opt/node:ro`, instance.image, 'tail', '-f', '/dev/null'])
+  // Behind a TLS-inspecting proxy the host trusts an extra CA through NODE_EXTRA_CA_CERTS; the CLI in the container needs it too.
+  const caMount = EXTRA_CA === undefined ? [] : ['-v', `${EXTRA_CA}:${CA_IN_CONTAINER}:ro`]
+  docker(['run', '-d', '--name', name, '--network', 'host', '-v', `${REPO}:/opt/nexgent:ro`, '-v', `${NODE_DIR}:/opt/node:ro`, ...caMount, instance.image, 'tail', '-f', '/dev/null'])
   try {
     const config = {
       version: 1,
@@ -182,10 +186,12 @@ async function runInstance(instance, server) {
       ...(args['cost-cap'] === undefined ? {} : { costCaps: { perTask: { maxUsd: Number(args['cost-cap']) } } }),
     }
     docker(['exec', '-i', name, 'bash', '-c', 'mkdir -p /testbed/.nexgent && cat > /testbed/.nexgent/config.json'], { input: JSON.stringify(config, null, 2) })
-    const env = ['-e', `NEXGENT_HOME=${HOME_IN_CONTAINER}`, '-e', `NEXGENT_API_KEY=${real ? apiKey : SCRIPTED_KEY}`]
+    // The key goes in through the environment of `docker exec` (`-e NAME` without a value), never on its command line.
+    const env = ['-e', `NEXGENT_HOME=${HOME_IN_CONTAINER}`, '-e', 'NEXGENT_API_KEY']
+    if (EXTRA_CA !== undefined) env.push('-e', `NODE_EXTRA_CA_CERTS=${CA_IN_CONTAINER}`)
     if (server !== undefined) env.push('-e', `NEXGENT_API_BASE_URL=${server.baseUrl}`)
     const started = Date.now()
-    const cli = await run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/node/bin/node', '/opt/nexgent/apps/cli/bin/nexgent.mjs', 'run', '--project', '/testbed', '--task', taskText(instance), '--sandbox', 'full-access', '--json'], { timeoutMs: TIMEOUT_MS })
+    const cli = await run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/node/bin/node', '/opt/nexgent/apps/cli/bin/nexgent.mjs', 'run', '--project', '/testbed', '--task', taskText(instance), '--sandbox', 'full-access', '--json'], { timeoutMs: TIMEOUT_MS, env: { ...process.env, NEXGENT_API_KEY: real ? apiKey : SCRIPTED_KEY } })
     const ms = Date.now() - started
     await writeFile(join(dir, 'cli.jsonl'), cli.stdout)
     await writeFile(join(dir, 'stderr.txt'), cli.stderr)
