@@ -85,17 +85,41 @@ const NO_TESTS_RAN: readonly number[] = [126, 127]
 const PYTEST_NO_TESTS_RAN: readonly number[] = [4, 5]
 const PYTEST_PATTERN = /^(?:uv\s+run\s+)?(?:python3?\s+-m\s+)?pytest\b/
 
+/** Runner options that make a run with no tests exit 0. */
+const PASS_WITH_NO_TESTS = /(?:^|\s)--pass(?:WithNoTests|-with-no-tests)\b/
+
+/**
+ * Whether the exit code of a command may not be the test runner's: the
+ * command goes on after the runner (`;`, `||`, a line break), pipes its
+ * output into another command (`|`, `|&`; the shell tool sets no
+ * `pipefail`, so the last command's code wins) or runs it in the
+ * background (`&`). `&&` keeps the runner's failing code, and redirects
+ * (`2>&1`, `&>`) change no code; quoted text is an argument and is not
+ * looked at.
+ */
+export function exitCodeMasked(command: string): boolean {
+  const bare = command
+    .replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
+    .replace(/&&/g, ' ')
+    .replace(/\d*>&\d*-?|&>>?/g, ' ')
+  return /[;|&\n]/.test(bare)
+}
+
 /**
  * Whether a shell call counts as a test run for `test-command` checks: the
  * command matches {@link TEST_COMMAND_PATTERN} and its exit code does not
  * say that no test ran. Step 5 (user decision 2026-10-13, ADR 0006
  * decision 10) keeps failing runs: a failing run is a failing check. Exploratory
  * commands (`ls`, `cat`, builds) never match the pattern, whatever their
- * exit code. `exitCode` absent reads as 0 (step-4 callers).
+ * exit code. A run whose exit code may not be the runner's
+ * ({@link exitCodeMasked}: `npm test || true`, `pytest | tail`) or that
+ * passes with no tests (`--passWithNoTests`) says nothing about the tests
+ * and does not count either. `exitCode` absent reads as 0 (step-4 callers).
  */
 export function testCommandRan(command: string, exitCode: number | undefined): boolean {
   const text = command.trim()
   if (!TEST_COMMAND_PATTERN.test(text)) return false
+  if (exitCodeMasked(text) || PASS_WITH_NO_TESTS.test(text)) return false
   const code = exitCode ?? 0
   if (NO_TESTS_RAN.includes(code)) return false
   if (PYTEST_PATTERN.test(text) && PYTEST_NO_TESTS_RAN.includes(code)) return false
