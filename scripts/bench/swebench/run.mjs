@@ -31,6 +31,11 @@
  *   node scripts/bench/swebench/run.mjs --instances <jsonl> --out <dir>
  *     [--mode scripted-gold|scripted-empty|real] [--label <name>]
  *     [--cost-cap <usd>] [--timeout-min 60] [--model <id>] [--allow-spend]
+ *     [--budget <usd> --price in,out,cacheRead,cacheWrite]
+ *
+ * `--budget` stops before the next instance once the summed cost of the
+ * instances run so far (their token totals at `--price`, USD per million
+ * tokens) plus one `--cost-cap` would pass it.
  *
  * Needs `pnpm build` (the CLI and test-support run from `dist/`) and a
  * running Docker. Images are pulled as named in the instance; set
@@ -55,6 +60,8 @@ const { values: args } = parseArgs({
     'timeout-min': { type: 'string', default: '60' },
     model: { type: 'string' },
     mirror: { type: 'string' },
+    budget: { type: 'string' },
+    price: { type: 'string', default: '2,10,0.2,2.5' },
     'allow-spend': { type: 'boolean', default: false },
   },
 })
@@ -203,7 +210,15 @@ async function main() {
   const predictions = join(OUT, 'predictions.jsonl')
   await writeFile(predictions, '')
   let harness
+  const [pIn, pOut, pRead, pWrite] = args.price.split(',').map(Number)
+  const budget = args.budget === undefined ? Infinity : Number(args.budget)
+  const reserve = args['cost-cap'] === undefined ? 0 : Number(args['cost-cap'])
+  let spent = 0
   for (const instance of instances) {
+    if (spent + reserve > budget) {
+      console.log(`budget: stopping before ${instance.instance_id}, spent $${spent.toFixed(2)} of $${budget}`)
+      break
+    }
     let server
     if (!real) {
       harness ??= await import(join(REPO, 'packages/test-support/dist/index.js'))
@@ -211,8 +226,9 @@ async function main() {
     }
     try {
       const { patch, usage } = await runInstance(instance, server)
+      spent += (usage.inputTokens * pIn + usage.outputTokens * pOut + usage.cacheReadTokens * pRead + usage.cacheWriteTokens * pWrite) / 1e6
       await appendFile(predictions, `${JSON.stringify({ instance_id: instance.instance_id, model_name_or_path: LABEL, model_patch: patch })}\n`)
-      console.log(`${instance.instance_id}: exit ${usage.exitCode}, ${usage.patchBytes} patch bytes, ${usage.requests} requests, ${Math.round(usage.ms / 1000)} s`)
+      console.log(`${instance.instance_id}: exit ${usage.exitCode}, ${usage.patchBytes} patch bytes, ${usage.requests} requests, ${Math.round(usage.ms / 1000)} s, total $${spent.toFixed(2)}`)
     } catch (error) {
       console.error(`${instance.instance_id}: ${error.message}`)
       await appendFile(predictions, `${JSON.stringify({ instance_id: instance.instance_id, model_name_or_path: LABEL, model_patch: '' })}\n`)
