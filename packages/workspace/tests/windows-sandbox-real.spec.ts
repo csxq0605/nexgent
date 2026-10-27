@@ -4,7 +4,7 @@
  * runs PowerShell commands as the sandbox account. Runs only on Windows
  * with NEXGENT_WINDOWS_SANDBOX_TEST=1 (windows-accept.yml).
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -35,6 +35,9 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       expect(installed, JSON.stringify(installed)).toMatchObject({ kind: 'installed', status: { kind: 'active' } })
     }
     root = await realpath(await mkdtemp(nodePath.join(tmpdir(), 'nxwin-')))
+    // Private like a profile folder: only this user, SYSTEM and Administrators (a runner's temp drive lets Users read).
+    const acl = spawnSync('icacls', [root, '/inheritance:r', '/grant:r', `${process.env.USERNAME}:(OI)(CI)F`, '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-544:(OI)(CI)F'], { encoding: 'utf8' })
+    expect(acl.status, acl.stdout + acl.stderr).toBe(0)
     project = nodePath.join(root, 'proj')
     temp = nodePath.join(root, 'tmp')
     outside = nodePath.join(root, 'outside')
