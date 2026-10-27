@@ -70,9 +70,10 @@ turn.start → [feedback] → user.message(inject)* → user.message(user|feedba
 
 1. 人格段与 `# Environment`（`renderSystemPrompt`）；
 2. `# Working with files`（见下节）；
-3. `# Working with others`（只在协作工具可见时出现，见 §步骤 3 系统提示增量）；
-4. 本轮各提供者的 `systemSections`，每节渲染为 `# <title>` + 换行 + `body`，按提供者顺序、同一提供者内按 `id` 排序；
-5. 结尾行（`suffix`）。工具定义随请求的 `tools` 发送，提示里不再列一遍。
+3. `# Checking your work`（只在 `bash` 或 `pwsh` 可见时出现，见 §系统提示增量）；
+4. `# Working with others`（只在协作工具可见时出现，见 §步骤 3 系统提示增量）；
+5. 本轮各提供者的 `systemSections`，每节渲染为 `# <title>` + 换行 + `body`，按提供者顺序、同一提供者内按 `id` 排序；
+6. 结尾行（`suffix`）。工具定义随请求的 `tools` 发送，提示里不再列一遍。
 
 提供者的建议内容（由各包实现，不是契约）：说明文件提供者输出 `# Project instructions`（项目根 `AGENTS.md`，没有则 `NEXGENT.md`，大小上限与截断规则写在 `@nexgent/context` 的 README）。**会变的内容不进系统提示**（系统提示一变，缓存前缀就失效）：目标提供者在有 `active` 目标、且模型看到的历史里还没有当前目标时，以 `inject` 注入一条 `# Current goal`（目标设定或修改后的第一轮，以及压缩之后）；技能提供者在技能列表与这个会话上次注入的不同时，以 `inject` 注入技能列表（名称、一行描述、触发说明，并说明用 `load_skill` 读全文）。
 
@@ -82,6 +83,8 @@ turn.start → [feedback] → user.message(inject)* → user.message(user|feedba
 
 1. 用户要的成果文件（报告、文档、表格、图）用 `present` 声明，每次修订后再次声明，再次声明时带上 `present` 返回的 `deliverableId`，使之成为同一成果的新版本；普通的代码修改不需要 `present`，改动过的文件本来就会展示给用户。轮内改了哪些文件由 `turn.files` 给出，桌面应用在这一轮下面列出“本轮改动的文件”。
 2. 用户附加的资料是只读副本，按随资料给出的路径读取，结果写进项目（资料在用户数据目录里，路径是绝对路径；数据还在项目里的旧项目是 `.nexgent/materials/` 下的相对路径）。只在项目有资料（`ctx.tasking.materials.list()` 非空，轮次开始时检查）时出现。
+
+`# Checking your work` 一节由 `checkGuidance` 生成（措辞以代码为准），只在 `bash` 或 `pwsh` 可见时出现：报告代码或其他能运行的结果完成之前自己检查；任务报告了错误行为时先用短脚本或命令复现、看到它失败；改完再跑一遍复现、试任务隐含的边界情况、跑覆盖改动代码的现有测试，修好自己弄坏的；不改现有测试，除非任务要求；最后的回复说明跑了什么、哪些没能检查。依据：2026-10-27 在 SWE-bench Verified 上实测，没有这一节时多数运行 2–4 次工具调用就结束，什么也没运行。
 
 怎么新建和修改文件只由工具描述说明（`write_file` 可覆盖本会话读过的文件或带 `overwrite: true`，`str_replace` 支持 `replace_all` 与一次多处编辑，`read_file` 带行号，见 `permissions.md` §路径策略与写入限制）；`bash` / `pwsh` 的描述只留一句“改文件优先用 write_file / str_replace”。
 
