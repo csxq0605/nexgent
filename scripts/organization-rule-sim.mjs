@@ -1,21 +1,34 @@
 #!/usr/bin/env node
 /**
  * How often the keep-or-revert rule of organization reflection decides
- * wrongly, by simulation. No model is called: the script builds synthetic
- * team runs and judges them with the product's own functions
- * (`newChange`, `judgeChange` from `@nexgent/capabilities`), so the numbers
- * follow the rule as it is in the code (KEEP_AFTER, IMPROVE_BY,
- * WHOLE_TOLERANCE).
+ * wrongly, by simulation, next to a few alternative rules. No model is
+ * called: the script builds synthetic team runs and judges them.
  *
- * Setting (one cell of the table per noise level, history size and true
- * effect):
+ * Rules compared (`--rules`, comma separated; default all):
+ * - `current`: the product's own `newChange` and `judgeChange` from
+ *   `@nexgent/capabilities` (KEEP_AFTER trials, each IMPROVE_BY under the
+ *   old median of the part's share, whole cost within WHOLE_TOLERANCE).
+ * - `usd`: the same two-trial rule, but on the part's cost in USD instead
+ *   of its share of the task's cost.
+ * - `usd-clean`: `usd`, with the baseline taken from the runs before the
+ *   source run (the source run was picked for being hot, so it pulls the
+ *   median up).
+ * - `sequential`: on log cost of the part against the earlier runs, after
+ *   each trial from the MIN_TRIALS-th on: keep when the mean log ratio is
+ *   clearly below 0 (one-sided z at Z_KEEP, the noise estimated from the
+ *   earlier runs pooled with a prior); revert when it is at or above 0,
+ *   or at once when the bottom line fails; otherwise try again, at most
+ *   MAX_TRIALS times, then revert. This is the "keep trying while undecided" idea of archive and
+ *   tree search methods, in its simplest statistical form.
+ *
+ * Setting (one cell per noise level, history size and true effect):
  * - A team run has three parts, a coordinator, an `implement` member and a
  *   `test` member. Each part's cost is lognormal with medians 0.2, 0.5 and
  *   0.3 (USD) and the same log-sd `sigma` (run-to-run noise).
- * - The class has `history` earlier team runs; the last one is the source
- *   run, drawn until `implement` is a cost hotspot there (share at least
+ * - The class has `history` team runs; the last one is the source run,
+ *   drawn until `implement` is a cost hotspot there (share at least
  *   HOTSPOT_SHARE and above the median of earlier implement costs), as
- *   reflection would require.
+ *   reflection requires.
  * - The change targets that hotspot (`cost` of `implement`; the action is
  *   `narrow-reading`, which every run follows, so no trial is dropped as
  *   unfollowed). Under the change the implement cost is multiplied by
@@ -23,25 +36,37 @@
  * - Each trial run goes well with probability `pGood`, independently of the
  *   change.
  *
- * A wrong keep is a change with effect <= 0 that is kept; a wrong revert
- * is a change with effect >= 0.3 that is reverted.
+ * Reported per rule and cell: the share of changes kept, and the mean
+ * number of trial runs used.
  *
- * Usage: node scripts/organization-rule-sim.mjs [--trials 20000] [--seed 1] [--p-good 1] [--json]
+ * Usage: node scripts/organization-rule-sim.mjs [--trials 20000] [--seed 1] [--p-good 1] [--rules current,usd] [--json]
  * Needs `pnpm build` first (it imports the built package).
  */
 import { parseArgs } from 'node:util'
-import { HOTSPOT_SHARE, IMPROVE_BY, KEEP_AFTER, WHOLE_TOLERANCE, judgeChange, median, newChange } from '../packages/capabilities/dist/index.js'
+import { HOTSPOT_SHARE, IMPROVE_BY, KEEP_AFTER, WHOLE_TOLERANCE, judgeChange, keptBottomLine, median, newChange } from '../packages/capabilities/dist/index.js'
 
 const { values: args } = parseArgs({
   options: {
     trials: { type: 'string', default: '20000' },
     seed: { type: 'string', default: '1' },
     'p-good': { type: 'string', default: '1' },
+    rules: { type: 'string', default: 'current,usd,usd-clean,sequential' },
+    'seq-min': { type: 'string', default: '3' },
+    'seq-max': { type: 'string', default: '8' },
+    'seq-z': { type: 'string', default: '2' },
     json: { type: 'boolean', default: false },
   },
 })
 const TRIALS = Number(args.trials)
 const P_GOOD = Number(args['p-good'])
+const RULES = args.rules.split(',').map(rule => rule.trim()).filter(rule => rule !== '')
+/** `sequential`: fewest trials before a verdict, most trials, and the one-sided z a keep needs. */
+const MIN_TRIALS = Number(args['seq-min'])
+const MAX_TRIALS = Number(args['seq-max'])
+const Z_KEEP = Number(args['seq-z'])
+/** Prior log-sd of a part's cost, pooled with the earlier runs' own estimate (weight PRIOR_WEIGHT runs). */
+const PRIOR_SIGMA = 0.5
+const PRIOR_WEIGHT = 2
 
 /** Small seeded generator (mulberry32), so a run of the script is reproducible. */
 function rng(seed) {
@@ -85,10 +110,12 @@ function run(usds, extra = {}) {
   return { id: `r${seq}`, seq, decision: 'team', usd: profile.usd, profile, good: true, organization: { roles: [] }, ...extra }
 }
 
-/** One simulated change: its verdict. */
-function simulate(sigma, history, effect) {
+const implUsd = item => item.profile.parts[1].usd
+
+/** The class history ending in a source run where `implement` is a cost hotspot, and the change found on it. */
+function setup(sigma, history) {
   const earlier = Array.from({ length: history - 1 }, () => run(drawUsds(sigma)))
-  const earlierImpl = earlier.map(item => item.profile.parts[1].usd)
+  const earlierImpl = earlier.map(implUsd)
   let source
   for (;;) {
     source = run(drawUsds(sigma))
@@ -98,39 +125,98 @@ function simulate(sigma, history, effect) {
   const team = [...earlier, source]
   const hotspot = { part: 'impl', kind: 'implement', cause: 'cost', value: source.profile.parts[1].share }
   const change = newChange({ classId: 'sim', run: source, hotspot, action: 'narrow-reading', history: team, id: `c${seq}` })
-  const runs = [...team]
-  for (let i = 0; i < KEEP_AFTER; i += 1) {
-    runs.push(run(drawUsds(sigma, effect), { change: change.id, good: random() < P_GOOD }))
-    const verdict = judgeChange(change, runs)
-    if (verdict !== undefined) return verdict
+  return { earlier, team, change }
+}
+
+function trial(sigma, effect, change) {
+  return run(drawUsds(sigma, effect), { change: change.id, good: random() < P_GOOD })
+}
+
+/** Each rule: a verdict ('kept' | 'reverted') and the trial runs it used. */
+const JUDGES = {
+  current(sigma, effect, { team, change }) {
+    const runs = [...team]
+    for (let i = 1; ; i += 1) {
+      runs.push(trial(sigma, effect, change))
+      const verdict = judgeChange(change, runs)
+      if (verdict !== undefined) return { verdict, used: i }
+    }
+  },
+  usd(sigma, effect, ctx) {
+    return twoTrialsOnUsd(sigma, effect, ctx, ctx.team)
+  },
+  'usd-clean'(sigma, effect, ctx) {
+    return twoTrialsOnUsd(sigma, effect, ctx, ctx.earlier.length > 0 ? ctx.earlier : ctx.team)
+  },
+  sequential(sigma, effect, { earlier, team, change }) {
+    const base = (earlier.length > 0 ? earlier : team).map(item => Math.log(implUsd(item)))
+    const mean = base.reduce((sum, value) => sum + value, 0) / base.length
+    const squares = base.reduce((sum, value) => sum + (value - mean) ** 2, 0)
+    const sd = Math.sqrt((squares + PRIOR_WEIGHT * PRIOR_SIGMA ** 2) / (base.length - 1 + PRIOR_WEIGHT))
+    const ratios = []
+    for (let i = 1; i <= MAX_TRIALS; i += 1) {
+      const item = trial(sigma, effect, change)
+      if (!keptBottomLine(change, item)) return { verdict: 'reverted', used: i }
+      ratios.push(Math.log(implUsd(item)) - mean)
+      if (i < MIN_TRIALS) continue
+      const m = ratios.reduce((sum, value) => sum + value, 0) / ratios.length
+      const z = m / (sd * Math.sqrt(1 / ratios.length + 1 / base.length))
+      if (z <= -Z_KEEP) return { verdict: 'kept', used: i }
+      if (m >= 0) return { verdict: 'reverted', used: i }
+    }
+    return { verdict: 'reverted', used: MAX_TRIALS }
+  },
+}
+
+function twoTrialsOnUsd(sigma, effect, { change }, baselineRuns) {
+  const baseline = median(baselineRuns.map(implUsd))
+  for (let i = 1; i <= KEEP_AFTER; i += 1) {
+    const item = trial(sigma, effect, change)
+    if (!keptBottomLine(change, item)) return { verdict: 'reverted', used: i }
+    if (implUsd(item) > baseline * (1 - IMPROVE_BY)) return { verdict: 'reverted', used: i }
   }
-  return judgeChange(change, runs)
+  return { verdict: 'kept', used: KEEP_AFTER }
 }
 
 const SIGMAS = [0.3, 0.5, 0.8]
 const HISTORIES = [2, 4, 8]
 const EFFECTS = [-0.2, 0, 0.2, 0.3, 0.5]
 
-const rows = []
-for (const sigma of SIGMAS) {
-  for (const history of HISTORIES) {
-    const keptByEffect = {}
-    for (const effect of EFFECTS) {
-      let kept = 0
-      for (let i = 0; i < TRIALS; i += 1) if (simulate(sigma, history, effect) === 'kept') kept += 1
-      keptByEffect[effect] = kept / TRIALS
+const results = []
+for (const rule of RULES) {
+  const judge = JUDGES[rule]
+  if (judge === undefined) throw new Error(`unknown rule ${rule}`)
+  for (const sigma of SIGMAS) {
+    for (const history of HISTORIES) {
+      const kept = {}
+      const used = {}
+      for (const effect of EFFECTS) {
+        let keptCount = 0
+        let usedSum = 0
+        for (let i = 0; i < TRIALS; i += 1) {
+          const outcome = judge(sigma, effect, setup(sigma, history))
+          if (outcome.verdict === 'kept') keptCount += 1
+          usedSum += outcome.used
+        }
+        kept[effect] = keptCount / TRIALS
+        used[effect] = usedSum / TRIALS
+      }
+      results.push({ rule, sigma, history, kept, used })
     }
-    rows.push({ sigma, history, kept: keptByEffect })
   }
 }
 
 if (args.json) {
-  console.log(JSON.stringify({ trials: TRIALS, seed: Number(args.seed), pGood: P_GOOD, rule: { KEEP_AFTER, IMPROVE_BY, WHOLE_TOLERANCE, HOTSPOT_SHARE }, rows }, null, 2))
+  console.log(JSON.stringify({ trials: TRIALS, seed: Number(args.seed), pGood: P_GOOD, rule: { KEEP_AFTER, IMPROVE_BY, WHOLE_TOLERANCE, HOTSPOT_SHARE, MAX_TRIALS, Z_KEEP }, results }, null, 2))
 } else {
   const pct = value => `${(value * 100).toFixed(1)}%`
-  console.log(`Kept share by true effect on the implement cost (${TRIALS} changes per cell, seed ${args.seed}, pGood ${P_GOOD}; rule: ${KEEP_AFTER} trials, each ${IMPROVE_BY * 100}% under the old median, whole cost within +${WHOLE_TOLERANCE * 100}%)`)
-  console.log('')
-  console.log(`| sigma | history | ${EFFECTS.map(effect => `effect ${effect}`).join(' | ')} |`)
-  console.log(`| --- | --- | ${EFFECTS.map(() => '---').join(' | ')} |`)
-  for (const row of rows) console.log(`| ${row.sigma} | ${row.history} | ${EFFECTS.map(effect => pct(row.kept[effect])).join(' | ')} |`)
+  console.log(`Kept share by true effect on the implement cost, and mean trial runs used (${TRIALS} changes per cell, seed ${args.seed}, pGood ${P_GOOD})`)
+  for (const rule of RULES) {
+    console.log('')
+    console.log(`rule: ${rule}`)
+    console.log('')
+    console.log(`| sigma | history | ${EFFECTS.map(effect => `effect ${effect}`).join(' | ')} | trials (effect 0) |`)
+    console.log(`| --- | --- | ${EFFECTS.map(() => '---').join(' | ')} | --- |`)
+    for (const row of results.filter(item => item.rule === rule)) console.log(`| ${row.sigma} | ${row.history} | ${EFFECTS.map(effect => pct(row.kept[effect])).join(' | ')} | ${row.used[0].toFixed(2)} |`)
+  }
 }
