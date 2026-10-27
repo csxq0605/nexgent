@@ -6,6 +6,7 @@
 import { randomBytes } from 'node:crypto'
 import { mkdir, open, readFile, rename, rm } from 'node:fs/promises'
 import * as nodePath from 'node:path'
+import { isAllowedDomainEntry, NETWORK_MODES, type NetworkMode } from './network-policy.js'
 import {
   appendGrant,
   assertLearningConfig,
@@ -42,8 +43,15 @@ export type SystemSandboxSetting = 'auto' | 'required' | 'off'
 
 /** `.nexgent/config.json` → `commands`. */
 export interface ProjectCommandsConfig {
-  /** Whether commands may reach the network; default `true`. Enforced by the OS sandbox where there is one. */
-  readonly network?: boolean
+  /**
+   * Where sandboxed commands may connect: `allowlist` (default: package
+   * sources, `allowedDomains` and hosts the user allowed; any other host is
+   * asked), `any`, or `off`. `true` reads as `any`, `false` as `off`.
+   * Enforced by the OS sandbox where there is one.
+   */
+  readonly network?: NetworkMode | boolean
+  /** More hosts commands reach without asking: `host`, `*.host`, optionally `:port`. */
+  readonly allowedDomains?: readonly string[]
   /** Default `auto`. */
   readonly systemSandbox?: SystemSandboxSetting
 }
@@ -54,8 +62,16 @@ export interface LoadedProjectConfig extends ProjectConfig {
   readonly extraReadRoots: readonly string[]
   /** Absolute extra write roots; default `[]`. */
   readonly extraWriteRoots: readonly string[]
-  /** Command settings with defaults: network on, system sandbox `auto`. */
-  readonly commands: { readonly network: boolean; readonly systemSandbox: SystemSandboxSetting }
+  /** Command settings with defaults: network `allowlist`, no extra hosts, system sandbox `auto`. */
+  readonly commands: { readonly network: NetworkMode; readonly allowedDomains: readonly string[]; readonly systemSandbox: SystemSandboxSetting }
+}
+
+/** Pure: `commands.network` as a mode (default `allowlist`; `true` = `any`, `false` = `off`). */
+export function networkMode(value: NetworkMode | boolean | undefined): NetworkMode {
+  if (value === undefined) return 'allowlist'
+  if (value === true) return 'any'
+  if (value === false) return 'off'
+  return value
 }
 
 /** Accepted `commands.systemSandbox` values. */
@@ -138,8 +154,14 @@ export function validateProjectConfig(input: unknown): ProjectConfigFile {
   if (raw.commands !== undefined) {
     const commands = raw.commands
     if (!isObject(commands)) throw invalid('commands must be an object', 'commands')
-    for (const key of Object.keys(commands)) if (key !== 'network' && key !== 'systemSandbox') throw invalid(`unknown field commands.${key}`, `commands.${key}`)
-    if (commands.network !== undefined && typeof commands.network !== 'boolean') throw invalid('commands.network must be a boolean', 'commands.network')
+    for (const key of Object.keys(commands)) if (key !== 'network' && key !== 'allowedDomains' && key !== 'systemSandbox') throw invalid(`unknown field commands.${key}`, `commands.${key}`)
+    if (commands.network !== undefined && typeof commands.network !== 'boolean' && !(NETWORK_MODES as readonly unknown[]).includes(commands.network)) {
+      throw invalid(`commands.network must be one of ${NETWORK_MODES.join(', ')} (or a boolean)`, 'commands.network')
+    }
+    const domains = commands.allowedDomains
+    if (domains !== undefined && (!Array.isArray(domains) || domains.some(entry => typeof entry !== 'string' || !isAllowedDomainEntry(entry)))) {
+      throw invalid('commands.allowedDomains must be an array of host names ("example.com", "*.example.com", optionally ":port")', 'commands.allowedDomains')
+    }
     if (commands.systemSandbox !== undefined && !(SYSTEM_SANDBOX_SETTINGS as readonly unknown[]).includes(commands.systemSandbox)) {
       throw invalid(`commands.systemSandbox must be one of ${SYSTEM_SANDBOX_SETTINGS.join(', ')}`, 'commands.systemSandbox')
     }
@@ -177,7 +199,7 @@ export async function loadProjectConfig(layout: Pick<WorkspaceLayout, 'configFil
     ...resolveProjectConfig(contract),
     extraReadRoots: extraReadRoots ?? [],
     extraWriteRoots: extraWriteRoots ?? [],
-    commands: { network: commands?.network ?? true, systemSandbox: commands?.systemSandbox ?? 'auto' },
+    commands: { network: networkMode(commands?.network), allowedDomains: commands?.allowedDomains ?? [], systemSandbox: commands?.systemSandbox ?? 'auto' },
   }
 }
 

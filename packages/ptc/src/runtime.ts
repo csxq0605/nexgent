@@ -108,6 +108,18 @@ export interface RunProgramOptions {
   readonly windowsJob?: boolean
   /** Windows only: the `pwsh` that launches the job (default `pwsh`). */
   readonly pwshPath?: string
+  /**
+   * Start the program through this wrapper (the OS sandbox) instead of
+   * `node` directly; it runs {@link programCommand}. POSIX only.
+   */
+  readonly launch?: { readonly program: string; readonly args: readonly string[] }
+  /** Windows only: start the program with a restricted token carrying these capability SIDs (`@nexgent/workspace` Windows sandbox). */
+  readonly capabilities?: readonly string[]
+}
+
+/** The Node executable and arguments a program process runs (what an OS sandbox wraps). */
+export function programCommand(options: Pick<RunProgramOptions, 'nodePath' | 'permission'> = {}): { readonly node: string; readonly args: string[] } {
+  return { node: options.nodePath ?? process.execPath, args: programArgs({ ...(options.permission === undefined ? {} : { permission: options.permission }) }) }
 }
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
@@ -210,15 +222,19 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     return { status: 'cancelled', output: '', outputTruncated: false, error: { name: 'AbortError', message: 'cancelled before start' }, calls: 0, durationMs: 0 }
   }
 
-  const node = options.nodePath ?? process.execPath
-  const args = programArgs({ ...(options.permission === undefined ? {} : { permission: options.permission }) })
-  const env = programEnv()
+  const { node, args } = programCommand(options)
   const useJob = process.platform === 'win32' && options.windowsJob !== false
+  if (options.capabilities !== undefined && !useJob) {
+    throw new NexgentError('sandbox/denied', 'SANDBOX_DENIED: the Windows sandbox needs the job launcher to start the program process')
+  }
+  const launch = useJob ? undefined : options.launch
+  // The sandbox wrapper needs PATH to find its tools; Node uses the proxy the sandbox gives the program (Node 22.21+).
+  const env = launch === undefined ? programEnv() : { ...programEnv(), PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_USE_ENV_PROXY: '1' }
   let child: ChildProcess
   try {
-    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : node, useJob ? jobLauncherArgs() : args, {
+    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : launch?.program ?? node, useJob ? jobLauncherArgs() : launch === undefined ? args : [...launch.args], {
       cwd: options.cwd,
-      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(node, args, env)) } : env,
+      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(node, args, env, options.capabilities)) } : env,
       detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],

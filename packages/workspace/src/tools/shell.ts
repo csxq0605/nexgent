@@ -18,7 +18,9 @@ import { rm, stat } from 'node:fs/promises'
 import { NexgentError, type ProcessResult, type ProcessRunner, type ToolContext } from '@nexgent/kernel'
 import { commandSegments, isReadOnlyCommand } from '../command-policy.js'
 import { capText, MODEL_OUTPUT_CHARS, OMITTED_MARKER_PATTERN } from '../output.js'
-import { defaultWriteDenies, type OsSandbox } from '../os-sandbox.js'
+import { randomBytes } from 'node:crypto'
+import { NETWORK_GRANT, type NetworkMode } from '../network-policy.js'
+import { defaultWriteDenies, type OsSandbox, type OsSandboxNetwork } from '../os-sandbox.js'
 import { BackgroundShells, type LocalProcessSpec } from '../process.js'
 import { clampTimeout, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS } from '../sandbox.js'
 import { currentPowerShell, takePowerShellNotice } from '../shell-check.js'
@@ -81,8 +83,8 @@ export interface ShellSandboxInputs {
   readonly allowRead?: readonly string[]
   /** More write-protected paths besides {@link defaultWriteDenies}. */
   readonly extraDenyWrite?: readonly string[]
-  /** `commands.network`. */
-  readonly network: boolean
+  /** `commands.network` with the command's allow list (`true` = any host, `false` = none). */
+  readonly network: boolean | { readonly mode: NetworkMode; readonly allowedDomains: readonly string[] }
 }
 
 /** The OS sandbox and the policy inputs, wired by the host. */
@@ -173,6 +175,35 @@ async function nonEmpty(path: string): Promise<boolean> {
   }
 }
 
+/**
+ * A command's network setting for the OS sandbox: a host off its allow list
+ * is put to the user as an approval of this call (a background command
+ * cannot ask: its call has already returned).
+ */
+export function commandNetwork(network: ShellSandboxInputs['network'], context: ToolContext, command: string, background: boolean): boolean | OsSandboxNetwork {
+  if (typeof network === 'boolean') return network
+  return {
+    mode: network.mode,
+    allowedDomains: network.allowedDomains,
+    owner: context.sessionId,
+    ...(background ? {} : { ask: (host: string, port: number | undefined) => askHost(context, host, port, command) }),
+  }
+}
+
+/** Ask the user whether a command may connect to `host`; `session` / `project` answers are kept as `network` grants. */
+export function askHost(context: ToolContext, host: string, port: number | undefined, command: string): Promise<boolean> {
+  const name = host.toLowerCase()
+  return context.requestApproval({
+    summary: `connect to ${name}${port === undefined || port === 443 || port === 80 ? '' : `:${port}`}`,
+    detail: `command: ${command}`,
+    risk: 'medium',
+    pattern: name,
+    subject: { kind: 'other', value: name },
+    grantTool: NETWORK_GRANT,
+    options: ['once', 'session', 'project'],
+  })
+}
+
 /** Build the `bash` or `pwsh` tool. */
 export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTool {
   const { name } = flavor
@@ -242,10 +273,12 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       let argv = flavor.argv(script)
       let sandboxNote: string | undefined
       let sandboxed = false
-      const commandId = `${context.sessionId}:${context.callId}:${Math.random().toString(36).slice(2, 8)}`
+      // Random and unguessable: the proxy matches a command's host allow list by the id the command presents.
+      const commandId = randomBytes(16).toString('base64url')
       const os = deps.os
       const inputs = os?.inputs(context)
-      if (os !== undefined && inputs?.enabled === true && flavor.name === 'bash') {
+      let capabilities: readonly string[] | undefined
+      if (os !== undefined && inputs?.enabled === true) {
         if (unsandboxed) {
           const approved = os.approveUnsandboxed === undefined ? false : await os.approveUnsandboxed(context, { command: script, cwd })
           if (!approved) throw new NexgentError('approval/denied', `not approved: run outside the system sandbox: ${script}`)
@@ -256,14 +289,16 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
             denyWrite: inputs.readOnly ? [] : [...defaultWriteDenies(inputs.projectRoot), ...(inputs.extraDenyWrite ?? [])],
             denyRead: inputs.denyRead,
             ...(inputs.allowRead === undefined ? {} : { allowRead: inputs.allowRead }),
-            network: inputs.network,
+            network: commandNetwork(inputs.network, context, script, background),
             commandId,
+            ...(flavor.name === 'pwsh' ? { shell: flavor.program } : {}),
           }, context.signal)
           if (wrapped.kind === 'wrapped') {
             command = wrapped.program
             argv = wrapped.args
+            capabilities = wrapped.capabilities
             sandboxed = true
-          } else if (inputs.required === true) {
+          } else if (inputs.required === true || wrapped.fatal === true) {
             throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: commands.systemSandbox is "required" but no system sandbox is available (${wrapped.reason})`, {
               details: { mode: context.sandboxMode, command: script, code: 'SYSTEM_SANDBOX_REQUIRED' },
             })
@@ -280,6 +315,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
           sessionId: context.sessionId, command, args: argv, cwd, env: processEnv, label: script, logPath,
           ...(explicitTimeout === undefined ? {} : { timeoutMs }),
           ...(sandboxed ? { onExit: () => os?.sandbox.release(commandId) } : {}),
+          ...(capabilities === undefined ? {} : { capabilities }),
         })
         return {
           content: deps.redactor.redact(
@@ -293,6 +329,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       const files = { stdout: join(temp, `shell-${tag}.stdout.log`), stderr: join(temp, `shell-${tag}.stderr.log`) }
       const spec: LocalProcessSpec = {
         command, args: argv, cwd, env: processEnv, timeoutMs, signal: context.signal, outputFiles: files,
+        ...(capabilities === undefined ? {} : { capabilities }),
       }
       let result: ProcessResult
       try {

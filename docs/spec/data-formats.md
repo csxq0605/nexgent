@@ -153,7 +153,8 @@
 | `approvals` | `ApprovalGrant[]` | `[]` | `project` 范围的审批授权；语义见 `permissions.md`。迁移后移到用户数据目录的 `grants.json`，迁移没完成的项目仍在这里读写 |
 | `extraReadRoots` | `string[]` | `[]` | 额外可读的绝对目录；语义见 `permissions.md`；改动它总要审批 |
 | `extraWriteRoots` | `string[]` | `[]` | 额外可写的绝对目录（文件工具与命令沙箱）；改动它总要审批 |
-| `commands.network` | boolean | `true` | 命令能否联网（有系统沙箱的平台上生效）；改动 `commands` 总要审批 |
+| `commands.network` | `"allowlist" \| "any" \| "off"`（旧值 `true` / `false` 读作 `any` / `off`） | `"allowlist"` | 命令能连哪些域名：`allowlist` 放行常用包源、代码托管、`allowedDomains` 和用户放行过的域名，其他域名问一次；macOS / Linux 的系统沙箱里生效；改动 `commands` 总要审批 |
+| `commands.allowedDomains` | string[] | `[]` | 额外直接放行的域名：`host`、`*.host`，可带 `:port` |
 | `commands.systemSandbox` | `"auto" \| "required" \| "off"` | `"auto"` | 命令的系统沙箱；`required` 时没有沙箱就不执行命令，`off` 由用户关；语义见 `permissions.md` §命令策略 |
 | `checkRetries` | integer 0–5 | 2 | 根轮里本轮的确定性检查（本轮跑过的测试命令最近一次退出码非 0、本轮交付的文件缺失或解析不了）失败时，内核把失败项（截断到 2000 字符，开头 `[Nexgent] Automatic check`）作为一条 `user.message { source: "inject" }` 发回模型，在同一轮里接着做，最多这么多次；模型对重试说明只回了文字、没调用工具时（已说明检查为什么过不了，或在问用户）不再重试；重试的模型调用计入这一轮的步数与费用上限，用户停止立即结束；0 关闭；成员不重试；改动它总要审批 |
 | `checkCommands` | string[]（≤ 5 条，每条 ≤ 500 字符） | `[]` | 项目自己的完成检查命令。根轮改动过项目（有可能写入或执行的调用成功过）时，在轮末检查前于项目根目录依次运行，经注册的 `bash`（Windows 为 `pwsh`）工具，沙箱与命令策略同模型的命令；需要审批的命令不运行，算失败。每条成为一个 id 为 `check-<n>` 的 `test-command` 检查，退出码 0 为通过；失败时和其他检查一样触发自动重试，重试说明里带输出末尾（≤ 600 字符）。每次重试前后的检查写一条账本 `check.retry`。改动它总要审批 |

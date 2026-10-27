@@ -4,6 +4,7 @@
  * host's `.nexgent/` data, and follow the session's mode.
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { RUN_CODE_TOOL, type SandboxMode, type ToolContext } from '@nexgent/kernel'
@@ -39,6 +40,8 @@ async function setup(mode: SandboxMode = 'workspace-write') {
   const run = (code: string, options: Parameters<typeof context>[0] = {}, extra: Record<string, unknown> = {}) => tool.handler({ code, ...extra }, context(options))
   return { root: services.workspace.root, tool, run, asks }
 }
+
+const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
 
 describe('run_code', () => {
   it('uses the contract name, schema, effects and approval', async () => {
@@ -127,5 +130,14 @@ describe('run_code', () => {
     expect(thrown.content).toContain('Failed after')
     expect(thrown.content).toContain('RangeError: too far')
     await expect(run('1', {}, { timeoutMs: 10 })).rejects.toMatchObject({ code: 'tool/invalid-input' })
+  })
+
+  it.skipIf(!hasBwrap)('runs in the system sandbox: a host off the allow list is put to the session', async () => {
+    const { run, asks } = await setup()
+    const output = await run(`
+      try { await fetch('http://nexgent-check.invalid/'); return 'reached' } catch (error) { return 'refused' }`)
+    expect(output.isError).toBe(false)
+    expect(output.content).toContain('"refused"')
+    expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: run_code' })])
   })
 })

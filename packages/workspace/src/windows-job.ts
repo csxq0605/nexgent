@@ -15,6 +15,18 @@
  * and under Windows PowerShell 5.1 (ADR 0022 decision 7). When the job
  * cannot be created the launcher still runs the command, and the runner's
  * `taskkill /T` fallback applies.
+ *
+ * With a capability list in the spec the launcher starts the command with a
+ * restricted token instead (`windows-sandbox.ts`, after Codex
+ * `windows-sandbox-rs/src/token.rs`): `CreateRestrictedToken` with
+ * `DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED` and the restricting
+ * SIDs capabilities, logon SID, Everyone; a default DACL that grants those
+ * SIDs the objects the command creates; `SeChangeNotifyPrivilege` enabled;
+ * `CreateProcessAsUserW` with the launcher's standard handles. A write then
+ * succeeds only where the file's ACL also allows one of the restricting
+ * SIDs, that is in the directories granted to the capabilities. When any
+ * step fails the command is not run at all: the launcher exits with
+ * {@link JOB_SANDBOX_FAILED_EXIT}.
  */
 import { createHash } from 'node:crypto'
 import { existsSync, renameSync, writeFileSync } from 'node:fs'
@@ -25,6 +37,10 @@ import { join } from 'node:path'
 export const JOB_START_FAILED_EXIT = 9009
 /** Prefix of the launcher's stderr line for a command that could not be started. */
 export const JOB_START_FAILED_MARKER = 'nexgent-job: start-failed: '
+/** Exit code the launcher uses when the restricted token or process could not be made (the command did not run). */
+export const JOB_SANDBOX_FAILED_EXIT = 9010
+/** Prefix of the launcher's stderr line for {@link JOB_SANDBOX_FAILED_EXIT}. */
+export const JOB_SANDBOX_FAILED_MARKER = 'nexgent-job: sandbox-failed: '
 /** Environment variable carrying the launch spec to the launcher; removed before the command starts. */
 export const JOB_SPEC_ENV = 'NEXGENT_JOB_SPEC'
 
@@ -46,6 +62,118 @@ public static class NexgentJob {
     info.BasicLimitInformation.LimitFlags = 0x2000;
     if (!SetInformationJobObject(job, 9, ref info, (uint)Marshal.SizeOf(typeof(Extended)))) return false;
     return AssignProcessToJobObject(job, GetCurrentProcess());
+  }
+
+  [StructLayout(LayoutKind.Sequential)] struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct Luid { public uint LowPart; public int HighPart; }
+  [StructLayout(LayoutKind.Sequential)] struct TokenPrivileges { public uint PrivilegeCount; public Luid Luid; public uint Attributes; }
+  [StructLayout(LayoutKind.Sequential)] struct TokenDefaultDacl { public IntPtr DefaultDacl; }
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct StartupInfo {
+    public int cb; public string lpReserved; public string lpDesktop; public string lpTitle;
+    public int dwX; public int dwY; public int dwXSize; public int dwYSize; public int dwXCountChars; public int dwYCountChars;
+    public int dwFillAttribute; public int dwFlags; public short wShowWindow; public short cbReserved2; public IntPtr lpReserved2;
+    public IntPtr hStdInput; public IntPtr hStdOutput; public IntPtr hStdError;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr hProcess; public IntPtr hThread; public int dwProcessId; public int dwThreadId; }
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint length, out uint returned);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount, IntPtr disable, uint deleteCount, IntPtr delete, uint restrictCount, SidAndAttributes[] restrict, out IntPtr created);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref TokenDefaultDacl info, uint length);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string sid, out IntPtr result);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertSidToStringSidW(IntPtr sid, out IntPtr result);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, IntPtr size);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorDacl(IntPtr descriptor, out bool present, out IntPtr dacl, out bool defaulted);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool LookupPrivilegeValueW(string system, string name, out Luid luid);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool AdjustTokenPrivileges(IntPtr token, bool disableAll, ref TokenPrivileges state, uint length, IntPtr previous, IntPtr returned);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessAsUserW(IntPtr token, string application, System.Text.StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation info);
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
+  [DllImport("kernel32.dll", SetLastError = true)] static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  [DllImport("kernel32.dll")] static extern IntPtr LocalFree(IntPtr memory);
+
+  static Exception Fail(string step) { return new Exception(step + " failed (error " + Marshal.GetLastWin32Error() + ")"); }
+
+  static IntPtr Sid(string text) {
+    IntPtr sid;
+    if (!ConvertStringSidToSidW(text, out sid)) throw Fail("ConvertStringSidToSid " + text);
+    return sid;
+  }
+
+  // The logon SID of the current token (the group with SE_GROUP_LOGON_ID), as text.
+  static string LogonSid(IntPtr token) {
+    uint length;
+    GetTokenInformation(token, 2, IntPtr.Zero, 0, out length);
+    IntPtr groups = Marshal.AllocHGlobal((int)length);
+    try {
+      if (!GetTokenInformation(token, 2, groups, length, out length)) throw Fail("GetTokenInformation");
+      int count = Marshal.ReadInt32(groups);
+      int size = Marshal.SizeOf(typeof(SidAndAttributes));
+      IntPtr first = new IntPtr(groups.ToInt64() + IntPtr.Size);
+      for (int i = 0; i < count; i++) {
+        SidAndAttributes entry = (SidAndAttributes)Marshal.PtrToStructure(new IntPtr(first.ToInt64() + i * size), typeof(SidAndAttributes));
+        if ((entry.Attributes & 0xC0000000) == 0xC0000000) {
+          IntPtr text;
+          if (!ConvertSidToStringSidW(entry.Sid, out text)) throw Fail("ConvertSidToStringSid");
+          string result = Marshal.PtrToStringUni(text);
+          LocalFree(text);
+          return result;
+        }
+      }
+    } finally { Marshal.FreeHGlobal(groups); }
+    throw new Exception("the current token has no logon SID");
+  }
+
+  // Start commandLine with a write-restricted token whose restricting SIDs are capabilities + logon SID + Everyone; return its exit code.
+  public static int RunRestricted(string commandLine, string directory, string[] capabilities) {
+    IntPtr token;
+    if (!OpenProcessToken(GetCurrentProcess(), 0x1AB, out token)) throw Fail("OpenProcessToken");
+    string logon = LogonSid(token);
+    string[] restricting = new string[capabilities.Length + 2];
+    capabilities.CopyTo(restricting, 0);
+    restricting[capabilities.Length] = logon;
+    restricting[capabilities.Length + 1] = "S-1-1-0";
+    SidAndAttributes[] sids = new SidAndAttributes[restricting.Length];
+    for (int i = 0; i < restricting.Length; i++) { sids[i].Sid = Sid(restricting[i]); sids[i].Attributes = 0; }
+    IntPtr restricted;
+    if (!CreateRestrictedToken(token, 0x1 | 0x4 | 0x8, 0, IntPtr.Zero, 0, IntPtr.Zero, (uint)sids.Length, sids, out restricted)) throw Fail("CreateRestrictedToken");
+    CloseHandle(token);
+    // Objects the command creates (pipes, files without inherited ACLs) stay usable under the write restriction.
+    System.Text.StringBuilder sddl = new System.Text.StringBuilder("D:");
+    foreach (string sid in restricting) sddl.Append("(A;;GA;;;").Append(sid).Append(")");
+    sddl.Append("(A;;RC;;;OW)");
+    IntPtr descriptor;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.ToString(), 1, out descriptor, IntPtr.Zero)) throw Fail("ConvertStringSecurityDescriptor");
+    bool present, defaulted;
+    TokenDefaultDacl dacl = new TokenDefaultDacl();
+    if (!GetSecurityDescriptorDacl(descriptor, out present, out dacl.DefaultDacl, out defaulted)) throw Fail("GetSecurityDescriptorDacl");
+    if (!SetTokenInformation(restricted, 6, ref dacl, (uint)IntPtr.Size)) throw Fail("SetTokenInformation(TokenDefaultDacl)");
+    TokenPrivileges change = new TokenPrivileges();
+    if (LookupPrivilegeValueW(null, "SeChangeNotifyPrivilege", out change.Luid)) {
+      change.PrivilegeCount = 1;
+      change.Attributes = 0x2;
+      AdjustTokenPrivileges(restricted, false, ref change, (uint)Marshal.SizeOf(typeof(TokenPrivileges)), IntPtr.Zero, IntPtr.Zero);
+    }
+    StartupInfo startup = new StartupInfo();
+    startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+    startup.dwFlags = 0x100;
+    startup.hStdInput = GetStdHandle(-10);
+    startup.hStdOutput = GetStdHandle(-11);
+    startup.hStdError = GetStdHandle(-12);
+    foreach (IntPtr handle in new IntPtr[] { startup.hStdInput, startup.hStdOutput, startup.hStdError }) {
+      if (handle != IntPtr.Zero && handle != new IntPtr(-1)) SetHandleInformation(handle, 1, 1);
+    }
+    ProcessInformation info;
+    if (!CreateProcessAsUserW(restricted, null, new System.Text.StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, 0x400, IntPtr.Zero, directory, ref startup, out info)) throw Fail("CreateProcessAsUser");
+    CloseHandle(info.hThread);
+    WaitForSingleObject(info.hProcess, 0xFFFFFFFF);
+    uint code;
+    GetExitCodeProcess(info.hProcess, out code);
+    CloseHandle(info.hProcess);
+    CloseHandle(restricted);
+    LocalFree(descriptor);
+    return (int)code;
   }
 }
 `
@@ -82,6 +210,8 @@ export interface JobLaunchSpec {
   readonly dll: string
   /** `PSModulePath` as the runner computed it, restored for the command (`null` = unset). */
   readonly psModulePath: string | null
+  /** Capability SIDs: start the command with a restricted token that may write only where they are granted (`windows-sandbox.ts`). */
+  readonly capabilities?: readonly string[]
 }
 
 /**
@@ -105,13 +235,10 @@ try {
   $null = [NexgentJob]::Enter()
 } catch {
 }
-$psi = New-Object Diagnostics.ProcessStartInfo -ArgumentList ([string]$spec.command)
-if ($PSVersionTable.PSVersion.Major -ge 6) {
-  foreach ($arg in @($spec.args)) { $psi.ArgumentList.Add([string]$arg) }
-} else {
-  # Windows PowerShell 5.1 (.NET Framework) has no ArgumentList: build the command line with CommandLineToArgvW quoting.
-  $quoted = foreach ($arg in @($spec.args)) {
-    $text = [string]$arg
+# CommandLineToArgvW quoting, for Windows PowerShell 5.1 (no ArgumentList) and the restricted start.
+function Join-CommandLine([string[]]$words) {
+  $quoted = foreach ($word in $words) {
+    $text = [string]$word
     if ($text.Length -gt 0 -and $text -notmatch '[\\s"]') { $text; continue }
     $sb = New-Object Text.StringBuilder
     [void]$sb.Append('"')
@@ -125,7 +252,25 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
     [void]$sb.Append('"')
     $sb.ToString()
   }
-  $psi.Arguments = ($quoted -join ' ')
+  $quoted -join ' '
+}
+if ($null -ne $spec.capabilities) {
+  # Never started without the restriction: any failure here ends the launcher.
+  [Environment]::SetEnvironmentVariable('PSModulePath', $spec.psModulePath)
+  try {
+    $line = Join-CommandLine (@([string]$spec.command) + @($spec.args))
+    $code = [NexgentJob]::RunRestricted($line, [Environment]::CurrentDirectory, [string[]]@($spec.capabilities))
+  } catch {
+    [Console]::Error.WriteLine('${JOB_SANDBOX_FAILED_MARKER}' + $_.Exception.Message)
+    exit ${JOB_SANDBOX_FAILED_EXIT}
+  }
+  exit $code
+}
+$psi = New-Object Diagnostics.ProcessStartInfo -ArgumentList ([string]$spec.command)
+if ($PSVersionTable.PSVersion.Major -ge 6) {
+  foreach ($arg in @($spec.args)) { $psi.ArgumentList.Add([string]$arg) }
+} else {
+  $psi.Arguments = Join-CommandLine @($spec.args)
 }
 $psi.UseShellExecute = $false
 $psi.WorkingDirectory = [Environment]::CurrentDirectory
@@ -150,9 +295,9 @@ export function jobLauncherArgs(): string[] {
 }
 
 /** The launch spec for one command. */
-export function jobLaunchSpec(command: string, args: readonly string[], env: Readonly<Record<string, string>>): JobLaunchSpec {
+export function jobLaunchSpec(command: string, args: readonly string[], env: Readonly<Record<string, string>>, capabilities?: readonly string[]): JobLaunchSpec {
   const key = Object.keys(env).find(name => name.toLowerCase() === 'psmodulepath')
   const dll = jobAssemblyPath()
   ensureJobSource(dll)
-  return { command, args: [...args], dll, psModulePath: key === undefined ? null : env[key]! }
+  return { command, args: [...args], dll, psModulePath: key === undefined ? null : env[key]!, ...(capabilities === undefined ? {} : { capabilities: [...capabilities] }) }
 }

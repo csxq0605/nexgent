@@ -13,7 +13,7 @@
 | 模式 | 文件读 | 文件写 / 编辑 | `bash` / `pwsh` | 命令内网络 |
 | --- | --- | --- | --- | --- |
 | `read-only` | 读根内允许；根外询问 | 全部拒绝（不提示） | 只读命令执行（有系统沙箱时在只读沙箱里，只有会话临时目录可写）；其余拒绝，不提示，并提示需要切换模式 | 按 `commands.network` |
-| `workspace-write`（默认） | 读根内允许；根外询问 | 写根内允许；`.nexgent/` 内部目录与拒绝模式按下节；根外询问 | 在系统沙箱里执行，只能写项目、会话临时目录与本会话放行的目录；cwd 在项目或已放行的目录内；命令形态黑名单需审批 | 按 `commands.network`（默认开，用宿主网络）；下载并执行类形态需审批 |
+| `workspace-write`（默认） | 读根内允许；根外询问 | 写根内允许；`.nexgent/` 内部目录与拒绝模式按下节；根外询问 | 在系统沙箱里执行，只能写项目、会话临时目录与本会话放行的目录；cwd 在项目或已放行的目录内；命令形态黑名单需审批 | 按 `commands.network`（默认域名白名单：常用包源与代码托管直接放行，其他域名问一次）；下载并执行类形态需审批 |
 | `full-access` | 任意 | 任意，不检查 | 任意 cwd，不进系统沙箱 | 允许，不检查 |
 
 **计划模式**。开始会话时可以选（CLI `nexgent run --plan`，SDK `sessions.create` 的 `plan: true`）。行为等同 `read-only`，另外多一个工具 `exit_plan`（输入 `{ plan }`，`approval: 'always'`，审批详情就是计划全文）：用户批准后，会话切到原定的执行模式（会话头的 `sandboxMode`）并写一条 `session.mode` 记录（`reason: 'plan-approved'`），`exit_plan` 随即从工具列表消失。模型不能自己切模式，只能经 `exit_plan` 的审批。
@@ -86,7 +86,7 @@
 
 **搜索**。`list_files` 与 `search_text` 读 `.gitignore`（与任务快照同一个解析器；`includeIgnored: true` 时不读），`search_text` 支持输出模式（内容 / 文件名 / 计数）、上下文行（`before` / `after` / `context`）、多行匹配、`limit` / `offset` 分页，大文件流式搜索，不再静默跳过。遇到需要审批的敏感文件，结果末尾写明跳过了哪些（`[sensitive: not read without approval]`），不再让它们消失。实现是 JS，不依赖本机 `rg`。搜索项目外的目录按上面的“项目外的路径”询问一次，放行后在该目录下搜。
 
-**Windows：先路径策略，后 ACL**。路径策略只在文件工具中生效，对 `pwsh` 启动的进程没有约束力。后补的 ACL 隔离（参考 DSH `sandbox-windows-acl` 的受限令牌方案）会增加：子进程及其后代的写入与删除被限制在项目目录与会话临时目录；受限令牌在 `read-only` 下无任何写授权；失败时不以非受限方式启动。ACL 不能补上的：硬链接别名、读取不受限、被其他 AppContainer 工具加过 ACL 的目录不可读。
+**Windows：路径策略加受限令牌**。路径策略只在文件工具中生效；`pwsh` 启动的进程由下节的 Windows 系统沙箱（受限令牌 + ACL）限制写入。受限令牌不限制读取，也不过滤网络；硬链接别名不在 ACL 的覆盖范围内。
 
 ## 命令策略
 
@@ -103,15 +103,19 @@
 
 **只读命令**。一条命令里每个简单命令都在只读命令表里，而且没有写文件的重定向（`> file`、`>> file`；`2>&1` 与 `> /dev/null` 不算）时，算只读命令。表（POSIX）：`ls`、`cat`、`head`、`tail`、`wc`、`rg`、`grep`、`pwd`、`echo`、`printf`、`which`、`du`、`df`、`file`、`stat`、`tree`、`sort`、`uniq`、`cut`、`tr`、`jq`、`diff`、`basename`、`dirname`、`realpath`、`env`、`date`、`uname`、`ps` 等；`find` 不带 `-delete` / `-exec` / `-ok` / `-fprint*`；`sed` 只限不带 `-i`、`w` 命令与脚本文件的打印类脚本；`awk` 不带 `system`、`getline`、重定向与管道写出；`sort` 不带 `-o`；`git` 只限 `status`、`diff`、`log`、`show`、`branch`（不带改动选项）、`rev-parse`、`ls-files`、`blame` 等读的子命令；常见程序的 `--version`。PowerShell 有对应的 cmdlet 表（`Get-ChildItem`、`Get-Content`、`Select-String` 等）。清单在 `packages/workspace/src/command-policy.ts`。
 
-**系统沙箱**。`workspace-write`、`read-only` 与计划模式下，`bash` 在系统沙箱里运行：macOS 用 seatbelt（`sandbox-exec`），Linux 用 bubblewrap（需要 `bwrap` 与 `socat`）；实现是 `@anthropic-ai/sandbox-runtime`（Apache-2.0，钉版本 0.0.80）。
+**系统沙箱**。`workspace-write`、`read-only` 与计划模式下，`bash` / `pwsh` 在系统沙箱里运行：macOS 用 seatbelt（`sandbox-exec`），Linux 用 bubblewrap（需要 `bwrap` 与 `socat`），实现是 `@anthropic-ai/sandbox-runtime`（Apache-2.0，钉版本 0.0.80）；Windows 用受限令牌 + ACL（见下）。`run_code` 与函数模块的 Node 进程进同一个沙箱（§代码执行进程）。
 - 只能写：项目目录、会话临时目录、`extraWriteRoots`、本会话放行写的目录；`read-only` / 计划模式只能写会话临时目录。
 - 写保护：项目的 `.nexgent/`、`.git/hooks/`、`.git/config`。
 - 读写都不行：`<NEXGENT_HOME>`（本项目的资料 `materials/` 与成果 `outputs/` 可读，不可写）与上面的凭证目录。
-- 网络：`commands.network` 为 `true`（默认）时命令用宿主网络，不经代理；为 `false` 时命令在新的网络命名空间里，没有网络。
+- 网络（macOS / Linux）：命令没有直连外网的路，只能经库的本机代理出去，代理按域名逐个判定。`commands.network`：
+  - `allowlist`（默认）：命令可以直接连的域名是常用包源与代码托管（npm、PyPI、crates.io、Go 代理、RubyGems、Maven、NuGet、Packagist、GitHub、GitLab、Bitbucket 等，清单为 `network-policy.ts` 的 `DEFAULT_ALLOWED_DOMAINS`）、`commands.allowedDomains`（`host`、`*.host`，可带 `:port`）以及用户放行过的域名。其他域名第一次连接时弹审批（与其他审批同一个框；摘要 `connect to <host>`，风险中，选项“仅本次 / 本会话 / 本项目”）；“本会话 / 本项目”记为授权名 `network`、模式为该域名的授权，此后不再问；“仅本次”只放行这条命令。后台命令不能询问，名单外的域名直接拒绝。同一时刻有多个会话的命令在跑而代理分不清是谁的连接时，拒绝并写明原因，重跑即可。
+  - `any`：所有域名放行（仍经代理）。旧值 `true` 读作 `any`。
+  - `off`：没有网络。旧值 `false` 读作 `off`。
+- Windows 系统沙箱（参照 Codex `windows-sandbox-rs`）：每个可写目录（项目或成员副本、会话临时目录、放行的写目录）有自己的能力 SID（随机的 `S-1-5-21-…`，记在 `<NEXGENT_HOME>/sandbox/windows-capabilities.json`），这个 SID 在目录上有可继承的修改权限（`icacls /grant`，目录 ACL 里还没有时才加），写保护路径（`.nexgent/`、`.git/hooks`、`.git/config` 等）上对它加可继承的拒绝写入、删除与改权限。命令经 Job Object 启动器以写受限令牌启动（`CreateRestrictedToken`：`DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED`，限制 SID 为这些能力 SID、登录 SID 与 Everyone），所以只能写授权给能力 SID 的目录；`read-only` / 计划模式只有会话临时目录的能力。启动时做一次试验；试验失败时视为没有系统沙箱。某条命令的 ACL 设不上或受限进程起不来时，这条命令不执行，不以非受限方式启动。受限令牌不限制读取，也不过滤网络（`commands.network` 在 Windows 上不起作用）。
 - 命令触犯沙箱失败时，工具结果附上被拦的操作与一句说明（`<sandbox_violations>`），让模型知道原因。
 - 不进沙箱重跑：调用参数 `sandbox: false`，每次都要审批（风险高，只给“仅本次”）。
 - Linux 上库为网络桥常驻的 `socat` 经 `setpriv --pdeathsig KILL` 启动，宿主进程被强杀时随之结束（没有 `setpriv` 时用库的默认方式）。
-- 没有系统沙箱的平台（Windows；Linux 缺 bubblewrap 或 socat，或不允许用户命名空间）：命令照旧只在命令策略下运行。会话头 `commandSandbox` 记下 `{ kind: 'none', reason }`，CLI 打一行说明、桌面在输入框旁显示“命令未进系统沙箱”，不声称有沙箱。
+- 没有系统沙箱时（Windows 试验失败；Linux 缺 bubblewrap 或 socat，或不允许用户命名空间）：命令照旧只在命令策略下运行；Windows 上 `workspace-write` 里每条不是只读的命令都要审批（每个简单命令一项，可选“仅本次 / 本会话 / 本项目”），`systemSandbox: 'off'` 时同样如此。会话头 `commandSandbox` 记下 `{ kind: 'none', reason }`，CLI 打一行说明、桌面在输入框旁显示“命令未进系统沙箱”，不声称有沙箱。
 - 项目配置 `commands.systemSandbox: 'auto' | 'required' | 'off'`，默认 `auto`。`required` 时没有沙箱就不执行命令；`off` 由用户自己关，会话头记 `{ kind: 'off' }`，界面显示“系统沙箱已关闭”。改这个字段要审批（`commands` 在 `GUARDED_PROJECT_CONFIG_FIELDS` 里）。
 
 **后台运行**。`bash` / `pwsh` 的 `run_in_background: true` 立即返回一个编号；`shell_output({ id })` 读新增输出与是否还在运行 / 退出码，`shell_kill({ id })` 结束它和它启动的一切。会话关闭时全部回收，宿主退出时也回收，不留进程。
@@ -269,6 +273,7 @@
 `run_code`（`@nexgent/ptc`）与 `workflow` 的脚本在独立的 Node 子进程里执行：
 
 - 每次调用一个新进程；环境变量为空（不继承宿主环境，因此读不到 `NEXGENT_API_KEY` 等任何变量）；cwd 为项目根。
+- `run_code` 与函数模块的进程进和 `bash` 同一个系统沙箱（同样的读保护和网络设置，只有会话临时目录可写；Windows 上为只带会话临时目录能力的受限令牌），宿主函数仍在宿主里执行。名单外的域名问的是“`run_code` 要连接某域名”。`full-access`、`systemSandbox: 'off'` 或没有系统沙箱时照旧不进；`systemSandbox: 'required'` 而没有沙箱时不执行。`workflow` 的脚本进程不进系统沙箱。
 - 文件访问只经宿主函数（IPC 绑定），每次读写按**调用方会话的沙箱模式与路径策略**检查，与文件工具同一套规则；`read-only` 下写类宿主函数被拒，`run_code` 本身仍可运行只读代码（它在契约里声明 `selfSandboxed: true`，审批策略因此不在调用前整体拒绝它，见 §工具审批）。进程不直接拿到文件系统以外的宿主能力。
 - 输出与时长有上限（默认 60 s，最长 300 s）；超时或取消时终止整个进程树（Windows 纳入 Job Object），不得残留。
 - 工作流脚本里的 `agent()` 经宿主函数建成员，成员受上节“子会话继承”约束；脚本本身不能绕过并发与总数上限。
@@ -346,17 +351,17 @@
 
 如实列出不能防住的情况；这些不是待办，是当前策略面的定义：
 
-1. **命令的文件边界只在有系统沙箱的平台上成立。**macOS 与有 bubblewrap 的 Linux 上，命令写不出项目、会话临时目录与放行目录，读不到 `<NEXGENT_HOME>` 与凭证目录；但系统沙箱挡不住命令读取**项目内**的敏感文件（`.env` 等），项目内敏感文件只有文件工具会问，命令读它们不问。Windows 与没有沙箱的 Linux 上，`bash` / `pwsh` 启动的进程以用户身份运行，能读写用户能读写的任何路径；cwd 限制与形态黑名单只提高门槛。`sandbox: false` 经审批后同样没有边界。
+1. **命令的文件边界只在有系统沙箱时成立。**macOS 与有 bubblewrap 的 Linux 上，命令写不出项目、会话临时目录与放行目录，读不到 `<NEXGENT_HOME>` 与凭证目录；Windows 的受限令牌只限制写入，命令仍能读用户能读的任何文件（含 `<NEXGENT_HOME>` 与凭证目录）。系统沙箱挡不住命令读取**项目内**的敏感文件（`.env` 等），项目内敏感文件只有文件工具会问，命令读它们不问。没有系统沙箱时，`bash` / `pwsh` 启动的进程以用户身份运行，能读写用户能读写的任何路径；cwd 限制、形态黑名单与 Windows 上的逐条审批只提高门槛。`sandbox: false` 经审批后同样没有边界。
 2. **形态黑名单可被绕过。** 编码、变量拼接、脚本文件间接执行都不在匹配范围内。黑名单的目的是让常见高风险操作经过用户，不是阻止有意绕过。
 3. **`full-access` 没有任何边界。** 等同于用户亲自执行。
 4. **插件包进程内执行。** 插件包与宿主同进程、同权限，沙箱与审批对其无效；插件只在会话试用时装载，装载前问一次。
 5. **符号链接竞争。** 解析与打开之间仍有窗口；二次解析把窗口缩小但没有消除。对手是同一用户的并发进程时无法防御。
-6. **Windows 路径策略弱于 ACL。** 大小写、8.3 短名、交接点（junction）、硬链接都靠 realpath 与身份比较，覆盖不完整；ACL 后补后仍有硬链接别名与读不受限的边界。
+6. **Windows 路径策略与 ACL 的缝隙。** 文件工具的大小写、8.3 短名、交接点（junction）、硬链接都靠 realpath 与身份比较，覆盖不完整；命令一侧的 ACL 管不到硬链接别名，读取不受限；写保护路径在第一条命令时还不存在的（如 `git init` 之前的 `.git/hooks`），从它出现后的下一条命令起才受保护；能力 SID 的允许项留在目录的 ACL 里，不会自动撤掉。
 7. **读根不隔离读取。** `extraReadRoots` 之外的读取被文件工具拒绝，但命令可以读任何东西；密钥脱敏只覆盖已知形态。
-8. **网络只有开关。** `commands.network: false` 在有系统沙箱的平台上切断命令的网络；开着时命令用宿主网络，不按域名过滤。没有系统沙箱时这个开关不起作用。
+8. **网络按域名判定，不看内容。** 代理只按域名（和端口）放行，放行的域名上传什么不检查；包源与代码托管默认放行，经这些站点外传数据挡不住。原始 TCP（不经 HTTP / SOCKS 代理的连接）在 macOS / Linux 的沙箱里连不出去，`any` 模式也一样。Windows 与没有系统沙箱的平台上不过滤网络，`commands.network` 不起作用。
 9. **审批依赖宿主在场。** 非 TTY 的 CLI 把所有审批视为拒绝，任务可能因此失败而不是等待。
 10. **成员共用工作目录。** 没有项目副本的成员（`read-only` 成员、放不下副本的项目）和主对话共用项目目录，没有各自独立的工作目录；由主对话写明每个成员可以改哪些文件；`write_file` 拒绝覆盖本会话读过之后被别人改过的文件，`str_replace` 按当时内容匹配。两个成员各自 `str_replace` 同一文件的不同位置都会生效；对同一处的修改，后到者找不到原文而报错。命令（`bash` / `pwsh`）写文件不受这些检查。同名成果不会互相追加版本。
-11. **PTC 进程不是安全沙箱。** 空环境变量与宿主函数的路径检查限制了常见的越界，但 Node 进程仍以用户身份运行，`run_code` 没有进系统沙箱（系统沙箱只覆盖 `bash`）。
+11. **PTC 进程的隔离随系统沙箱。** `run_code` 与函数模块的进程在有系统沙箱时进沙箱；没有沙箱时只有空环境变量、Node 权限模型与宿主函数的路径检查，进程仍以用户身份运行。`workflow` 的脚本进程不进系统沙箱。Node 低于 22.21 时进程内的 `fetch` 不认代理环境变量，在沙箱里连不出去。
 12. **只读命令表是判断，不是隔离。**`read-only` 下放行的只读命令在有系统沙箱时还在只读沙箱里；没有沙箱时只靠命令表与解析，表外的写法（如 `git` 的别名配置、`find -fprint`）以外的绕过仍可能写文件。
 
 ## CLI 与桌面应用共用的审批交互
@@ -427,6 +432,8 @@ interface ToolApprovalAsk {
 | 中途切换 | `sessions.setMode` 切到 `read-only` 后写文件 | `session.mode`（`host`）；写入被拒 |
 | 系统沙箱 | `bash` 写项目外、写 `.nexgent/`、读 `~/.ssh`、`rm -rf <NEXGENT_HOME>`、`sh -c` 包一层写项目外；`network: false` 下联网 | 全部失败并附 `<sandbox_violations>`；凭证与数据目录不变；读本项目资料可以 |
 | 系统沙箱 | 宿主进程被 `SIGKILL` | 网络桥 `socat` 随之结束 |
+| 系统沙箱 | 名单内域名、名单外域名（批准 / 拒绝）、`off`、`any`；`run_code` 连名单外域名 | 名单内直接通；名单外问一次，拒绝后连不上；`off` 不通，`any` 通；`run_code` 的询问写明 `run_code` |
+| 系统沙箱（Windows） | 能力 SID 与 ACL 的计划、启动器带能力列表、ACL 设不上时不执行；受限令牌下写项目外 | 前三项在 Linux 上以单测覆盖；最后一项只能在 Windows 上测 |
 | 沙箱模式 | `--sandbox` 覆盖 `config.json`；非法值 | 会话头记录 CLI 值；非法值启动失败 |
 | 路径 | 写 `../outside.txt`、绝对路径根外；读项目外目录后用 `list_files` / `search_text` / `str_replace` | 询问（风险中，`once` / `session`，模式 `<目录>/**`，`fs.read` / `fs.write` 分开）；本会话放行读后各读类工具不再问，写仍问 |
 | 路径 | 读写 `~/.ssh/x`、`<NEXGENT_HOME>/projects/x` | 直接拒绝，不询问 |
