@@ -17,6 +17,7 @@ import {
   JOB_LAUNCHER,
   JOB_SANDBOX_FAILED_MARKER,
   JOB_SOURCE,
+  OFFLINE_ENV,
   jobLaunchSpec,
   planDenies,
   randomCapabilitySid,
@@ -113,6 +114,8 @@ describe('createWindowsSandbox', () => {
     const other = createWindowsSandbox({ home, platform: 'win32', trial: async () => undefined, icacls: async args => { calls.push([...args]); return { code: 0, output: args.length === 1 ? `x *${sid}:(OI)(CI)(M)` : '' } } })
     expect(await other.wrap('x', policy('c3'))).toMatchObject({ capabilities: [sid] })
     expect(calls.filter(call => call[1] === '/grant')).toEqual([])
+    expect(wrapped).not.toHaveProperty('env')
+    expect(await sandbox.wrap('x', { ...policy('c4'), network: { mode: 'off' } })).toMatchObject({ env: OFFLINE_ENV })
     expect(sandbox.annotate('c1', 'Access to the path is denied.', 1)).toContain('<sandbox_violations>')
     expect(sandbox.annotate('c1', 'Access to the path is denied.', 0)).toBe('Access to the path is denied.')
   })

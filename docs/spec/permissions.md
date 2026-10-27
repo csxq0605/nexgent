@@ -111,7 +111,7 @@
   - `allowlist`（默认）：命令可以直接连的域名是常用包源与代码托管（npm、PyPI、crates.io、Go 代理、RubyGems、Maven、NuGet、Packagist、GitHub、GitLab、Bitbucket 等，清单为 `network-policy.ts` 的 `DEFAULT_ALLOWED_DOMAINS`）、`commands.allowedDomains`（`host`、`*.host`，可带 `:port`）以及用户放行过的域名。其他域名第一次连接时弹审批（与其他审批同一个框；摘要 `connect to <host>`，风险中，选项“仅本次 / 本会话 / 本项目”）；“本会话 / 本项目”记为授权名 `network`、模式为该域名的授权，此后不再问；“仅本次”只放行这条命令。后台命令不能询问，名单外的域名直接拒绝。同一时刻有多个会话的命令在跑而代理分不清是谁的连接时，拒绝并写明原因，重跑即可。
   - `any`：所有域名放行（仍经代理）。旧值 `true` 读作 `any`。
   - `off`：没有网络。旧值 `false` 读作 `off`。
-- Windows 系统沙箱（参照 Codex `windows-sandbox-rs`）：每个可写目录（项目或成员副本、会话临时目录、放行的写目录）有自己的能力 SID（随机的 `S-1-5-21-…`，记在 `<NEXGENT_HOME>/sandbox/windows-capabilities.json`），这个 SID 在目录上有可继承的修改权限（`icacls /grant`，目录 ACL 里还没有时才加），写保护路径（`.nexgent/`、`.git/hooks`、`.git/config` 等）上对它加可继承的拒绝写入、删除与改权限。命令经 Job Object 启动器以写受限令牌启动（`CreateRestrictedToken`：`DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED`，限制 SID 为这些能力 SID、登录 SID 与 Everyone），所以只能写授权给能力 SID 的目录；`read-only` / 计划模式只有会话临时目录的能力。启动时做一次试验；试验失败时视为没有系统沙箱。某条命令的 ACL 设不上或受限进程起不来时，这条命令不执行，不以非受限方式启动。受限令牌不限制读取，也不过滤网络（`commands.network` 在 Windows 上不起作用）。
+- Windows 系统沙箱（参照 Codex `windows-sandbox-rs`）：每个可写目录（项目或成员副本、会话临时目录、放行的写目录）有自己的能力 SID（随机的 `S-1-5-21-…`，记在 `<NEXGENT_HOME>/sandbox/windows-capabilities.json`），这个 SID 在目录上有可继承的修改权限（`icacls /grant`，目录 ACL 里还没有时才加），写保护路径（`.nexgent/`、`.git/hooks`、`.git/config` 等）上对它加可继承的拒绝写入、删除与改权限。命令经 Job Object 启动器以写受限令牌启动（`CreateRestrictedToken`：`DISABLE_MAX_PRIVILEGE | LUA_TOKEN | WRITE_RESTRICTED`，限制 SID 为这些能力 SID、登录 SID 与 Everyone），所以只能写授权给能力 SID 的目录；`read-only` / 计划模式只有会话临时目录的能力。启动时做一次试验；试验失败时视为没有系统沙箱。某条命令的 ACL 设不上或受限进程起不来时，这条命令不执行，不以非受限方式启动。受限令牌不限制读取，也不过滤网络：`commands.network: off` 时只像 Codex 未提权时那样，把命令的代理变量指向关闭的本机端口、让常用包管理器和 git 离线（`OFFLINE_ENV`），不理会这些变量的程序仍能直连；`allowlist` 与 `any` 在 Windows 上不过滤。真正限制读取与网络要用单独的沙箱账户加 WFP 过滤（Codex 的提权模式、sandbox-runtime 的 `srt-win`），需要管理员装一次，现在没有接入。
 - 命令触犯沙箱失败时，工具结果附上被拦的操作与一句说明（`<sandbox_violations>`），让模型知道原因。
 - 不进沙箱重跑：调用参数 `sandbox: false`，每次都要审批（风险高，只给“仅本次”）。
 - Linux 上库为网络桥常驻的 `socat` 经 `setpriv --pdeathsig KILL` 启动，宿主进程被强杀时随之结束（没有 `setpriv` 时用库的默认方式）。
@@ -273,7 +273,7 @@
 `run_code`（`@nexgent/ptc`）与 `workflow` 的脚本在独立的 Node 子进程里执行：
 
 - 每次调用一个新进程；环境变量为空（不继承宿主环境，因此读不到 `NEXGENT_API_KEY` 等任何变量）；cwd 为项目根。
-- `run_code` 与函数模块的进程进和 `bash` 同一个系统沙箱（同样的读保护和网络设置，只有会话临时目录可写；Windows 上为只带会话临时目录能力的受限令牌），宿主函数仍在宿主里执行。名单外的域名问的是“`run_code` 要连接某域名”。`full-access`、`systemSandbox: 'off'` 或没有系统沙箱时照旧不进；`systemSandbox: 'required'` 而没有沙箱时不执行。`workflow` 的脚本进程不进系统沙箱。
+- `run_code` 与函数模块的进程进和 `bash` 同一个系统沙箱（同样的读保护和网络设置，只有会话临时目录可写；Windows 上为只带会话临时目录能力的受限令牌），宿主函数仍在宿主里执行。`workflow` 与 `organize` 的脚本进程同样进沙箱（`ctx.sandbox` 已装载时）。名单外的域名问的是“`run_code` / `workflow` 要连接某域名”。`full-access`、`systemSandbox: 'off'` 或没有系统沙箱时照旧不进；`systemSandbox: 'required'` 而没有沙箱时不执行。
 - 文件访问只经宿主函数（IPC 绑定），每次读写按**调用方会话的沙箱模式与路径策略**检查，与文件工具同一套规则；`read-only` 下写类宿主函数被拒，`run_code` 本身仍可运行只读代码（它在契约里声明 `selfSandboxed: true`，审批策略因此不在调用前整体拒绝它，见 §工具审批）。进程不直接拿到文件系统以外的宿主能力。
 - 输出与时长有上限（默认 60 s，最长 300 s）；超时或取消时终止整个进程树（Windows 纳入 Job Object），不得残留。
 - 工作流脚本里的 `agent()` 经宿主函数建成员，成员受上节“子会话继承”约束；脚本本身不能绕过并发与总数上限。
@@ -361,7 +361,7 @@
 8. **网络按域名判定，不看内容。** 代理只按域名（和端口）放行，放行的域名上传什么不检查；包源与代码托管默认放行，经这些站点外传数据挡不住。原始 TCP（不经 HTTP / SOCKS 代理的连接）在 macOS / Linux 的沙箱里连不出去，`any` 模式也一样。Windows 与没有系统沙箱的平台上不过滤网络，`commands.network` 不起作用。
 9. **审批依赖宿主在场。** 非 TTY 的 CLI 把所有审批视为拒绝，任务可能因此失败而不是等待。
 10. **成员共用工作目录。** 没有项目副本的成员（`read-only` 成员、放不下副本的项目）和主对话共用项目目录，没有各自独立的工作目录；由主对话写明每个成员可以改哪些文件；`write_file` 拒绝覆盖本会话读过之后被别人改过的文件，`str_replace` 按当时内容匹配。两个成员各自 `str_replace` 同一文件的不同位置都会生效；对同一处的修改，后到者找不到原文而报错。命令（`bash` / `pwsh`）写文件不受这些检查。同名成果不会互相追加版本。
-11. **PTC 进程的隔离随系统沙箱。** `run_code` 与函数模块的进程在有系统沙箱时进沙箱；没有沙箱时只有空环境变量、Node 权限模型与宿主函数的路径检查，进程仍以用户身份运行。`workflow` 的脚本进程不进系统沙箱。Node 低于 22.21 时进程内的 `fetch` 不认代理环境变量，在沙箱里连不出去。
+11. **PTC 进程的隔离随系统沙箱。** `run_code`、函数模块与 `workflow` 脚本的进程在有系统沙箱时进沙箱；没有沙箱时只有空环境变量、Node 权限模型与宿主函数的路径检查，进程仍以用户身份运行。Node 低于 22.21 时进程内的 `fetch` 不认代理环境变量，在沙箱里连不出去。
 12. **只读命令表是判断，不是隔离。**`read-only` 下放行的只读命令在有系统沙箱时还在只读沙箱里；没有沙箱时只靠命令表与解析，表外的写法（如 `git` 的别名配置、`find -fprint`）以外的绕过仍可能写文件。
 
 ## CLI 与桌面应用共用的审批交互

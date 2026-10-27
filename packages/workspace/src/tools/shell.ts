@@ -278,6 +278,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       const os = deps.os
       const inputs = os?.inputs(context)
       let capabilities: readonly string[] | undefined
+      let sandboxEnv: Readonly<Record<string, string>> | undefined
       if (os !== undefined && inputs?.enabled === true) {
         if (unsandboxed) {
           const approved = os.approveUnsandboxed === undefined ? false : await os.approveUnsandboxed(context, { command: script, cwd })
@@ -297,6 +298,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
             command = wrapped.program
             argv = wrapped.args
             capabilities = wrapped.capabilities
+            sandboxEnv = wrapped.env
             sandboxed = true
           } else if (inputs.required === true || wrapped.fatal === true) {
             throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: commands.systemSandbox is "required" but no system sandbox is available (${wrapped.reason})`, {
@@ -305,7 +307,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
           }
         }
       }
-      const processEnv = { TMP: temp, TEMP: temp, TMPDIR: temp, ...env }
+      const processEnv = { TMP: temp, TEMP: temp, TMPDIR: temp, ...env, ...sandboxEnv }
       const tag = `${context.callId}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40) || 'call'
 
       if (background) {

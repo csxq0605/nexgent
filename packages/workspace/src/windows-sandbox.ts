@@ -16,7 +16,12 @@
  *   (`windows-job.ts`), so a write passes only where one of them is allowed.
  *
  * Reads are not restricted (a write-restricted token is checked only for
- * writes) and neither is the network. When the trial launch fails the probe
+ * writes) and neither is the network: like Codex without its elevated
+ * setup, `network: off` only points the command's proxy variables at a
+ * closed port and tells package managers to stay offline
+ * ({@link OFFLINE_ENV}); a program that ignores them still connects.
+ * Enforcing reads and the network takes a separate sandbox account and a
+ * WFP filter, which need an administrator once. When the trial launch fails the probe
  * reports `none`; when the ACLs of one command cannot be set, that command
  * is not run (`fatal`), never started without the restriction.
  */
@@ -26,11 +31,31 @@ import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/prom
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import { NexgentError, nexgentHome } from '@nexgent/kernel'
-import { VIOLATION_HINT, type OsSandbox, type OsSandboxPolicy, type OsSandboxStatus, type OsSandboxWrap } from './os-sandbox.js'
+import { networkOf, VIOLATION_HINT, type OsSandbox, type OsSandboxPolicy, type OsSandboxStatus, type OsSandboxWrap } from './os-sandbox.js'
 import { LocalProcessRunner } from './process.js'
 
 /** Where the capability SIDs are kept, under the Nexgent home. */
 export const WINDOWS_CAPABILITIES_FILE = nodePath.join('sandbox', 'windows-capabilities.json')
+
+/**
+ * `network: off` on Windows (Codex `env.rs` `apply_no_network_to_env`):
+ * proxies at a closed loopback port and the offline switches of common
+ * package managers and git. Advisory: nothing stops a direct connection.
+ */
+export const OFFLINE_ENV: Readonly<Record<string, string>> = Object.freeze({
+  HTTP_PROXY: 'http://127.0.0.1:9',
+  HTTPS_PROXY: 'http://127.0.0.1:9',
+  ALL_PROXY: 'http://127.0.0.1:9',
+  NO_PROXY: 'localhost,127.0.0.1,::1',
+  PIP_NO_INDEX: '1',
+  PIP_DISABLE_PIP_VERSION_CHECK: '1',
+  NPM_CONFIG_OFFLINE: 'true',
+  CARGO_NET_OFFLINE: 'true',
+  GIT_HTTP_PROXY: 'http://127.0.0.1:9',
+  GIT_HTTPS_PROXY: 'http://127.0.0.1:9',
+  GIT_SSH_COMMAND: 'cmd /c exit 1',
+  GIT_ALLOW_PROTOCOLS: '',
+})
 
 /** The persisted record: one capability SID per write directory. */
 export interface CapabilityRecord {
@@ -257,7 +282,8 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
         return { kind: 'unavailable', reason: `cannot set up the Windows sandbox for this command: ${(error as Error).message}`, fatal: true }
       }
       sandboxed.add(policy.commandId)
-      return { kind: 'wrapped', program: policy.shell ?? 'pwsh', args: ['-NoProfile', '-NonInteractive', '-Command', script], capabilities }
+      const offline = networkOf(policy).mode === 'off'
+      return { kind: 'wrapped', program: policy.shell ?? 'pwsh', args: ['-NoProfile', '-NonInteractive', '-Command', script], capabilities, ...(offline ? { env: OFFLINE_ENV } : {}) }
     },
     annotate(commandId, stderr, exitCode) {
       if (!sandboxed.has(commandId) || exitCode === null || exitCode === 0) return stderr

@@ -3,12 +3,15 @@
  * `pipeline` / `phase` / `log`, the concurrency and member bounds, member
  * failure, cancellation, graphs, and recovery planning.
  */
+import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { COLLABORATION_LIMITS, WORKFLOW_TOOL, type SessionRecord } from '@nexgent/kernel'
 import { describe, expect, it } from 'vitest'
 import { planWorkflowRecovery, workflowTool } from '../src/index.js'
 import { FakeRunner, ofType, workflowContext } from './helpers.js'
+
+const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
@@ -251,5 +254,14 @@ describe('workflow recovery planning', () => {
       { type: 'workflow.end', turn: 2, workflowId: 'w1', status: 'interrupted', members: 2, error: { name: 'NexgentError', code: 'internal', message: expect.stringContaining('not resumed') } },
     ])
     expect(planWorkflowRecovery(records.slice(4))).toEqual([])
+  })
+
+  it.skipIf(!hasBwrap)('runs the script in the system sandbox: a host off the allow list is put to the session', async () => {
+    const { context, asks, sandbox } = await workflowContext()
+    const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox }).handler({
+      script: `try { await fetch('http://nexgent-check.invalid/'); return 'reached' } catch { return 'refused' }`,
+    }, context)
+    expect(output.content).toContain('refused')
+    expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: workflow' })])
   })
 })

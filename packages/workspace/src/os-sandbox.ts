@@ -81,6 +81,8 @@ export type OsSandboxWrap =
     readonly args: string[]
     /** Windows: the capability SIDs the process's restricted token carries (passed to the process runner). */
     readonly capabilities?: readonly string[]
+    /** Environment variables to add for the command (Windows: the offline settings of `network: off`). */
+    readonly env?: Readonly<Record<string, string>>
   }
   /** `fatal`: the sandbox works here but could not be set up for this command; it must not run unsandboxed. */
   | { readonly kind: 'unavailable'; readonly reason: string; readonly fatal?: boolean }
