@@ -206,9 +206,41 @@ describe('member workdirs of a git project', () => {
     git(p.root, 'commit', '-q', '-m', 'project again')
     const ours = git(p.root, 'rev-parse', 'HEAD')
     const merge = await copy.merge()
-    expect(merge.conflicts).toContainEqual({ path: '.git/refs/heads/main', kind: 'both-changed' })
+    expect(merge.conflicts).toContainEqual(expect.objectContaining({ path: '.git/refs/heads/main', kind: 'both-changed' }))
     expect(git(p.root, 'rev-parse', 'HEAD')).toBe(ours)
     // The member's commit stays reachable from the project (its objects came along).
+    await copy.close()
+  })
+
+  it('holds back the member\'s commit and index when its file change conflicts, so the project\'s files, index and HEAD agree', async () => {
+    const p = await repo()
+    const copy = (await new LocalMemberWorkdirs(p.root, { base: await tempDir('nxwd-') }).open({ sessionId: A, sandboxMode: 'workspace-write' }))!
+    const before = git(p.root, 'rev-parse', 'HEAD')
+    // The member commits a change to app.txt; the user edits the same line in the project meanwhile.
+    await writeFile(nodePath.join(copy.root, 'app.txt'), 'member\n')
+    await writeFile(nodePath.join(copy.root, 'notes.txt'), 'n\n')
+    git(copy.root, 'add', '-A')
+    git(copy.root, 'commit', '-q', '-m', 'member side')
+    const theirs = git(copy.root, 'rev-parse', 'HEAD')
+    await p.write('app.txt', 'user\n')
+
+    const merge = await copy.merge()
+    expect(merge.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ path: 'app.txt', kind: 'both-changed' }),
+      expect.objectContaining({ path: '.git/refs/heads/main', kind: 'both-changed' }),
+      expect.objectContaining({ path: '.git/index', kind: 'both-changed' }),
+    ]))
+    expect(await readFile(p.abs('app.txt'), 'utf8')).toBe('user\n')
+    expect(git(p.root, 'rev-parse', 'HEAD')).toBe(before)
+    // Only the user's own edit and the member's new file show; nothing of the member's commit is staged or committed.
+    expect(git(p.root, 'diff', '--cached', '--name-only')).toBe('')
+    expect(git(p.root, 'diff', '--name-only')).toBe('app.txt')
+    expect(git(p.root, 'ls-files', '--others', '--exclude-standard')).toBe('notes.txt')
+    // The member's commit is kept aside, and the copy is back in step with the project.
+    const kept = merge.conflicts.find(conflict => conflict.path === '.git/refs/heads/main')!.copy!
+    expect((await readFile(kept, 'utf8')).trim()).toBe(theirs)
+    expect(git(p.root, 'cat-file', '-t', theirs)).toBe('commit')
+    expect(git(copy.root, 'rev-parse', 'HEAD')).toBe(before)
     await copy.close()
   })
 })

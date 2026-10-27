@@ -258,9 +258,17 @@ export interface SessionModeRecord extends SessionRecordBase {
   readonly sandboxMode: SandboxMode
   /** Whether plan mode is on after the change. */
   readonly plan: boolean
-  /** `host` for a switch the user made in the app or CLI; `plan-approved` after `exit_plan`. */
-  readonly reason: 'host' | 'plan-approved'
+  /**
+   * `host` for a switch the user made in the app or CLI; `plan-approved` after
+   * `exit_plan` (or, for a thread that took plan mode from its coordinator,
+   * when the coordinator's plan is approved); `coordinator` when a thread
+   * enters plan mode because its coordinator is in plan mode.
+   */
+  readonly reason: SessionModeReason
 }
+
+/** Why a `session.mode` switch happened (see {@link SessionModeRecord.reason}). */
+export type SessionModeReason = 'host' | 'plan-approved' | 'coordinator'
 
 /** A `session`-scope grant; survives `resume`. Written right after the deciding `approval.decision`. */
 export interface ApprovalGrantRecord extends SessionRecordBase {
@@ -699,6 +707,8 @@ export interface SessionMetadata {
   readonly sandboxMode: SandboxMode
   /** ADR 0022: plan mode on; from `session.start`, then the latest `session.mode`. Absent means false. */
   readonly plan?: boolean
+  /** Plan mode is on because the coordinator's was (the latest `session.mode` turned it on with `reason: "coordinator"`). */
+  readonly planFromCoordinator?: boolean
   /** `session`-scope approval grants from `approval.grant` records, in order. */
   readonly grants: readonly ApprovalGrant[]
   /** Title when set. */

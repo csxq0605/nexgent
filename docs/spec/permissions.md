@@ -230,7 +230,7 @@
 ```
 
 - `maxRequests` 计模型请求次数（含失败），`maxTokens` 计 `inputTokens + outputTokens`；用量 `unknown` 的请求只计次数。
-- `perTask` 以一次 `run` / 一次 `resume` 为单位；`perProject` 以账本在 `windowDays` 内的记录累加：每轮开始读一次账本，之后加上本进程里这个项目所有会话（同时运行的讨论串与对话都算）此后发出的请求，每次请求发出前都再查一次，所以并发的会话合起来不超过上限。
+- `perTask` 以一次 `run` / 一次 `resume` 为单位；`perProject` 以账本在 `windowDays` 内的记录累加：每轮开始读一次账本，按请求 id 记；本进程里这个项目所有会话（同时运行的讨论串与对话都算）发出的请求记在共享的账上，发请求前先查上限再登记（两步之间没有 await），账上有的请求不再从账本重复计，所以不论读账本与别的会话发请求谁先谁后，并发的会话合起来都不超过上限。
 - 任一上限达到时：下一次模型请求不再发出，当前轮次以 `turn.end { kind: 'cancelled', cause: 'cost-cap' }` 结束；会话先写一条 `error` 记录（`fatal: false`），账本写 `task.outcome`，二者的错误 `code` 都是 `budget/exhausted`，`ErrorInfo.details` 带 `{ scope: 'task' | 'project', metric: 'requests' | 'tokens', used, limit }`；不重试、不自动续跑。
 - `perTask` 按整棵任务树计（根会话与它的全部成员共享同一 `taskId` 与同一份累计），成员花的请求与 token 算进根会话的额度；成员的下一次请求被挡下时，成员以 `budget` 结束，父会话下一次请求同样被挡下。`ErrorInfo.details.scope` 仍为 `task`。见下节。
 - 字段缺省表示不限制。
