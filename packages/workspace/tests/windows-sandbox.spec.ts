@@ -127,7 +127,7 @@ describe('createWindowsSandbox', () => {
   })
 
   it('offers a reinstall when the network filter is missing', async () => {
-    const { sandbox } = await setup({ provisioned: true, initError: { code: 'wfp_filter_missing', message: 'WFP filter missing' } })
+    const { sandbox } = await setup({ provisioned: true, initError: { code: '', message: 'Sandbox dependencies not available: WFP filter missing' } })
     expect(await sandbox.probe()).toMatchObject({ kind: 'none', installable: true, reason: expect.stringContaining('WFP') })
   })
 

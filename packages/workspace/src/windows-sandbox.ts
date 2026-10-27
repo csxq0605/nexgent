@@ -226,13 +226,21 @@ function realOrUndefined(path: string): string | undefined {
 
 async function start(lib: WindowsLibrary): Promise<WinBackend> {
   const gate = new NetworkGate()
+  // Asked first: the library's own dependency check reports a missing install as a plain error.
+  try {
+    const user = await lib.srt.userStatus()
+    if (!user.provisioned || !user.credPresent) return { lib, gate, failure: WINDOWS_NOT_INSTALLED, installable: true }
+  } catch (error) {
+    return { lib, gate, failure: reasonFrom(error) }
+  }
   try {
     await lib.manager.initialize({ ...GLOBAL_CONFIG, windows: { srtWin: { path: lib.srt.exe } } }, gate.decide, false)
   } catch (error) {
     const code = (error as { code?: unknown }).code
-    if (code === 'not_provisioned') return { lib, gate, failure: WINDOWS_NOT_INSTALLED, installable: true }
+    const message = reasonFrom(error)
+    if (code === 'not_provisioned' || /not provisioned/i.test(message)) return { lib, gate, failure: WINDOWS_NOT_INSTALLED, installable: true }
     // A machine whose filter went missing is repaired by installing again.
-    return { lib, gate, failure: reasonFrom(error), installable: typeof code === 'string' && code.startsWith('wfp_') }
+    return { lib, gate, failure: message, installable: (typeof code === 'string' && code.startsWith('wfp_')) || /\bWFP\b/.test(message) }
   }
   try {
     const user = await lib.srt.userStatus()
