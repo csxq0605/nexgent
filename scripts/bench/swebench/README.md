@@ -19,4 +19,6 @@ python -m swebench.harness.run_evaluation -d SWE-bench/SWE-bench_Verified -p out
 node scripts/bench/swebench/summarize.mjs --out out-gold --report nexgent-scripted-gold.check.json
 ```
 
+`run.mjs --mode real` runs each task container on an internal network whose only way out is `api-proxy.mjs`, a proxy to the model API that holds the key (`--network host` turns this off). `--organization solo|team` fixes how the CLI organizes every task (`NEXGENT_FORCE_ORGANIZATION`).
+
 Needs Docker. `--mirror <registry>` pulls the images through a mirror and tags them under their original names.
