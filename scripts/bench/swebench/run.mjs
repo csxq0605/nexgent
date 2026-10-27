@@ -33,6 +33,7 @@
  *     [--cost-cap <usd>] [--timeout-min 60] [--model <id>] [--allow-spend]
  *     [--budget <usd> --price in,out,cacheRead,cacheWrite]
  *     [--network isolated|host] [--organization solo|team]
+ *     [--prompt workflow|plain] [--effort low|medium|high|xhigh|max]
  *
  * `--network isolated` (the default in mode real): the task container joins
  * an internal Docker network with no route out; its only peer is a proxy
@@ -73,6 +74,8 @@ const { values: args } = parseArgs({
     mirror: { type: 'string' },
     network: { type: 'string' },
     organization: { type: 'string' },
+    prompt: { type: 'string', default: 'workflow' },
+    effort: { type: 'string' },
     'proxy-image': { type: 'string', default: 'node:22-slim' },
     budget: { type: 'string' },
     price: { type: 'string', default: '2,10,0.2,2.5' },
@@ -99,6 +102,10 @@ if (real && (apiKey === undefined || apiKey === '')) {
 const NETWORK = args.network ?? (real ? 'isolated' : 'host')
 if (!['isolated', 'host'].includes(NETWORK) || (NETWORK === 'isolated' && !real)) {
   console.error('--network is isolated (real mode only, the default there) or host')
+  process.exit(2)
+}
+if (!['plain', 'workflow'].includes(args.prompt)) {
+  console.error('--prompt is plain or workflow')
   process.exit(2)
 }
 if (args.organization !== undefined && !['solo', 'team'].includes(args.organization)) {
@@ -139,15 +146,32 @@ function ensureImage(image) {
   docker(['tag', mirrored, image])
 }
 
-/** The task Nexgent gets: the issue text and where the code is. The gold patch and the tests are never shown. */
+/**
+ * The task Nexgent gets: the issue text and where the code is. The gold patch and the tests are never shown.
+ * `--prompt workflow` (default) adds the recommended workflow of the usual SWE-bench instance templates
+ * (mini-SWE-agent's `swebench.yaml`, Anthropic's SWE-bench prompt): reproduce, fix, rerun, edge cases.
+ * `plain` is the issue and the rule on tests only (the runs before 2026-10-27).
+ */
 function taskText(instance) {
-  return [
+  const lines = [
     `The repository in this project (${instance.repo}) has the issue below. Change the code so that the issue is resolved.`,
     'Do not change or delete existing tests. You may run the existing tests or add new ones.',
     '',
     '<issue>',
     instance.problem_statement.trim(),
     '</issue>',
+  ]
+  if (args.prompt === 'plain') return lines.join('\n')
+  return [
+    ...lines,
+    '',
+    'Recommended workflow:',
+    '1. Find and read the code relevant to the issue.',
+    '2. Write a short script that reproduces the issue, run it and see it fail.',
+    '3. Edit the source code (not the tests) to resolve the issue.',
+    '4. Run your script again to confirm the fix, and try the edge cases the issue implies.',
+    '5. Run the existing tests of the code you changed and fix what your change breaks.',
+    'Remove your reproduction script when you are done.',
   ].join('\n')
 }
 
@@ -213,6 +237,7 @@ async function runInstance(instance, server) {
       // Background learning makes model calls of its own after the task; a benchmark run measures the task alone.
       learning: { enabled: false },
       ...(args.model === undefined ? {} : { model: args.model }),
+      ...(args.effort === undefined ? {} : { effort: args.effort }),
       ...(args['cost-cap'] === undefined ? {} : { costCaps: { perTask: { maxUsd: Number(args['cost-cap']) } } }),
     }
     docker(['exec', '-i', name, 'bash', '-c', 'mkdir -p /testbed/.nexgent && cat > /testbed/.nexgent/config.json'], { input: JSON.stringify(config, null, 2) })
