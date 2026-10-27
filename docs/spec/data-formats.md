@@ -251,7 +251,7 @@
 | `type` | 何时写 | 专有字段 |
 | --- | --- | --- |
 | `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
-| `turn.start` | 一轮开始（一条用户消息及其触发的全部模型调用与工具调用） | `turn`、`handbook?`（这一轮注入的经验手册条目 id，按检索顺序，至多 `HANDBOOK_TOP_K` 个；没注入时不写）、`organization?`（这一轮是否用成员，`{ decision: "solo" \| "team", chosenBy: "size" \| "control" \| "default" \| "memory" \| "retry", suggested?: OrganizationName, change? }`；只在根会话、装了 `ctx.organizer` 时写，见 §工作流“按任务组队”；`retry` 只出现在旧记录里；`change` 是协调者复盘给这一轮的改动说明 `OrganizationChangeNote`，见 §组织库“协调者复盘”） |
+| `turn.start` | 一轮开始（一条用户消息及其触发的全部模型调用与工具调用） | `turn`、`handbook?`（这一轮注入的经验手册条目 id，按检索顺序，至多 `HANDBOOK_TOP_K` 个；没注入时不写）、`organization?`（这一轮是否用成员，`{ decision: "solo" \| "team", chosenBy: "size" \| "control" \| "default" \| "memory" \| "forced" \| "retry", suggested?: OrganizationName, change? }`；只在根会话、装了 `ctx.organizer` 时写，见 §工作流“按任务组队”；`retry` 只出现在旧记录里；`change` 是协调者复盘给这一轮的改动说明 `OrganizationChangeNote`，见 §组织库“协调者复盘”） |
 | `user.message` | 用户消息进入会话，或注入的合成上下文，或反馈轮的提示，或对话与讨论串之间的消息 | `turn`、`content`、`source: "user" \| "inject" \| "feedback" \| "thread"`、`materials?` |
 | `assistant.message` | 一次模型调用的流结束（含被取消的流） | `turn`、`step`、`requestId`、`content`、`toolCalls?`、`usage`、`finishReason`、`interrupted?`、`providerContent?`、`refusal?`、`reasoning?` |
 | `tool.result` | 一次工具调用返回 | `turn`、`step`、`toolCallId`、`name`、`content`、`isError`、`error?`、`meta?`、`durationMs` |
@@ -862,6 +862,7 @@ The earlier part of this conversation was compacted. Summary:
 - 根会话每轮开始前，kernel 问 `ctx.organizer.decide(...)` 这一轮是否用成员，结果写进 `turn.start.organization`，并给本轮系统提示加一节 `How this task is organized`。默认实现（workflow 包 `defaultOrganizer`）：没有资料、至多 1 行、至多 40 个单位（汉字逐字计、其他按词计）的任务是小任务，自己做（`size`）；其余任务按 20% 的概率自己做作对照（`control`），否则组队（`default`）；组队的轮用提示里点名的分工（同类任务记录选出的），没有点名时至少用 `lead-checker`（自己做完后由成员独立检查：有能运行的就用测试成员，审查成员只能读文件），不许不用成员直接回答。
 - 组队的轮里，模型用 `organize` 工具给出分工：`organization`（`lead-checker`、`plan-build-review`、`explore-then-build`、`custom`）与 1–6 个角色 `{ name, kind, task, after? }`，`kind` 为 `plan`、`explore`、`implement`、`test`、`review`，分别用预设 `read-only-analyst`、`explorer`、`general-executor`、`general-executor`、`read-only-checker`。分工编成一张图，按 `after` 先后、能并行的并行运行（`workflow.start.kind: "graph"`，`title` 为分工名）；每个成员在回复末尾写四行进展（Done / Not done / Checks / Blockers），工具结果按它汇总“n 个角色里几个完成”。
 - 装了 `ctx.organizations`（capabilities 包的 `OrganizationLibrary`）时，非小任务的用户轮不再按固定 20% 抽签，而由组织库决定，见 §组织库。
+- 测量用：环境变量 `NEXGENT_FORCE_ORGANIZATION` 为 `solo` 或 `team` 时（`DefaultOrganizerOptions.force`），每个根轮都按它决定，跳过小任务规则和组织库，记 `chosenBy: "forced"`，这些轮不写进组织库；`team` 的轮要结束时若还没有 `organize` 记录，kernel 注入一次 `FORCED_TEAM_NOTE` 再让模型继续。其他值启动时报 `config/invalid`。
 - 同一轮再调用 `organize` 就是换分工：必须给 `reason`，与刚运行的分工完全相同时拒绝；新的 `organization` 记录带 `replaces`。自己做的轮里调用 `organize` 被拒绝。成员看不到 `organize`。
 
 ## 组织库
