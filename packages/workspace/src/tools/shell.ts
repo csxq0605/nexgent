@@ -277,8 +277,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       const commandId = randomBytes(16).toString('base64url')
       const os = deps.os
       const inputs = os?.inputs(context)
-      let capabilities: readonly string[] | undefined
-      let sandboxEnv: Readonly<Record<string, string>> | undefined
+      let processEnv: Record<string, string> = { TMP: temp, TEMP: temp, TMPDIR: temp, ...env }
       if (os !== undefined && inputs?.enabled === true) {
         if (unsandboxed) {
           const approved = os.approveUnsandboxed === undefined ? false : await os.approveUnsandboxed(context, { command: script, cwd })
@@ -293,12 +292,16 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
             network: commandNetwork(inputs.network, context, script, background),
             commandId,
             ...(flavor.name === 'pwsh' ? { shell: flavor.program } : {}),
+            // Windows: the sandbox account reads only what it is given, and starts with its own environment.
+            readRoots: [inputs.projectRoot],
+            readOnly: inputs.readOnly,
+            cwd,
+            env: processEnv,
           }, context.signal)
           if (wrapped.kind === 'wrapped') {
             command = wrapped.program
             argv = wrapped.args
-            capabilities = wrapped.capabilities
-            sandboxEnv = wrapped.env
+            if (wrapped.env !== undefined) processEnv = { ...processEnv, ...wrapped.env }
             sandboxed = true
           } else if (inputs.required === true || wrapped.fatal === true) {
             throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: commands.systemSandbox is "required" but no system sandbox is available (${wrapped.reason})`, {
@@ -307,7 +310,6 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
           }
         }
       }
-      const processEnv = { TMP: temp, TEMP: temp, TMPDIR: temp, ...env, ...sandboxEnv }
       const tag = `${context.callId}`.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 40) || 'call'
 
       if (background) {
@@ -317,7 +319,6 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
           sessionId: context.sessionId, command, args: argv, cwd, env: processEnv, label: script, logPath,
           ...(explicitTimeout === undefined ? {} : { timeoutMs }),
           ...(sandboxed ? { onExit: () => os?.sandbox.release(commandId) } : {}),
-          ...(capabilities === undefined ? {} : { capabilities }),
         })
         return {
           content: deps.redactor.redact(
@@ -331,7 +332,6 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       const files = { stdout: join(temp, `shell-${tag}.stdout.log`), stderr: join(temp, `shell-${tag}.stderr.log`) }
       const spec: LocalProcessSpec = {
         command, args: argv, cwd, env: processEnv, timeoutMs, signal: context.signal, outputFiles: files,
-        ...(capabilities === undefined ? {} : { capabilities }),
       }
       let result: ProcessResult
       try {

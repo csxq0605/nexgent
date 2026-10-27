@@ -1071,6 +1071,9 @@
                 },
                 "reason": {
                   "type": "string"
+                },
+                "installable": {
+                  "type": "boolean"
                 }
               }
             },

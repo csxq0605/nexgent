@@ -1,300 +1,443 @@
 /**
- * The Windows system sandbox for `pwsh` commands and program processes
- * (`permissions.md` §系统沙箱, Windows), after Codex
- * `windows-sandbox-rs` (`token.rs`, `acl.rs`, `cap.rs`):
+ * The Windows system sandbox (`permissions.md` §系统沙箱, Windows): the
+ * Windows backend of `@anthropic-ai/sandbox-runtime` (`srt-win`, the same
+ * design as Codex's elevated Windows sandbox). Commands run as the
+ * dedicated local account `srt-sandbox`:
  *
- * - every directory a command may write (project or member copy, session
- *   temp directory, directories approved for the session) has its own
- *   capability SID, a random `S-1-5-21-…` kept in
- *   `<NEXGENT_HOME>/sandbox/windows-capabilities.json`;
- * - that SID gets an inheritable Modify ACE on the directory (`icacls
- *   /grant`, once per directory), and an inheritable deny of writing,
- *   deleting and changing permissions on the write-protected paths below it
- *   (`.nexgent/`, `.git/hooks`, `.git/config`, the Nexgent home);
- * - the command starts with a write-restricted token whose restricting SIDs
- *   are the capabilities of its directories, the logon SID and Everyone
- *   (`windows-job.ts`), so a write passes only where one of them is allowed.
+ * - **network**: a WFP filter lets that account connect only to the
+ *   library's local proxy, so the domain allow list and the questions
+ *   about other hosts work as on macOS / Linux (`NetworkGate`), and a
+ *   program that ignores the proxy variables is still blocked;
+ * - **files**: the account has no rights on the user's files. A command's
+ *   write directories get an inheritable modify ACE for it, the
+ *   directories it must read (the project in read-only mode, the folders
+ *   of tools on `PATH` under the user's profile, the Node that runs
+ *   programs) a read ACE; write- and read-protected paths below them get
+ *   a deny ACE for that command (`srt-win exec --deny-*`).
  *
- * Reads are not restricted (a write-restricted token is checked only for
- * writes) and neither is the network: like Codex without its elevated
- * setup, `network: off` only points the command's proxy variables at a
- * closed port and tells package managers to stay offline
- * ({@link OFFLINE_ENV}); a program that ignores them still connects.
- * Enforcing reads and the network takes a separate sandbox account and a
- * WFP filter, which need an administrator once. When the trial launch fails the probe
- * reports `none`; when the ACLs of one command cannot be set, that command
- * is not run (`fatal`), never started without the restriction.
+ * The account and the WFP filter are made once per machine by
+ * {@link installWindowsCommandSandbox} (one administrator prompt). Until
+ * then the probe reports `none` with `installable: true`; a command whose
+ * sandbox cannot be set up does not run (`fatal`).
+ *
+ * Grants are held by this process (the library keeps them in a per-user
+ * database and removes them at `reset()`, or after a crash on the next
+ * start): a directory granted for writing stays writable for later
+ * sandboxed commands of this process, except read-only ones.
  */
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
-import { mkdir, readFile, realpath, rename, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { existsSync, realpathSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
-import { NexgentError, nexgentHome } from '@nexgent/kernel'
-import { networkOf, VIOLATION_HINT, type OsSandbox, type OsSandboxPolicy, type OsSandboxStatus, type OsSandboxWrap } from './os-sandbox.js'
-import { LocalProcessRunner } from './process.js'
+import type { CommandSandboxInstallResult } from '@nexgent/kernel'
+import {
+  forget,
+  GLOBAL_CONFIG,
+  MIN_COMMAND_ID_LENGTH,
+  NetworkGate,
+  reasonFrom,
+  registerNetwork,
+  VIOLATION_HINT,
+  type OsSandbox,
+  type OsSandboxInstallResult,
+  type OsSandboxStatus,
+  type OsSandboxWrap,
+  type SandboxManagerLike,
+} from './os-sandbox.js'
 
-/** Where the capability SIDs are kept, under the Nexgent home. */
-export const WINDOWS_CAPABILITIES_FILE = nodePath.join('sandbox', 'windows-capabilities.json')
-
-/**
- * `network: off` on Windows (Codex `env.rs` `apply_no_network_to_env`):
- * proxies at a closed loopback port and the offline switches of common
- * package managers and git. Advisory: nothing stops a direct connection.
- */
-export const OFFLINE_ENV: Readonly<Record<string, string>> = Object.freeze({
-  HTTP_PROXY: 'http://127.0.0.1:9',
-  HTTPS_PROXY: 'http://127.0.0.1:9',
-  ALL_PROXY: 'http://127.0.0.1:9',
-  NO_PROXY: 'localhost,127.0.0.1,::1',
-  PIP_NO_INDEX: '1',
-  PIP_DISABLE_PIP_VERSION_CHECK: '1',
-  NPM_CONFIG_OFFLINE: 'true',
-  CARGO_NET_OFFLINE: 'true',
-  GIT_HTTP_PROXY: 'http://127.0.0.1:9',
-  GIT_HTTPS_PROXY: 'http://127.0.0.1:9',
-  GIT_SSH_COMMAND: 'cmd /c exit 1',
-  GIT_ALLOW_PROTOCOLS: '',
-})
-
-/** The persisted record: one capability SID per write directory. */
-export interface CapabilityRecord {
-  readonly version: 1
-  readonly roots: Readonly<Record<string, { readonly sid: string }>>
+/** The slice of the library's `SandboxManager` used on Windows. */
+export interface WindowsManagerLike extends Pick<SandboxManagerLike, 'registerCommandNetworkLists' | 'unregisterCommandNetworkLists' | 'cleanupAfterCommand' | 'reset'> {
+  initialize(config: unknown, askCallback?: unknown, enableLogMonitor?: boolean): Promise<void>
+  wrapWithSandboxArgv(
+    command: string,
+    binShell?: string | { exe: string; args: readonly string[] },
+    customConfig?: unknown,
+    abortSignal?: AbortSignal,
+    cwd?: string,
+    options?: { commandId?: string; commandText?: string },
+  ): Promise<{ argv: string[]; env: NodeJS.ProcessEnv }>
 }
 
-const EMPTY: CapabilityRecord = { version: 1, roots: {} }
-
-/** Pure: a random SID in the `S-1-5-21-a-b-c-d` form Codex uses for capabilities. */
-export function randomCapabilitySid(bytes: Buffer = randomBytes(16)): string {
-  const parts = [0, 4, 8, 12].map(offset => bytes.readUInt32LE(offset))
-  return `S-1-5-21-${parts.join('-')}`
+/** The library's `srt-win` helpers used here (tests inject fakes). */
+export interface SrtWinLike {
+  /** `srt-win` itself. */
+  readonly exe: string
+  /** The sandbox account; `sid` once it is provisioned. */
+  userStatus(): Promise<{ readonly provisioned: boolean; readonly credPresent: boolean; readonly sid?: string }>
+  /** Additive, process-held ACEs for the account. Throws when `srt-win` fails. */
+  grant(sandboxUserSid: string, write: readonly string[], read: readonly string[]): void
+  /** The one-time machine install (one administrator prompt). */
+  install(): Promise<{ readonly cancelled?: true }>
 }
 
-/** Pure: whether `text` is a capability SID this module makes. */
-export function isCapabilitySid(text: string): boolean {
-  return /^S-1-5-21-\d{1,10}-\d{1,10}-\d{1,10}-\d{1,10}$/.test(text)
+/** The library as this module uses it. */
+export interface WindowsLibrary {
+  readonly manager: WindowsManagerLike
+  readonly srt: SrtWinLike
 }
 
-/** Pure: the key of a directory in the record (Windows paths compare without case and trailing separators). */
-export function rootKey(path: string): string {
+async function loadLibrary(): Promise<WindowsLibrary> {
+  const lib = await import('@anthropic-ai/sandbox-runtime')
+  const exe = lib.VENDORED_SRT_WIN_EXE
+  const srtWin = () => lib.resolveSrtWin({ path: exe })
+  return {
+    manager: lib.SandboxManager as unknown as WindowsManagerLike,
+    srt: {
+      exe,
+      userStatus: () => lib.getWindowsSandboxUserStatusAsync({ srtWin: srtWin() }),
+      grant: (sandboxUserSid, write, read) => lib.grantWindowsAcl({ sandboxUserSid, write, read, srtWin: srtWin() }),
+      install: async () => {
+        const result = await lib.installWindowsSandboxAsync({ srtWin: srtWin() })
+        return result.cancelled === true ? { cancelled: true } : {}
+      },
+    },
+  }
+}
+
+/** Why there is no Windows sandbox yet, when the account is not provisioned. */
+export const WINDOWS_NOT_INSTALLED = 'the Windows sandbox is not installed yet (one administrator prompt sets it up)'
+
+interface WinBackend {
+  readonly lib?: WindowsLibrary
+  readonly gate: NetworkGate
+  readonly failure?: string
+  readonly installable?: boolean
+  readonly sid?: string
+}
+
+// One per process: the library's manager is a singleton. `generation` moves on after an install.
+let shared: { readonly generation: number; readonly backend: Promise<WinBackend>; refs: number } | undefined
+let generation = 0
+let loader: () => Promise<WindowsLibrary> = loadLibrary
+// What this process granted the account already, by comparable path.
+const grantedWrite = new Map<string, string>()
+const grantedRead = new Set<string>()
+
+/** Tests: the library to use instead of `@anthropic-ai/sandbox-runtime`; resets the process state. */
+export function setWindowsSandboxLibrary(load: (() => Promise<WindowsLibrary>) | undefined): void {
+  loader = load ?? loadLibrary
+  shared = undefined
+  generation += 1
+  grantedWrite.clear()
+  grantedRead.clear()
+}
+
+/** Pure: a Windows path for comparing (case and trailing separators ignored). */
+export function windowsKey(path: string): string {
   return nodePath.win32.resolve(path).replace(/[\\/]+$/, '').toLowerCase()
 }
 
-/** Pure: the record with a SID for each of `roots` (new ones made by `make`), and the SIDs in order. */
-export function assignCapabilities(record: CapabilityRecord, roots: readonly string[], make: () => string = randomCapabilitySid): { record: CapabilityRecord; sids: string[] } {
-  const next: Record<string, { sid: string }> = { ...record.roots }
-  const sids = roots.map(root => {
-    const key = rootKey(root)
-    const known = next[key]
-    if (known !== undefined && isCapabilitySid(known.sid)) return known.sid
-    const sid = make()
-    next[key] = { sid }
-    return sid
-  })
-  return { record: { version: 1, roots: next }, sids }
-}
-
 /** Pure: whether `path` is `root` or below it (Windows comparison). */
-export function isBelow(root: string, path: string): boolean {
-  const a = rootKey(root)
-  const b = rootKey(path)
+export function windowsWithin(root: string, path: string): boolean {
+  const a = windowsKey(root)
+  const b = windowsKey(path)
   return b === a || b.startsWith(`${a}\\`)
 }
 
-/** Rights a capability loses on a write-protected path: write data, append, attributes, delete, delete child, permissions, owner. */
-export const DENIED_RIGHTS = '(WD,AD,WEA,WA,DE,DC,WDAC,WO)'
-
-/** Pure: `icacls` arguments that let `sid` modify everything below `root` (inherited by files and folders). */
-export function grantArgs(root: string, sid: string): string[] {
-  return [root, '/grant', `*${sid}:(OI)(CI)M`, '/Q']
+/** Pure: PowerShell statements that set `env` in the process before `script` runs. */
+export function withEnvironment(script: string, env: Readonly<Record<string, string>> | undefined): string {
+  const entries = Object.entries(env ?? {})
+  if (entries.length === 0) return script
+  const quote = (text: string) => `'${text.replaceAll("'", "''")}'`
+  const lines = entries.map(([name, value]) => `[Environment]::SetEnvironmentVariable(${quote(name)}, ${quote(value)})`)
+  return `${lines.join('; ')}\n${script}`
 }
 
-/** Pure: `icacls` arguments that keep `sid` from changing `path` (inherited below it when it is a directory). */
-export function denyArgs(path: string, sid: string, directory: boolean): string[] {
-  return [path, '/deny', `*${sid}:${directory ? '(OI)(CI)' : ''}${DENIED_RIGHTS}`, '/Q']
-}
-
-/** One protected path and the capabilities whose directory contains it. */
-export interface DenyPlan {
-  readonly path: string
-  readonly sids: readonly string[]
-}
-
-/** Pure: for each write-protected path, the capabilities of the write directories that contain it. */
-export function planDenies(roots: readonly string[], sids: readonly string[], denyWrite: readonly string[]): DenyPlan[] {
-  const plans: DenyPlan[] = []
-  for (const path of denyWrite) {
-    const owners = roots.flatMap((root, index) => (isBelow(root, path) ? [sids[index]!] : []))
-    if (owners.length > 0) plans.push({ path, sids: owners })
+/**
+ * Pure: directories a sandboxed command reads besides its roots: the
+ * folders on `PATH` under the user's profile (per-user installs of Node,
+ * Python, Scoop, npm globals...; their real location when they are links)
+ * and `extra` (the Node that runs programs); none that holds or lies in a
+ * read-protected path, never the profile itself.
+ */
+export function toolReadDirs(pathEntries: readonly string[], home: string, extra: readonly string[], denyRead: readonly string[], real: (path: string) => string | undefined): string[] {
+  const out = new Map<string, string>()
+  for (const entry of [...pathEntries, ...extra]) {
+    if (entry.trim() === '') continue
+    const resolved = real(entry)
+    if (resolved === undefined || !windowsWithin(home, resolved) || windowsKey(resolved) === windowsKey(home)) continue
+    if (denyRead.some(denied => windowsWithin(denied, resolved) || windowsWithin(resolved, denied))) continue
+    out.set(windowsKey(resolved), resolved)
   }
-  return plans
+  return [...out.values()]
 }
 
-/** Runs `icacls`; tests inject a fake. Resolves the exit code and stderr. */
-export type IcaclsRunner = (args: readonly string[]) => Promise<{ readonly code: number; readonly output: string }>
-
-/** A trial restricted launch; resolves `undefined` when it worked, else the reason. */
-export type SandboxTrial = (capability: string) => Promise<string | undefined>
-
-/** Options of {@link createWindowsSandbox}. */
-export interface WindowsSandboxOptions {
-  /** Nexgent home holding the capability record (default `$NEXGENT_HOME` or `~/.nexgent`). */
-  readonly home?: string
-  /** Default: the real `icacls`. */
-  readonly icacls?: IcaclsRunner
-  /** Default: `cmd.exe /d /c exit 0` through the job launcher with a restricted token. */
-  readonly trial?: SandboxTrial
-  /** Default `process.platform`. */
-  readonly platform?: NodeJS.Platform
+/** What one command's grants and denies come to. */
+export interface WindowsAccessPlan {
+  /** Directories to grant for writing that this process has not granted yet. */
+  readonly grantWrite: string[]
+  /** Directories to grant for reading that this process has not granted yet. */
+  readonly grantRead: string[]
+  /** Paths the command may not read (existing, below a granted directory). */
+  readonly denyRead: string[]
+  /** Paths the command may not write: its protected paths, and in read-only mode every directory granted for writing that is not its own. */
+  readonly denyWrite: string[]
 }
 
-const realIcacls: IcaclsRunner = args => new Promise(resolve => {
-  execFile('icacls', [...args], { windowsHide: true }, (error, stdout, stderr) => {
-    const code = error === null ? 0 : typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1
-    resolve({ code, output: `${stdout}${stderr}`.trim() })
-  })
-})
-
-const realTrial: SandboxTrial = async capability => {
-  try {
-    const result = await new LocalProcessRunner().run({ command: 'cmd.exe', args: ['/d', '/c', 'exit 0'], cwd: tmpdir(), timeoutMs: 60_000, capabilities: [capability] })
-    return result.exitCode === 0 ? undefined : `the trial command exited with ${String(result.exitCode)}: ${result.stderr.trim().slice(0, 300)}`
-  } catch (error) {
-    return error instanceof NexgentError || error instanceof Error ? error.message : String(error)
+/**
+ * Pure: the grants and per-command denies for one command, given what the
+ * process granted before (`heldWrite` and `heldRead` by {@link windowsKey})
+ * and which paths exist.
+ */
+export function planWindowsAccess(
+  policy: { readonly writeRoots: readonly string[]; readonly readRoots: readonly string[]; readonly denyWrite: readonly string[]; readonly denyRead: readonly string[]; readonly readOnly: boolean },
+  heldWrite: ReadonlyMap<string, string>,
+  heldRead: ReadonlySet<string>,
+  exists: (path: string) => boolean,
+): WindowsAccessPlan {
+  const grantWrite = policy.writeRoots.filter(root => !heldWrite.has(windowsKey(root)))
+  const grantRead = policy.readRoots.filter(root => !heldRead.has(windowsKey(root)) && !heldWrite.has(windowsKey(root)) && !grantWrite.some(write => windowsKey(write) === windowsKey(root)))
+  const granted = [...heldWrite.values(), ...grantWrite, ...policy.readRoots]
+  const below = (path: string) => granted.some(root => windowsWithin(root, path))
+  const denyRead = policy.denyRead.filter(path => exists(path) && below(path))
+  const denyWrite = policy.denyWrite.filter(path => exists(path) && below(path))
+  if (policy.readOnly) {
+    for (const root of heldWrite.values()) {
+      // Never deny a directory at or above the command's own write roots: that would take them away too.
+      if (policy.writeRoots.some(own => windowsWithin(root, own))) continue
+      if (!denyWrite.some(path => windowsKey(path) === windowsKey(root))) denyWrite.push(root)
+    }
   }
+  return { grantWrite, grantRead, denyRead, denyWrite }
 }
 
-async function realOrSelf(path: string): Promise<string> {
-  try {
-    return await realpath(path)
-  } catch {
-    return nodePath.resolve(path)
+/** The shell for the library: an absolute `pwsh.exe` / `powershell.exe` with our flags when it can be found. */
+function shellFor(shell: string | undefined): string | { exe: string; args: readonly string[] } {
+  const flags = ['-NoProfile', '-NonInteractive', '-Command']
+  const name = shell ?? 'pwsh'
+  if (nodePath.win32.isAbsolute(name)) return { exe: name, args: flags }
+  const file = name.toLowerCase().endsWith('.exe') ? name : `${name}.exe`
+  for (const dir of (process.env.PATH ?? '').split(';')) {
+    if (dir === '') continue
+    const candidate = nodePath.win32.join(dir, file)
+    if (existsSync(candidate)) return { exe: candidate, args: flags }
   }
+  return name
 }
 
-async function kindOf(path: string): Promise<'directory' | 'file' | undefined> {
+function realOrUndefined(path: string): string | undefined {
   try {
-    return (await stat(path)).isDirectory() ? 'directory' : 'file'
+    return realpathSync(path)
   } catch {
     return undefined
   }
 }
 
+async function start(lib: WindowsLibrary): Promise<WinBackend> {
+  const gate = new NetworkGate()
+  try {
+    await lib.manager.initialize({ ...GLOBAL_CONFIG, windows: { srtWin: { path: lib.srt.exe } } }, gate.decide, false)
+  } catch (error) {
+    const code = (error as { code?: unknown }).code
+    if (code === 'not_provisioned') return { lib, gate, failure: WINDOWS_NOT_INSTALLED, installable: true }
+    // A machine whose filter went missing is repaired by installing again.
+    return { lib, gate, failure: reasonFrom(error), installable: typeof code === 'string' && code.startsWith('wfp_') }
+  }
+  try {
+    const user = await lib.srt.userStatus()
+    if (user.sid === undefined) return { lib, gate, failure: 'the Windows sandbox account has no SID', installable: true }
+    return { lib, gate, sid: user.sid }
+  } catch (error) {
+    return { lib, gate, failure: reasonFrom(error) }
+  }
+}
+
+function acquire(): NonNullable<typeof shared> {
+  if (shared === undefined || shared.generation !== generation) {
+    shared = { generation, backend: loader().then(start, (error: unknown) => ({ gate: new NetworkGate(), failure: reasonFrom(error) })), refs: 0 }
+  }
+  return shared
+}
+
+/**
+ * The one-time install: makes the sandbox account and the WFP filter (one
+ * administrator prompt), then every Windows sandbox of this process looks
+ * again on its next probe.
+ */
+export async function installWindowsCommandSandbox(): Promise<{ readonly kind: 'installed' } | { readonly kind: 'cancelled' } | { readonly kind: 'failed'; readonly reason: string }> {
+  try {
+    const lib = await loader()
+    const result = await lib.srt.install()
+    if (result.cancelled === true) return { kind: 'cancelled' }
+    const old = shared
+    shared = undefined
+    generation += 1
+    grantedWrite.clear()
+    grantedRead.clear()
+    // The library forgot the failed initialize; reset anything a working one left.
+    if (old !== undefined) await (await old.backend).lib?.manager.reset().catch(() => undefined)
+    return { kind: 'installed' }
+  } catch (error) {
+    return { kind: 'failed', reason: reasonFrom(error) }
+  }
+}
+
+/** Options of {@link createWindowsSandbox}. */
+export interface WindowsSandboxOptions {
+  /** Default `process.platform`. */
+  readonly platform?: NodeJS.Platform
+  /** Skip the trial command (tests). */
+  readonly skipTrial?: boolean
+  /** The user's profile directory (default `os.homedir()`). */
+  readonly home?: string
+}
+
 /** Build the Windows sandbox. Cheap until {@link OsSandbox.probe} or {@link OsSandbox.wrap}. */
 export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSandbox {
   const platform = options.platform ?? process.platform
-  const icacls = options.icacls ?? realIcacls
-  const trial = options.trial ?? realTrial
-  const file = nodePath.join(options.home ?? nexgentHome(), WINDOWS_CAPABILITIES_FILE)
-  let status: Promise<OsSandboxStatus> | undefined
-  let record: Promise<CapabilityRecord> | undefined
-  // One record update at a time; ACEs being applied, by `<sid> <path>`.
-  let saving: Promise<unknown> = Promise.resolve()
-  const applying = new Map<string, Promise<void>>()
+  const home = options.home ?? homedir()
+  let status: { readonly generation: number; readonly status: Promise<OsSandboxStatus> } | undefined
+  let heldGeneration: number | undefined
+  let disposed = false
   const sandboxed = new Set<string>()
+  let current: WinBackend | undefined
 
-  const load = (): Promise<CapabilityRecord> => {
-    record ??= readFile(file, 'utf8').then(text => {
-      const parsed = JSON.parse(text) as CapabilityRecord
-      return parsed?.version === 1 && typeof parsed.roots === 'object' && parsed.roots !== null ? parsed : EMPTY
-    }, () => EMPTY)
-    return record
-  }
-
-  const save = (update: (current: CapabilityRecord) => CapabilityRecord): Promise<CapabilityRecord> => {
-    const next = saving.then(async () => {
-      const updated = update(await load())
-      record = Promise.resolve(updated)
-      await mkdir(nodePath.dirname(file), { recursive: true })
-      const temp = `${file}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`
-      await writeFile(temp, `${JSON.stringify(updated, null, 2)}\n`)
-      await rename(temp, file)
-      return updated
-    })
-    saving = next.catch(() => undefined)
-    return next
-  }
-
-  const once = (key: string, work: () => Promise<void>): Promise<void> => {
-    let running = applying.get(key)
-    if (running === undefined) {
-      running = work()
-      applying.set(key, running)
-      // A failure is tried again by the next command.
-      running.catch(() => applying.delete(key))
+  function backend(): Promise<WinBackend> {
+    const entry = acquire()
+    if (heldGeneration !== entry.generation) {
+      heldGeneration = entry.generation
+      entry.refs += 1
     }
-    return running
+    return entry.backend
   }
 
-  const run = async (args: string[]): Promise<void> => {
-    const result = await icacls(args)
-    if (result.code !== 0) throw new Error(`icacls ${args[1]} on ${args[0]} failed: ${result.output.slice(0, 300)}`)
-  }
-
-  async function prepare(policy: OsSandboxPolicy): Promise<string[]> {
-    const roots = await Promise.all(policy.writeRoots.map(realOrSelf))
-    let sids: string[] = []
-    const current = await load()
-    const assigned = assignCapabilities(current, roots)
-    if (assigned.sids.some((sid, index) => current.roots[rootKey(roots[index]!)]?.sid !== sid)) {
-      // Another process may have assigned SIDs meanwhile: assign against the saved record.
-      const saved = await save(latest => assignCapabilities(latest, roots).record)
-      sids = assignCapabilities(saved, roots).sids
-    } else {
-      sids = assigned.sids
-    }
-    await Promise.all(roots.map((root, index) => {
-      const sid = sids[index]!
-      return once(`${sid} ${rootKey(root)}`, async () => {
-        // A directory made again (a new member copy at the same path) has lost its ACE: look, do not remember.
-        const shown = await icacls([root])
-        if (shown.code === 0 && shown.output.includes(sid)) return
-        await run(grantArgs(root, sid))
+  async function trial(b: WinBackend & { lib: WindowsLibrary }): Promise<string | undefined> {
+    if (options.skipTrial === true) return undefined
+    const id = randomBytes(16).toString('base64url')
+    try {
+      const { argv } = await b.lib.manager.wrapWithSandboxArgv('exit 0', undefined, { filesystem: {} }, undefined, tmpdir(), { commandId: id, commandText: 'exit 0' })
+      return await new Promise<string | undefined>(resolve => {
+        const child = spawn(argv[0]!, argv.slice(1), { cwd: tmpdir(), stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
+        let stderr = ''
+        child.stderr.on('data', (chunk: Buffer) => { if (stderr.length < 2000) stderr += chunk.toString('utf8') })
+        const timer = setTimeout(() => { child.kill(); resolve('the trial command timed out') }, 60_000)
+        child.once('error', error => { clearTimeout(timer); resolve(reasonFrom(error)) })
+        child.once('exit', code => {
+          clearTimeout(timer)
+          resolve(code === 0 ? undefined : `the trial command failed (exit ${String(code)}): ${stderr.trim().split('\n')[0] ?? ''}`)
+        })
       })
-    }))
-    const denies = planDenies(roots, sids, await Promise.all(policy.denyWrite.map(realOrSelf)))
-    await Promise.all(denies.map(async plan => {
-      const kind = await kindOf(plan.path)
-      // A path that does not exist yet is protected once it does, from the next command on.
-      if (kind === undefined) return
-      await Promise.all(plan.sids.map(sid => once(`${sid} deny ${rootKey(plan.path)}`, () => run(denyArgs(plan.path, sid, kind === 'directory')))))
-    }))
-    return sids
+    } catch (error) {
+      return reasonFrom(error)
+    } finally {
+      b.lib.manager.cleanupAfterCommand()
+    }
+  }
+
+  const probe = (): Promise<OsSandboxStatus> => {
+    if (status === undefined || status.generation !== generation) {
+      status = {
+        generation,
+        status: (async (): Promise<OsSandboxStatus> => {
+          if (platform !== 'win32') return { kind: 'none', reason: `the Windows sandbox does not run on ${platform}` }
+          const b = await backend()
+          current = b
+          if (b.failure !== undefined || b.lib === undefined) return { kind: 'none', reason: b.failure ?? 'the sandbox library did not load', ...(b.installable === true ? { installable: true } : {}) }
+          const failure = await trial(b as WinBackend & { lib: WindowsLibrary })
+          return failure === undefined ? { kind: 'active', platform: 'windows' } : { kind: 'none', reason: failure }
+        })(),
+      }
+    }
+    return status.status
   }
 
   return {
-    probe() {
-      status ??= (async (): Promise<OsSandboxStatus> => {
-        if (platform !== 'win32') return { kind: 'none', reason: `the Windows sandbox does not run on ${platform}` }
-        const reason = await trial(randomCapabilitySid())
-        return reason === undefined ? { kind: 'active', platform: 'windows' } : { kind: 'none', reason: `the Windows sandbox could not start a restricted process: ${reason}` }
-      })()
-      return status
-    },
-    async wrap(script, policy): Promise<OsSandboxWrap> {
-      const current = await this.probe()
-      if (current.kind === 'none') return { kind: 'unavailable', reason: current.reason }
-      let capabilities: string[]
+    probe,
+    async wrap(script, policy, signal): Promise<OsSandboxWrap> {
+      if (disposed) return { kind: 'unavailable', reason: 'the sandbox was disposed' }
+      const found = await probe()
+      if (found.kind === 'none') return { kind: 'unavailable', reason: found.reason }
+      if (policy.commandId.length < MIN_COMMAND_ID_LENGTH) return { kind: 'unavailable', reason: 'the command id is too short to bind a network allow list' }
+      const b = current as WinBackend & { lib: WindowsLibrary; sid: string }
       try {
-        capabilities = await prepare(policy)
+        const real = (root: string) => realOrUndefined(root) ?? root
+        const readRoots = [
+          ...(policy.readRoots ?? []).map(real),
+          ...(policy.allowRead ?? []).map(real),
+          ...toolReadDirs((process.env.PATH ?? '').split(';'), home, [nodePath.dirname(process.execPath)], policy.denyRead, realOrUndefined),
+        ]
+        const plan = planWindowsAccess(
+          { writeRoots: policy.writeRoots.map(real), readRoots, denyWrite: policy.denyWrite, denyRead: policy.denyRead, readOnly: policy.readOnly === true },
+          grantedWrite, grantedRead, existsSync,
+        )
+        if (plan.grantWrite.length > 0 || plan.grantRead.length > 0) {
+          b.lib.srt.grant(b.sid, plan.grantWrite, plan.grantRead)
+          for (const root of plan.grantWrite) grantedWrite.set(windowsKey(root), root)
+          for (const root of plan.grantRead) grantedRead.add(windowsKey(root))
+        }
+        registerNetwork({ manager: b.lib.manager, gate: b.gate }, policy)
+        const { argv, env } = await b.lib.manager.wrapWithSandboxArgv(
+          withEnvironment(script, policy.env),
+          shellFor(policy.shell),
+          { filesystem: { denyRead: plan.denyRead, denyWrite: plan.denyWrite } },
+          signal,
+          policy.cwd,
+          { commandId: policy.commandId, commandText: script },
+        )
+        sandboxed.add(policy.commandId)
+        // The library asks for `srt-win` to start with its env; pass on what it adds to ours (never our secrets twice).
+        const added = Object.fromEntries(Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined && process.env[entry[0]] !== entry[1]))
+        return { kind: 'wrapped', program: argv[0]!, args: argv.slice(1), ...(Object.keys(added).length === 0 ? {} : { env: added }) }
       } catch (error) {
-        return { kind: 'unavailable', reason: `cannot set up the Windows sandbox for this command: ${(error as Error).message}`, fatal: true }
+        forget({ manager: b.lib.manager, gate: b.gate }, policy.commandId)
+        return { kind: 'unavailable', reason: `cannot set up the Windows sandbox for this command: ${reasonFrom(error)}`, fatal: true }
       }
-      sandboxed.add(policy.commandId)
-      const offline = networkOf(policy).mode === 'off'
-      return { kind: 'wrapped', program: policy.shell ?? 'pwsh', args: ['-NoProfile', '-NonInteractive', '-Command', script], capabilities, ...(offline ? { env: OFFLINE_ENV } : {}) }
     },
     annotate(commandId, stderr, exitCode) {
       if (!sandboxed.has(commandId) || exitCode === null || exitCode === 0) return stderr
-      if (!/Access to the path .*is denied|Access is denied|UnauthorizedAccess|Access denied/i.test(stderr)) return stderr
+      if (!/Access to the path .*is denied|Access is denied|UnauthorizedAccess|Access denied|EPERM|EACCES/i.test(stderr)) return stderr
       return `${stderr.replace(/\n$/, '')}\n<sandbox_violations>\n${VIOLATION_HINT}\n</sandbox_violations>`
     },
     release(commandId) {
       sandboxed.delete(commandId)
+      const lib = current?.lib
+      if (lib === undefined || current === undefined) return
+      forget({ manager: lib.manager, gate: current.gate }, commandId)
+      try {
+        lib.manager.cleanupAfterCommand()
+      } catch {
+        // best effort
+      }
+    },
+    async install(): Promise<OsSandboxInstallResult> {
+      if (platform !== 'win32') return { kind: 'failed', reason: `the Windows sandbox does not run on ${platform}` }
+      const result = await installWindowsCommandSandbox()
+      if (result.kind !== 'installed') return result
+      return { kind: 'installed', status: await probe() }
     },
     async dispose() {
-      await saving
+      if (disposed) return
+      disposed = true
+      if (heldGeneration === undefined || shared === undefined || shared.generation !== heldGeneration) return
+      shared.refs -= 1
+      if (shared.refs <= 0) {
+        const last = shared
+        shared = undefined
+        grantedWrite.clear()
+        grantedRead.clear()
+        // Removes this process's ACEs too.
+        await (await last.backend).lib?.manager.reset().catch(() => undefined)
+      }
     },
+  }
+}
+
+/**
+ * Install the command sandbox where it needs it (Windows: one
+ * administrator prompt) and report the status commands now get. Hosts call
+ * this when the user chooses to install; sessions pick it up with their
+ * next command.
+ */
+export async function installCommandSandbox(platform: NodeJS.Platform = process.platform): Promise<CommandSandboxInstallResult> {
+  if (platform !== 'win32') return { kind: 'failed', reason: 'only the Windows command sandbox needs an install' }
+  const result = await installWindowsCommandSandbox()
+  if (result.kind !== 'installed') return result
+  const sandbox = createWindowsSandbox({ platform })
+  try {
+    const found = await sandbox.probe()
+    return { kind: 'installed', status: found.kind === 'active' ? found : { kind: 'none', reason: found.reason, ...(found.installable === true ? { installable: true } : {}) } }
+  } finally {
+    await sandbox.dispose()
   }
 }

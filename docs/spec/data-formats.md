@@ -251,7 +251,7 @@
 
 | `type` | 何时写 | 专有字段 |
 | --- | --- | --- |
-| `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
+| `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason, installable? }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑；`installable` 表示装一次就能用，Windows 上要管理员确认一次）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
 | `turn.start` | 一轮开始（一条用户消息及其触发的全部模型调用与工具调用） | `turn`、`handbook?`（这一轮注入的经验手册条目 id，按检索顺序，至多 `HANDBOOK_TOP_K` 个；没注入时不写）、`organization?`（这一轮是否用成员，`{ decision: "solo" \| "team", chosenBy: "size" \| "control" \| "default" \| "memory" \| "retry", suggested?: OrganizationName, change? }`；只在根会话、装了 `ctx.organizer` 时写，见 §工作流“按任务组队”；`retry` 只出现在旧记录里；`change` 是协调者复盘给这一轮的改动说明 `OrganizationChangeNote`，见 §组织库“协调者复盘”） |
 | `user.message` | 用户消息进入会话，或注入的合成上下文，或反馈轮的提示，或对话与讨论串之间的消息 | `turn`、`content`、`source: "user" \| "inject" \| "feedback" \| "thread"`、`materials?` |
 | `assistant.message` | 一次模型调用的流结束（含被取消的流） | `turn`、`step`、`requestId`、`content`、`toolCalls?`、`usage`、`finishReason`、`interrupted?`、`providerContent?`、`refusal?`、`reasoning?` |

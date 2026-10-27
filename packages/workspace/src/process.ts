@@ -19,7 +19,7 @@ import { scrubEnv } from './env.js'
 import { DEFAULT_MAX_OUTPUT_BYTES, FileSink, HeadTailBuffer, MODEL_OUTPUT_CHARS, omittedMarker } from './output.js'
 import { Redactor } from './redact.js'
 import { currentPowerShell, PWSH_MISSING_MESSAGE } from './shell-check.js'
-import { JOB_SANDBOX_FAILED_EXIT, JOB_SANDBOX_FAILED_MARKER, JOB_SPEC_ENV, JOB_START_FAILED_EXIT, JOB_START_FAILED_MARKER, jobLaunchSpec, jobLauncherArgs } from './windows-job.js'
+import { JOB_SPEC_ENV, JOB_START_FAILED_EXIT, JOB_START_FAILED_MARKER, jobLaunchSpec, jobLauncherArgs } from './windows-job.js'
 
 /** Default wait between the polite and the forced kill (ms). */
 export const DEFAULT_GRACE_MS = 5_000
@@ -51,8 +51,6 @@ export interface ProcessRunnerOptions {
  */
 export interface LocalProcessSpec extends ProcessSpec {
   readonly outputFiles?: { readonly stdout: string; readonly stderr: string }
-  /** Windows sandbox: capability SIDs the command's restricted token carries (`windows-sandbox.ts`). */
-  readonly capabilities?: readonly string[]
 }
 
 /** Whether a POSIX process group still has a live (non-zombie) member. */
@@ -126,7 +124,7 @@ export function startFailureMessage(command: string, error: NodeJS.ErrnoExceptio
 
 /** Spawn `spec` the way every command is started: scrubbed environment, own process group, Job Object launcher on Windows. */
 function startChild(
-  spec: Pick<ProcessSpec, 'command' | 'args' | 'cwd' | 'env' | 'stdin'> & { readonly capabilities?: readonly string[] },
+  spec: Pick<ProcessSpec, 'command' | 'args' | 'cwd' | 'env' | 'stdin'>,
   options: ProcessRunnerOptions,
   baseRedactor: Redactor,
 ): { child: ChildProcess; redactor: Redactor; useJob: boolean } {
@@ -137,12 +135,8 @@ function startChild(
   const redactor = baseRedactor.with(scrubbed.removedValues)
 
   const useJob = process.platform === 'win32' && options.windowsJob !== false
-  // The restricted token is made by the launcher; without it the command does not run.
-  if (spec.capabilities !== undefined && !useJob) {
-    throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: the Windows sandbox needs the job launcher to start ${spec.command}`)
-  }
   const env = useJob
-    ? { ...scrubbed.env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(spec.command, spec.args, scrubbed.env, spec.capabilities)) }
+    ? { ...scrubbed.env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(spec.command, spec.args, scrubbed.env)) }
     : scrubbed.env
   const child = spawn(useJob ? (options.pwshPath ?? currentPowerShell().program) : spec.command, useJob ? jobLauncherArgs() : [...spec.args], {
     cwd: spec.cwd,
@@ -257,12 +251,6 @@ export class LocalProcessRunner implements ProcessRunner {
         throw new NexgentError('process/failed', `failed to start ${spec.command}: ${line.slice(JOB_START_FAILED_MARKER.length)}`)
       }
     }
-    if (useJob && outcome.code === JOB_SANDBOX_FAILED_EXIT) {
-      const line = buffers.stderr.text().split(/\r?\n/).find(text => text.startsWith(JOB_SANDBOX_FAILED_MARKER))
-      if (line !== undefined) {
-        throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: the Windows sandbox could not start ${spec.command}: ${line.slice(JOB_SANDBOX_FAILED_MARKER.length)}`)
-      }
-    }
 
     return {
       exitCode: outcome.code,
@@ -292,8 +280,6 @@ export interface BackgroundStart {
   readonly timeoutMs?: number
   /** Called once when the process (and its tree) has ended. */
   readonly onExit?: () => void
-  /** See {@link LocalProcessSpec.capabilities}. */
-  readonly capabilities?: readonly string[]
 }
 
 /** A background process as the model sees it. */
@@ -372,7 +358,7 @@ export class BackgroundShells {
   /** Start a process and return at once. Throws `process/failed` when it cannot start. */
   start(spec: BackgroundStart): BackgroundStatus {
     const { child, redactor, useJob } = startChild(
-      { command: spec.command, args: spec.args, cwd: spec.cwd, ...(spec.env === undefined ? {} : { env: spec.env }), ...(spec.capabilities === undefined ? {} : { capabilities: spec.capabilities }) },
+      { command: spec.command, args: spec.args, cwd: spec.cwd, ...(spec.env === undefined ? {} : { env: spec.env }) },
       this.options,
       this.redactor,
     )

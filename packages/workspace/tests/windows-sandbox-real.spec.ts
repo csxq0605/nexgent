@@ -1,0 +1,156 @@
+/**
+ * The Windows sandbox for real (`srt-win`): installs it when needed (one
+ * administrator prompt; none on a CI runner, which runs elevated), then
+ * runs PowerShell commands as the sandbox account. Runs only on Windows
+ * with NEXGENT_WINDOWS_SANDBOX_TEST=1 (windows-accept.yml).
+ */
+import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
+import { createServer, type Server } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { tmpdir } from 'node:os'
+import * as nodePath from 'node:path'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { createWindowsSandbox, defaultWriteDenies, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
+
+const enabled = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
+
+describe.runIf(enabled)('Windows sandbox (real)', () => {
+  let sandbox: OsSandbox
+  let root: string
+  let project: string
+  let temp: string
+  let outside: string
+  let secret: string
+  let base: Omit<OsSandboxPolicy, 'commandId'>
+
+  beforeAll(async () => {
+    sandbox = createWindowsSandbox()
+    const first = await sandbox.probe()
+    if (first.kind === 'none') {
+      expect(first.installable, first.reason).toBe(true)
+      const installed = await sandbox.install!()
+      expect(installed, JSON.stringify(installed)).toMatchObject({ kind: 'installed', status: { kind: 'active' } })
+    }
+    root = await realpath(await mkdtemp(nodePath.join(tmpdir(), 'nxwin-')))
+    project = nodePath.join(root, 'proj')
+    temp = nodePath.join(root, 'tmp')
+    outside = nodePath.join(root, 'outside')
+    secret = nodePath.join(project, 'secret')
+    await Promise.all([
+      mkdir(nodePath.join(project, '.git', 'hooks'), { recursive: true }),
+      mkdir(nodePath.join(project, '.nexgent'), { recursive: true }),
+      mkdir(secret, { recursive: true }),
+      mkdir(temp, { recursive: true }),
+      mkdir(outside, { recursive: true }),
+    ])
+    await writeFile(nodePath.join(project, 'readme.txt'), 'PROJECT-TEXT')
+    await writeFile(nodePath.join(project, '.nexgent', 'config.json'), '{}')
+    await writeFile(nodePath.join(secret, 'key.txt'), 'SECRET-IN-PROJECT')
+    await writeFile(nodePath.join(outside, 'private.txt'), 'OUTSIDE-TEXT')
+    base = {
+      writeRoots: [project, temp],
+      denyWrite: defaultWriteDenies(project),
+      denyRead: [secret],
+      network: true,
+      readRoots: [project],
+      cwd: project,
+      env: { TEMP: temp, TMP: temp },
+      shell: 'pwsh',
+    }
+  }, 300_000)
+
+  afterAll(async () => {
+    await sandbox?.dispose()
+    if (root !== undefined) await rm(root, { recursive: true, force: true })
+  })
+
+  async function go(script: string, extra: Partial<OsSandboxPolicy> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+    const commandId = randomBytes(16).toString('base64url')
+    const wrapped = await sandbox.wrap(script, { ...base, ...extra, commandId })
+    if (wrapped.kind !== 'wrapped') throw new Error(`not wrapped: ${wrapped.reason}`)
+    try {
+      return await new Promise(resolve => {
+        const child = spawn(wrapped.program, wrapped.args, { cwd: project, env: { ...process.env, ...wrapped.env }, stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true })
+        let stdout = ''
+        let stderr = ''
+        child.stdout.on('data', (c: Buffer) => { stdout += c.toString() })
+        child.stderr.on('data', (c: Buffer) => { stderr += c.toString() })
+        const timer = setTimeout(() => child.kill(), 60_000)
+        child.on('exit', code => { clearTimeout(timer); resolve({ code, stdout, stderr }) })
+      })
+    } finally {
+      sandbox.release(commandId)
+    }
+  }
+
+  it('is active', async () => {
+    expect(await sandbox.probe()).toEqual({ kind: 'active', platform: 'windows' })
+  })
+
+  it('reads and writes the project and the temp directory', async () => {
+    const result = await go(`Get-Content readme.txt; Set-Content made.txt hello; Get-Content made.txt; Set-Content (Join-Path $env:TEMP 't.txt') t; Get-Content (Join-Path $env:TEMP 't.txt')`)
+    expect(result.stdout, result.stderr).toContain('PROJECT-TEXT')
+    expect(result.stdout).toContain('hello')
+    expect(result.stdout).toMatch(/^t\r?$/m)
+    expect(await readFile(nodePath.join(project, 'made.txt'), 'utf8')).toContain('hello')
+  }, 120_000)
+
+  it('cannot read or write outside, nor read a protected path inside the project', async () => {
+    const result = await go(`Get-Content '${nodePath.join(outside, 'private.txt')}'; Get-Content '${nodePath.join(secret, 'key.txt')}'; Set-Content '${nodePath.join(outside, 'new.txt')}' x; "done"`)
+    expect(result.stdout, result.stderr).toContain('done')
+    expect(result.stdout).not.toContain('OUTSIDE-TEXT')
+    expect(result.stdout).not.toContain('SECRET-IN-PROJECT')
+    expect(existsSync(nodePath.join(outside, 'new.txt'))).toBe(false)
+  }, 120_000)
+
+  it('keeps .nexgent and .git/hooks read-only', async () => {
+    await go(`Set-Content '.nexgent\\config.json' changed; Set-Content '.git\\hooks\\pre-commit' x; "done"`)
+    expect(await readFile(nodePath.join(project, '.nexgent', 'config.json'), 'utf8')).toBe('{}')
+    expect(existsSync(nodePath.join(project, '.git', 'hooks', 'pre-commit'))).toBe(false)
+  }, 120_000)
+
+  it('read-only: the project is readable but not writable, the temp directory is', async () => {
+    const result = await go(`Get-Content readme.txt; Set-Content ro.txt x; Set-Content (Join-Path $env:TEMP 'ok.txt') ok; "done"`, { writeRoots: [temp], denyWrite: [], readOnly: true })
+    expect(result.stdout, result.stderr).toContain('PROJECT-TEXT')
+    expect(existsSync(nodePath.join(project, 'ro.txt'))).toBe(false)
+    expect(existsSync(nodePath.join(temp, 'ok.txt'))).toBe(true)
+  }, 120_000)
+
+  it('runs the Node on PATH', async () => {
+    const result = await go(`node -e "console.log('node ' + process.version)"`)
+    expect(result.stdout, result.stderr).toContain(`node ${process.version}`)
+  }, 120_000)
+
+  describe('network', () => {
+    let server: Server
+    let port = 0
+    beforeAll(async () => {
+      server = createServer((_req, res) => res.end('reached'))
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      port = (server.address() as AddressInfo).port
+    })
+    afterAll(() => new Promise<void>(resolve => server.close(() => resolve())))
+    const fetchIt = () => `curl.exe -s --max-time 10 http://127.0.0.1:${port}/; " rc=$LASTEXITCODE"`
+
+    it('reaches a host on the allow list through the proxy, and asks about others once', async () => {
+      const listed = await go(fetchIt(), { network: { mode: 'allowlist', allowedDomains: [`127.0.0.1:${port}`], owner: 's', ask: async () => false } })
+      expect(listed.stdout, listed.stderr).toContain('reached')
+      const asked: string[] = []
+      const yes = await go(`${fetchIt()}; ${fetchIt()}`, { network: { mode: 'allowlist', allowedDomains: [], owner: 's', ask: async host => { asked.push(host); return true } } })
+      expect(yes.stdout.match(/reached/g)).toHaveLength(2)
+      expect(asked).toEqual(['127.0.0.1'])
+      const no = await go(fetchIt(), { network: { mode: 'allowlist', allowedDomains: [], owner: 's', ask: async () => false } })
+      expect(no.stdout).not.toContain('reached')
+    }, 120_000)
+
+    it('blocks a connection that skips the proxy, and every host when the network is off', async () => {
+      const direct = await go(`curl.exe -s --max-time 10 --noproxy '*' http://127.0.0.1:${port}/; " rc=$LASTEXITCODE"`, { network: true })
+      expect(direct.stdout).not.toContain('reached')
+      const off = await go(fetchIt(), { network: { mode: 'off', ask: async () => true } })
+      expect(off.stdout).not.toContain('reached')
+    }, 120_000)
+  })
+})

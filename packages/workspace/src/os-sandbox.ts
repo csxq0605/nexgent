@@ -42,7 +42,8 @@ import type { NetworkMode } from './network-policy.js'
 /** Whether commands run in an OS sandbox on this host. */
 export type OsSandboxStatus =
   | { readonly kind: 'active'; readonly platform: 'linux' | 'macos' | 'windows' }
-  | { readonly kind: 'none'; readonly reason: string }
+  /** `installable`: a one-time install (Windows: an administrator prompt) would make it work, see {@link OsSandbox.install}. */
+  | { readonly kind: 'none'; readonly reason: string; readonly installable?: boolean }
 
 /** What one command is allowed. Paths are absolute. */
 export interface OsSandboxPolicy {
@@ -60,6 +61,18 @@ export interface OsSandboxPolicy {
   readonly commandId: string
   /** The shell the script is run with inside the sandbox (default: library default, `/bin/bash`). */
   readonly shell?: string
+  /** Windows: directories the command must be able to read (the project in read-only mode); elsewhere reads are open. */
+  readonly readRoots?: readonly string[]
+  /** Windows: read-only / plan mode; directories this process granted for writing earlier are denied to the command. */
+  readonly readOnly?: boolean
+  /** Windows: the working directory the command will be started in. */
+  readonly cwd?: string
+  /**
+   * Windows: variables the command needs. The sandboxed process starts
+   * with the sandbox account's own environment, so these are set by the
+   * script itself; elsewhere the caller passes them when spawning.
+   */
+  readonly env?: Readonly<Record<string, string>>
 }
 
 /** A command's network setting (`network-policy.ts`). */
@@ -79,9 +92,7 @@ export type OsSandboxWrap =
     readonly kind: 'wrapped'
     readonly program: string
     readonly args: string[]
-    /** Windows: the capability SIDs the process's restricted token carries (passed to the process runner). */
-    readonly capabilities?: readonly string[]
-    /** Environment variables to add for the command (Windows: the offline settings of `network: off`). */
+    /** Variables to add to the wrapper's own environment (Windows: the library's proxy settings for `srt-win`). */
     readonly env?: Readonly<Record<string, string>>
   }
   /** `fatal`: the sandbox works here but could not be set up for this command; it must not run unsandboxed. */
@@ -127,7 +138,16 @@ export interface OsSandbox {
   release(commandId: string): void
   /** Release this instance's share of the library; the last instance resets it. */
   dispose(): Promise<void>
+  /** Where the sandbox needs a one-time install (Windows): run it; the next probe looks again. */
+  install?(): Promise<OsSandboxInstallResult>
 }
+
+/** What {@link OsSandbox.install} did. */
+export type OsSandboxInstallResult =
+  | { readonly kind: 'installed'; readonly status: OsSandboxStatus }
+  /** The user dismissed the administrator prompt. */
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /** `.nexgent/`, `.git/hooks` and `.git/config` of a project: read-only for commands (ADR 0022 decision 1). */
 export function defaultWriteDenies(projectRoot: string): string[] {
@@ -202,9 +222,9 @@ interface Backend { readonly manager: SandboxManagerLike; readonly failure: stri
 let shared: { backend: Promise<Backend>; refs: number } | undefined
 
 /** Shortest id the library registers a per-command allow list under; Nexgent ids are 16 random bytes. */
-const MIN_COMMAND_ID_LENGTH = 22
+export const MIN_COMMAND_ID_LENGTH = 22
 
-function reasonFrom(error: unknown): string {
+export function reasonFrom(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
@@ -214,7 +234,7 @@ async function loadManager(): Promise<SandboxManagerLike> {
 }
 
 /** The minimal global config: an empty allow list (every command goes through the proxy), no filesystem rules. */
-const GLOBAL_CONFIG = { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] } }
+export const GLOBAL_CONFIG = { network: { allowedDomains: [], deniedDomains: [] }, filesystem: { denyRead: [], allowRead: [], allowWrite: [], denyWrite: [] } }
 
 /** An executable on `PATH`, or undefined. */
 function onPath(name: string): string | undefined {
@@ -313,8 +333,32 @@ function ensureSandboxTmpdir(): void {
   }
 }
 
+/**
+ * Put a command's allow list and gate entry in place, before it can open
+ * a connection; a host the user allows later joins its list.
+ */
+export function registerNetwork(b: { readonly manager: Pick<SandboxManagerLike, 'registerCommandNetworkLists'>; readonly gate: NetworkGate }, policy: Pick<OsSandboxPolicy, 'network' | 'commandId'>): void {
+  const network = networkOf(policy)
+  const lists = network.mode === 'allowlist' ? [...(network.allowedDomains ?? [])] : []
+  b.manager.registerCommandNetworkLists?.(policy.commandId, { allowedDomains: lists })
+  b.gate.register(policy.commandId, {
+    owner: network.owner ?? policy.commandId,
+    mode: network.mode,
+    ...(network.ask === undefined ? {} : { ask: network.ask }),
+    allow: host => {
+      if (lists.includes(host)) return
+      lists.push(host)
+      try {
+        b.manager.registerCommandNetworkLists?.(policy.commandId, { allowedDomains: lists })
+      } catch {
+        // the gate still answers this command's next connection to the host
+      }
+    },
+  })
+}
+
 /** Drop a command's allow list and gate entry. */
-function forget(b: Pick<Backend, 'manager' | 'gate'>, commandId: string): void {
+export function forget(b: { readonly manager: Pick<SandboxManagerLike, 'unregisterCommandNetworkLists'>; readonly gate: NetworkGate }, commandId: string): void {
   b.gate.unregister(commandId)
   try {
     b.manager.unregisterCommandNetworkLists?.(commandId)
@@ -419,25 +463,8 @@ export function createOsSandbox(options: OsSandboxOptions = {}): OsSandbox {
       if (current.kind === 'none') return { kind: 'unavailable', reason: current.reason }
       if (policy.commandId.length < MIN_COMMAND_ID_LENGTH) return { kind: 'unavailable', reason: 'the command id is too short to bind a network allow list' }
       const b = await acquire()
-      const network = networkOf(policy)
-      const lists = network.mode === 'allowlist' ? [...(network.allowedDomains ?? [])] : []
       try {
-        // The lists and the gate entry are in place before the command can open a connection.
-        b.manager.registerCommandNetworkLists?.(policy.commandId, { allowedDomains: lists })
-        b.gate.register(policy.commandId, {
-          owner: network.owner ?? policy.commandId,
-          mode: network.mode,
-          ...(network.ask === undefined ? {} : { ask: network.ask }),
-          allow: host => {
-            if (lists.includes(host)) return
-            lists.push(host)
-            try {
-              b.manager.registerCommandNetworkLists?.(policy.commandId, { allowedDomains: lists })
-            } catch {
-              // the gate still answers this command's next connection to the host
-            }
-          },
-        })
+        registerNetwork(b, policy)
         const wrapped = await b.manager.wrapWithSandbox(
           script, policy.shell, customConfigFor(policy), signal, { commandId: policy.commandId, commandText: script },
         )

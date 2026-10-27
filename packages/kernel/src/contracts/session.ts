@@ -243,10 +243,21 @@ export interface ApprovalDecisionRecord extends SessionRecordBase {
 /** ADR 0022 decision 1: whether commands run in an OS sandbox. */
 export type CommandSandboxStatus =
   | { readonly kind: 'active'; readonly platform: string }
-  /** No OS sandbox here (Windows, missing bubblewrap...); commands run under the command policy only. */
-  | { readonly kind: 'none'; readonly reason: string }
+  /**
+   * No OS sandbox here (missing bubblewrap, Windows sandbox not installed...);
+   * commands run under the command policy only. `installable`: a one-time
+   * install (Windows: one administrator prompt) sets it up.
+   */
+  | { readonly kind: 'none'; readonly reason: string; readonly installable?: boolean }
   /** The project turned it off (`commands.systemSandbox: 'off'`). */
   | { readonly kind: 'off' }
+
+/** What installing the command sandbox did. */
+export type CommandSandboxInstallResult =
+  | { readonly kind: 'installed'; readonly status: CommandSandboxStatus }
+  /** The user dismissed the administrator prompt. */
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /**
  * ADR 0022 decision 4: the session's mode changed mid-session (a host switch,

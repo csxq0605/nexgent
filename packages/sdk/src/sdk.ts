@@ -86,7 +86,7 @@ import {
   type TurnHandle,
   type Unsubscribe,
 } from './api.js'
-import { checkCommandShell, type CommandShellStatus } from '@nexgent/workspace'
+import { checkCommandShell, installCommandSandbox, type CommandShellStatus } from '@nexgent/workspace'
 import { bootProjectApp, ROOT_SESSION_RECOVERIES, type BootOptions } from './boot.js'
 import * as capabilities from './capabilities.js'
 import * as learning from './learning.js'
@@ -1467,6 +1467,7 @@ export class LocalNexgentSdk implements NexgentSdk {
         return learning.learningStatus(this.learner(project), this.home, project.app.ctx.get('ledger'), this.now(), project.app.ctx.get('organizations'))
       },
       'learning.acknowledge': () => acknowledgeLearning(this.home),
+      'commandSandbox.install': () => installCommandSandbox(),
     }
   }
 

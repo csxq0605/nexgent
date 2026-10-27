@@ -5,9 +5,9 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { processGroupAlive } from '@nexgent/workspace'
+import { processGroupAlive, programScript } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseProgramMessage, permissionFlag, programEnv, runProgram, type HostFunction } from '../src/index.js'
+import { parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -33,6 +33,18 @@ function leftover(pid: number | undefined): boolean {
 }
 
 const add: HostFunction = { name: 'add', call: async ([a, b]) => (a as number) + (b as number) }
+
+describe('program command line', () => {
+  it('starts from an entry file the permission model may read, or from --eval', () => {
+    const args = programArgs({ version: 'v22.12.0', entryFile: 'C:\\T\\nexgent-ptc-1.mjs' })
+    expect(args[0]).toBe(permissionFlag('v22.12.0'))
+    expect(args.slice(1, 2)).toEqual(['--allow-fs-read=C:\\T\\nexgent-ptc-1.mjs'])
+    expect(args.at(-1)).toBe('C:\\T\\nexgent-ptc-1.mjs')
+    expect(programArgs({ version: 'v22.12.0' })).toContain('--eval')
+    expect(programScript('C:\\Program Files\\node.exe', ["it's"], 'win32')).toBe("& 'C:\\Program Files\\node.exe' 'it''s'\nexit $LASTEXITCODE")
+    expect(programScript('/usr/bin/node', ["it's"], 'linux')).toBe("exec '/usr/bin/node' 'it'\\''s'")
+  })
+})
 
 describe('runProgram', () => {
   it('runs the body, binds host functions and globals, captures output and returns the value', async () => {

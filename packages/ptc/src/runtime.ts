@@ -19,7 +19,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { NexgentError, type JsonValue } from '@nexgent/kernel'
-import { JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive } from '@nexgent/workspace'
+import { JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive, scrubEnv } from '@nexgent/workspace'
 import { BOOTSTRAP_SOURCE } from './bootstrap.js'
 import { parseProgramMessage, type CallMessage, type HostMessage } from './protocol.js'
 
@@ -110,16 +110,24 @@ export interface RunProgramOptions {
   readonly pwshPath?: string
   /**
    * Start the program through this wrapper (the OS sandbox) instead of
-   * `node` directly; it runs {@link programCommand}. POSIX only.
+   * `node` directly; it runs {@link programCommand}. On Windows the job
+   * launcher starts the wrapper.
    */
-  readonly launch?: { readonly program: string; readonly args: readonly string[] }
-  /** Windows only: start the program with a restricted token carrying these capability SIDs (`@nexgent/workspace` Windows sandbox). */
-  readonly capabilities?: readonly string[]
+  readonly launch?: { readonly program: string; readonly args: readonly string[]; readonly env?: Readonly<Record<string, string>> }
+  /**
+   * Run the bootstrap from this file instead of `--eval` (the Windows
+   * sandbox, whose command line goes through PowerShell); the file must
+   * hold {@link BOOTSTRAP_SOURCE}.
+   */
+  readonly entryFile?: string
 }
 
 /** The Node executable and arguments a program process runs (what an OS sandbox wraps). */
-export function programCommand(options: Pick<RunProgramOptions, 'nodePath' | 'permission'> = {}): { readonly node: string; readonly args: string[] } {
-  return { node: options.nodePath ?? process.execPath, args: programArgs({ ...(options.permission === undefined ? {} : { permission: options.permission }) }) }
+export function programCommand(options: Pick<RunProgramOptions, 'nodePath' | 'permission' | 'entryFile'> = {}): { readonly node: string; readonly args: string[] } {
+  return {
+    node: options.nodePath ?? process.execPath,
+    args: programArgs({ ...(options.permission === undefined ? {} : { permission: options.permission }), ...(options.entryFile === undefined ? {} : { entryFile: options.entryFile }) }),
+  }
 }
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
@@ -132,14 +140,13 @@ export function permissionFlag(version: string = process.versions.node): string 
 }
 
 /** Node arguments of a program process. */
-export function programArgs(options: { readonly permission?: boolean; readonly version?: string } = {}): string[] {
-  return [
-    ...(options.permission === false ? [] : [permissionFlag(options.version)]),
-    `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`,
-    '--input-type=module',
-    '--eval',
-    BOOTSTRAP_SOURCE,
-  ]
+export function programArgs(options: { readonly permission?: boolean; readonly version?: string; readonly entryFile?: string } = {}): string[] {
+  const permission = options.permission === false ? [] : [permissionFlag(options.version)]
+  if (options.entryFile !== undefined) {
+    // The permission model reads nothing, the entry module included, unless allowed.
+    return [...permission, ...(options.permission === false ? [] : [`--allow-fs-read=${options.entryFile}`]), `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`, options.entryFile]
+  }
+  return [...permission, `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`, '--input-type=module', '--eval', BOOTSTRAP_SOURCE]
 }
 
 /** The program's environment: empty on POSIX; on Windows the startup variables only. */
@@ -224,17 +231,19 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
 
   const { node, args } = programCommand(options)
   const useJob = process.platform === 'win32' && options.windowsJob !== false
-  if (options.capabilities !== undefined && !useJob) {
-    throw new NexgentError('sandbox/denied', 'SANDBOX_DENIED: the Windows sandbox needs the job launcher to start the program process')
-  }
-  const launch = useJob ? undefined : options.launch
-  // The sandbox wrapper needs PATH to find its tools; Node uses the proxy the sandbox gives the program (Node 22.21+).
-  const env = launch === undefined ? programEnv() : { ...programEnv(), PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_USE_ENV_PROXY: '1' }
+  const launch = options.launch
+  const program = launch?.program ?? node
+  const programArgv = launch === undefined ? args : [...launch.args]
+  // The sandbox wrapper needs the host's environment to start (PATH, the user's profile on Windows), never secrets;
+  // the program inside it gets its own (POSIX: through the wrapper; Windows: set by the wrapped script).
+  const env = launch === undefined
+    ? programEnv()
+    : { ...(process.platform === 'win32' ? scrubEnv(process.env).env : { ...programEnv(), PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_USE_ENV_PROXY: '1' }), ...launch.env }
   let child: ChildProcess
   try {
-    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : launch?.program ?? node, useJob ? jobLauncherArgs() : launch === undefined ? args : [...launch.args], {
+    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : program, useJob ? jobLauncherArgs() : programArgv, {
       cwd: options.cwd,
-      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(node, args, env, options.capabilities)) } : env,
+      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(program, programArgv, env)) } : env,
       detached: process.platform !== 'win32',
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],

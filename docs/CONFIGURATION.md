@@ -78,7 +78,7 @@ export NEXGENT_API_KEY=<key>
 | `extraReadRoots` | `[]` | — | 项目外允许读取的目录 |
 | `extraWriteRoots` | `[]` | — | 项目外允许写入的目录 |
 | `maxStepsPerTurn` | 400 | — | 一轮最多调用模型几次，到了就停下，说一句“继续”接着做 |
-| `commands.systemSandbox` | `auto` | — | `auto`：平台有系统沙箱就用（Windows 上没有时，不是只读的命令逐条问你）；`required`：没有就不执行命令；`off`：不进系统沙箱 |
+| `commands.systemSandbox` | `auto` | — | `auto`：平台有系统沙箱就用（Windows 上要先装一次，见“命令未进系统沙箱”按钮或 `nexgent sandbox install`；没装时，不是只读的命令逐条问你）；`required`：没有就不执行命令；`off`：不进系统沙箱 |
 | `commands.network` | `allowlist` | — | `allowlist`：常用包源和代码托管直接放行，其他域名第一次连接时问你（可记住）；`any`：都放行；`off`：不联网。macOS / Linux 上由系统沙箱执行 |
 | `commands.allowedDomains` | `[]` | — | 额外直接放行的域名，如 `mirror.example.com`、`*.corp.example` |
 
