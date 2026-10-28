@@ -23,7 +23,7 @@ import { NETWORK_GRANT, type NetworkMode } from '../network-policy.js'
 import { defaultWriteDenies, type OsSandbox, type OsSandboxNetwork } from '../os-sandbox.js'
 import { BackgroundShells, type LocalProcessSpec } from '../process.js'
 import { clampTimeout, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS } from '../sandbox.js'
-import { currentPowerShell, stripProgressRecords, takePowerShellNotice } from '../shell-check.js'
+import { currentPowerShell, stripProgressRecords, takePowerShellNotice, withUtf8Output } from '../shell-check.js'
 import { ensureSessionTempDir } from '../workspace.js'
 import {
   booleanField,
@@ -270,7 +270,7 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
 
       // The OS sandbox (ADR 0022 decision 1).
       let command = flavor.program
-      let argv = flavor.argv(script)
+      let argv = flavor.argv(name === 'pwsh' ? withUtf8Output(script) : script)
       let sandboxNote: string | undefined
       let sandboxed = false
       // Random and unguessable: the proxy matches a command's host allow list by the id the command presents.

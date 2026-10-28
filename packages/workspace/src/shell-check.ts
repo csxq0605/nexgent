@@ -53,10 +53,23 @@ export const PWSH_MISSING_MESSAGE =
   'PowerShell was not found (neither pwsh nor powershell.exe). Nexgent runs every command through PowerShell on Windows. ' +
   'Install PowerShell 7 (for example `winget install --id Microsoft.PowerShell`) and restart Nexgent.'
 
+/**
+ * PowerShell writes its output (and decodes what native commands print) in
+ * the console's code page, which on Windows PowerShell 5.1 is the OEM one
+ * (GBK on a Chinese system), while Nexgent reads UTF-8: switch both ways to
+ * UTF-8 without a byte-order mark. Harmless in PowerShell 7.
+ */
+export const UTF8_OUTPUT = 'try { $OutputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch {}'
+
+/** Pure: `script` with output in UTF-8 ({@link UTF8_OUTPUT}). */
+export function withUtf8Output(script: string): string {
+  return `${UTF8_OUTPUT}\n${script}`
+}
+
 /** Shown once when Windows PowerShell 5.1 stands in for PowerShell 7. */
 export const POWERSHELL_51_NOTICE =
   'PowerShell 7 (pwsh) was not found, so commands run in Windows PowerShell 5.1. Write 5.1 syntax: no `&&` / `||` chaining ' +
-  '(use `;` and check `$LASTEXITCODE`), and output may not be UTF-8 by default. Installing PowerShell 7 is recommended ' +
+  '(use `;` and check `$LASTEXITCODE`). Installing PowerShell 7 is recommended ' +
   '(`winget install --id Microsoft.PowerShell`).'
 
 function isFile(path: string): boolean {

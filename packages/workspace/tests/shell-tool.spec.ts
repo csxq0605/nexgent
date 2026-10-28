@@ -16,6 +16,7 @@ import {
   type ShellSandboxDeps,
   type ShellToolDeps,
   type WorkspaceTool,
+  withUtf8Output,
 } from '../src/index.js'
 import { createOsSandbox } from '../src/os-sandbox.js'
 import { pidAlive, project, tempDir, toolContext } from './helpers.js'
@@ -329,18 +330,20 @@ describe('required sandbox without an OS sandbox', () => {
 })
 
 describe('pwsh tool output', () => {
-  it('leaves PowerShell progress records out of stderr', async () => {
+  it('leaves PowerShell progress records out of stderr, and switches its output to UTF-8', async () => {
     const p = await project()
+    const args: string[] = []
     const progress = '<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj>'
     const deps: ShellToolDeps = {
       sandbox: p.sandbox,
       redactor: new Redactor(),
-      processes: { run: async () => ({ exitCode: 0, stdout: 'done\n', stderr: `#< CLIXML\r\n<Objs Version="1.1.0.1">${progress}</Objs>\r\n`, timedOut: false, aborted: false, durationMs: 1 }) },
+      processes: { run: async spec => { args.push(...spec.args); return { exitCode: 0, stdout: 'done\n', stderr: `#< CLIXML\r\n<Objs Version="1.1.0.1">${progress}</Objs>\r\n`, timedOut: false, aborted: false, durationMs: 1 } } },
       tempBase: await tempDir(),
     }
     const pwsh = createWorkspaceTools(deps, 'win32').find(t => t.definition.name === 'pwsh')!
     const result = await pwsh.handler({ command: 'Get-Date' }, toolContext(p.workspace))
     expect(result.content).toContain('done')
     expect(result.content).not.toContain('CLIXML')
+    expect(args.at(-1)).toBe(withUtf8Output('Get-Date'))
   })
 })

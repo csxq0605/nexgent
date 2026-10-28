@@ -48,7 +48,7 @@ import {
   type OsSandboxWrap,
   type SandboxManagerLike,
 } from './os-sandbox.js'
-import { currentPowerShell } from './shell-check.js'
+import { currentPowerShell, UTF8_OUTPUT } from './shell-check.js'
 import { buildRestrictLauncher, labelFolder, LabelRecord, launcherArgument, type RestrictTools } from './windows-restrict.js'
 
 /** The slice of the library's `SandboxManager` used on Windows. */
@@ -310,9 +310,9 @@ export function isWindowsPowerShell(shell: string): boolean {
   return /^powershell(\.exe)?$/i.test(nodePath.win32.basename(shell))
 }
 
-/** Pure: the script a sandboxed PowerShell runs: quiet progress, the 5.1 proxy, the variables, then `script`. */
+/** Pure: the script a sandboxed PowerShell runs: quiet progress, UTF-8 output, the 5.1 proxy, the variables, then `script`. */
 export function sandboxScript(script: string, env: Readonly<Record<string, string>> | undefined, windowsPowerShell: boolean): string {
-  return [PROGRESS_OFF, ...(windowsPowerShell ? [WINDOWS_POWERSHELL_PROXY] : []), withEnvironment(script, env)].join('\n')
+  return [PROGRESS_OFF, UTF8_OUTPUT, ...(windowsPowerShell ? [WINDOWS_POWERSHELL_PROXY] : []), withEnvironment(script, env)].join('\n')
 }
 
 /** The absolute shell to start: `shell` (default the PowerShell commands use) on `PATH`, else Windows PowerShell. */

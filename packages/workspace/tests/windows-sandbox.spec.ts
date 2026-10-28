@@ -14,6 +14,7 @@ import {
   planWindowsAccess,
   PROGRESS_OFF,
   stripProgressRecords,
+  UTF8_OUTPUT,
   LabelRecord,
   launcherArgument,
   RESTRICT_SOURCE,
@@ -88,11 +89,11 @@ describe('Windows access plan', () => {
     )).toEqual(['C:\\Users\\me\\AppData\\Roaming\\nvm\\v22', 'C:\\Users\\me\\scoop\\shims\\'])
   })
 
-  it('turns progress off, routes Windows PowerShell through the proxy, then sets the variables', () => {
+  it('turns progress off, writes UTF-8, routes Windows PowerShell through the proxy, then sets the variables', () => {
     expect(isWindowsPowerShell('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')).toBe(true)
     expect(isWindowsPowerShell('C:\\Program Files\\PowerShell\\7\\pwsh.exe')).toBe(false)
-    expect(sandboxScript('npm test', { A: '1' }, false)).toBe(`${PROGRESS_OFF}\n[Environment]::SetEnvironmentVariable('A', '1')\nnpm test`)
-    expect(sandboxScript('npm test', undefined, true)).toBe(`${PROGRESS_OFF}\n${WINDOWS_POWERSHELL_PROXY}\nnpm test`)
+    expect(sandboxScript('npm test', { A: '1' }, false)).toBe(`${PROGRESS_OFF}\n${UTF8_OUTPUT}\n[Environment]::SetEnvironmentVariable('A', '1')\nnpm test`)
+    expect(sandboxScript('npm test', undefined, true)).toBe(`${PROGRESS_OFF}\n${UTF8_OUTPUT}\n${WINDOWS_POWERSHELL_PROXY}\nnpm test`)
     expect(WINDOWS_POWERSHELL_PROXY).toContain('[System.Net.WebRequest]::DefaultWebProxy')
     expect(WINDOWS_POWERSHELL_PROXY).toContain('NetworkCredential')
   })
@@ -221,6 +222,7 @@ describe('createWindowsSandbox', () => {
     expect(labels).toEqual([['C:\\Crashed', false], [project, true]])
     expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['low|T', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
     expect(wraps[0]!.command).toContain(PROGRESS_OFF)
+    expect(wraps[0]!.command).toContain(UTF8_OUTPUT)
     expect(wraps[0]!.command).toContain("[Environment]::SetEnvironmentVariable('CURL_HOME', 'C:\\T')")
     expect(wraps[0]!.command.endsWith("[Environment]::SetEnvironmentVariable('TEMP', 'T')\nnpm test")).toBe(true)
     expect(wraps[0]!.cwd).toBe(project)

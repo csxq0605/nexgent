@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getWindowsSandboxUserStatusAsync, grantWindowsAcl, resolveSrtWin, VENDORED_SRT_WIN_EXE } from '@anthropic-ai/sandbox-runtime'
-import { buildRestrictLauncher, createWindowsSandbox, defaultWriteDenies, labelFolder, LabelRecord, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
+import { buildRestrictLauncher, createWindowsSandbox, defaultWriteDenies, labelFolder, LabelRecord, withUtf8Output, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
 
 /**
  * Runs a command line as a standard user would (the runner is an elevated administrator): this
@@ -272,6 +272,17 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       const result = await go(`Get-ChildItem | Out-Null; Import-Module Microsoft.PowerShell.Archive -ErrorAction SilentlyContinue; & node -e "console.log('node ok')"; 'ok'`, { shell })
       expect(result.stdout, `${shell}: ${result.stderr}`).toContain('node ok')
       expect(result.stderr, shell).not.toContain('CLIXML')
+    }
+  }, 120_000)
+
+  it('prints Chinese as UTF-8 in PowerShell 7 and Windows PowerShell 5.1, sandboxed or not', async () => {
+    await writeFile(nodePath.join(project, 'zh.txt'), '文件里的中文', 'utf8')
+    const script = `'命令输出中文'; Get-Content zh.txt -Encoding UTF8; & node -e "console.log('节点输出中文')"`
+    for (const shell of ['pwsh', 'powershell']) {
+      const result = await go(script, { shell })
+      for (const text of ['命令输出中文', '文件里的中文', '节点输出中文']) expect(result.stdout, `${shell}: ${result.stdout} ${result.stderr}`).toContain(text)
+      const plain = spawnSync(shell, ['-NoProfile', '-NonInteractive', '-Command', withUtf8Output(script)], { cwd: project, encoding: 'utf8', windowsHide: true })
+      for (const text of ['命令输出中文', '文件里的中文', '节点输出中文']) expect(plain.stdout, `${shell} unsandboxed: ${plain.stdout} ${plain.stderr}`).toContain(text)
     }
   }, 120_000)
 
