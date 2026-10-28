@@ -56,6 +56,11 @@ import {
 import { isNotFound } from './files-util.js'
 import { walkProject, type WalkedEntry } from './project-walk.js'
 
+/** A project-relative `/` path under `root`. */
+function absoluteIn(root: string, path: string): string {
+  return nodePath.join(root, ...path.split('/'))
+}
+
 /** At most this many test commands the model ran become checks per turn (the latest ones). */
 export const MAX_TEST_COMMANDS = 3
 
@@ -293,7 +298,7 @@ export class LocalTaskRecorder implements TaskRecorder {
     const checkRuns = input.checkRuns ?? []
     for (const spec of specs) {
       const own = spec.id.startsWith(CHECK_COMMAND_ID_PREFIX) ? checkRuns[Number(spec.id.slice(CHECK_COMMAND_ID_PREFIX.length)) - 1] : undefined
-      results.push({ ...(own === undefined ? await this.run(spec, runs) : checkRunResult(own)), target: spec.id })
+      results.push({ ...(own === undefined ? await this.run(spec, runs, input.root ?? this.layout.root) : checkRunResult(own)), target: spec.id })
     }
     const record: TaskChecksRecord = {
       formatVersion: 1,
@@ -341,14 +346,14 @@ export class LocalTaskRecorder implements TaskRecorder {
     return tests.slice(-MAX_TEST_COMMANDS)
   }
 
-  private async run(spec: TaskCheckSpec, runs: readonly TestRun[]): Promise<Omit<TaskCheck, 'target'>> {
+  private async run(spec: TaskCheckSpec, runs: readonly TestRun[], root: string): Promise<Omit<TaskCheck, 'target'>> {
     switch (spec.name) {
       case 'file-exists': {
-        const info = await stat(this.absolute(spec.path)).catch(() => undefined)
+        const info = await stat(absoluteIn(root, spec.path)).catch(() => undefined)
         return info?.isFile() === true ? { name: spec.name, passed: true } : { name: spec.name, passed: false, detail: 'missing' }
       }
       case 'parses': {
-        const problem = await this.parseProblem(spec.path, spec.format)
+        const problem = await this.parseProblem(absoluteIn(root, spec.path), spec.format)
         return problem === undefined ? { name: spec.name, passed: true } : { name: spec.name, passed: false, detail: problem }
       }
       case 'test-command': {
@@ -361,10 +366,10 @@ export class LocalTaskRecorder implements TaskRecorder {
   }
 
   /** Why a file does not parse as `format`, or `undefined` when it does. */
-  private async parseProblem(path: string, format: ParseFormat): Promise<string | undefined> {
+  private async parseProblem(absolute: string, format: ParseFormat): Promise<string | undefined> {
     let bytes: Buffer
     try {
-      bytes = await readFile(this.absolute(path))
+      bytes = await readFile(absolute)
     } catch (error) {
       return isNotFound(error) ? 'missing' : 'unreadable'
     }
@@ -399,10 +404,6 @@ export class LocalTaskRecorder implements TaskRecorder {
   async indexedPaths(): Promise<ReadonlySet<string> | undefined> {
     const index = await this.readIndex()
     return index === undefined ? undefined : new Set(Object.keys(index.files))
-  }
-
-  private absolute(path: string): string {
-    return nodePath.join(this.layout.root, ...path.split('/'))
   }
 
   private async readIndex(): Promise<SnapshotIndex | undefined> {

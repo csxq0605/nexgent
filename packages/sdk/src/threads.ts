@@ -61,7 +61,7 @@ import {
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
 import { toMemberResult } from '@nexgent/subagent'
-import { buildOrganizationProfile, openThreadRuns, reportBlocker, threadRunCount } from '@nexgent/workflow'
+import { buildOrganizationProfile, reportBlocker } from '@nexgent/workflow'
 
 /** What the host needs from the SDK, for one project. */
 export interface ThreadRuntime {
@@ -79,8 +79,8 @@ export interface ThreadRuntime {
   steer(sessionId: string, text: string): Promise<boolean>
   /** Whether a turn runs in the session. */
   running(sessionId: string): boolean
-  /** Settles once the session's turn `turn` has finished (at once when it is not running). */
-  turnDone(sessionId: string, turn: number): Promise<void>
+  /** Settles once the session's running turn has finished (at once when none runs). */
+  turnDone(sessionId: string): Promise<void>
   /** Wake a coordinator: the note joins its running turn or starts its next one. */
   wake(sessionId: string, text: string): Promise<void>
   /** The threads of a coordinator, oldest first. */
@@ -185,6 +185,41 @@ function turnFacts(records: readonly SessionRecord[], turn: number) {
 function model(records: readonly SessionRecord[]): string | undefined {
   const start = records[0]
   return start?.type === 'session.start' ? start.model : undefined
+}
+
+/**
+ * Pure: the coordinator turns of the task `turn` belongs to: the turn the
+ * user started (`owner`, the one the organization library records) and the
+ * turns threads woke the coordinator for after it, up to the user's next
+ * message. `undefined` before the first turn the user started.
+ */
+export function taskTurns(records: readonly SessionRecord[], turn: number): { readonly owner: number; readonly turns: ReadonlySet<number> } | undefined {
+  const woken = new Map<number, boolean>()
+  for (const record of records) {
+    if (record.type !== 'user.message' || record.source === 'inject' || woken.has(record.turn)) continue
+    woken.set(record.turn, record.source === 'thread')
+  }
+  let owner: number | undefined
+  for (const [at, byThread] of woken) if (!byThread && at <= turn && (owner === undefined || at > owner)) owner = at
+  if (owner === undefined) return undefined
+  const turns = new Set<number>()
+  for (const [at, byThread] of [...woken].sort((a, b) => a[0] - b[0])) {
+    if (at < owner) continue
+    if (at > owner && !byThread) break
+    turns.add(at)
+  }
+  return { owner, turns }
+}
+
+/** Pure: the thread runs (coordinator step two) started in `turns`, in order. */
+function threadRuns(records: readonly SessionRecord[], turns: ReadonlySet<number>) {
+  return records.flatMap(record => (record.type === 'subagent.start' && record.executionForm === 'thread' && turns.has(record.turn) ? [record] : []))
+}
+
+/** Pure: the thread runs started in `turns` that have not ended yet. */
+function openThreadRuns(records: readonly SessionRecord[], turns: ReadonlySet<number>): number {
+  const ended = new Set(records.flatMap(record => (record.type === 'subagent.end' ? [`${record.childSessionId}:${record.childTurn}`] : [])))
+  return threadRuns(records, turns).filter(run => !ended.has(`${run.childSessionId}:${run.childTurn}`)).length
 }
 
 /** The kernel's `ThreadHost` over the SDK's sessions of one project. */
@@ -399,34 +434,53 @@ export class SdkThreadHost implements ThreadHost {
     return next
   }
 
-  private async measureNow(coordinatorSessionId: string, turn: number): Promise<void> {
+  /**
+   * Measure the task a thread run belongs to, once nothing of it is still
+   * going. A task is the coordinator turn the user started and the turns its
+   * threads woke the coordinator for after it ({@link taskTurns}): a thread
+   * that asked a question and was answered, or was given its next step, is
+   * still working on the same task. So the task is measured, judged and
+   * reflected on only when every thread run of those turns has ended and the
+   * coordinator is not in one of them (it could still start another); until
+   * then the library keeps it waiting, which counts neither for nor against.
+   */
+  private async measureNow(coordinatorSessionId: string, runTurn: number): Promise<void> {
     const memory = this.rt.organizations()
     if (memory?.noteProfile === undefined) return
-    const before = await this.rt.records(coordinatorSessionId)
-    if (threadRunCount(before, turn) === 0 || openThreadRuns(before, turn) > 0) return
-    await this.rt.turnDone(coordinatorSessionId, turn)
-    if (this.rt.closed()) return
-    const records = await this.rt.records(coordinatorSessionId)
+    let records = await this.rt.records(coordinatorSessionId)
+    let task = taskTurns(records, runTurn)
+    if (task === undefined || threadRuns(records, task.turns).length === 0 || openThreadRuns(records, task.turns) > 0) return
+    // A turn the coordinator is in may be one the threads woke it for (whose records may not be written yet): wait for it.
+    while (this.rt.running(coordinatorSessionId)) {
+      await this.rt.turnDone(coordinatorSessionId)
+      if (this.rt.closed()) return
+      records = await this.rt.records(coordinatorSessionId)
+      task = taskTurns(records, runTurn)!
+      // A run the coordinator started meanwhile is measured when it ends.
+      if (openThreadRuns(records, task.turns) > 0) return
+    }
+    const turn = task.owner
+    const runs = threadRuns(records, task.turns)
     const children = new Map<string, readonly SessionRecord[]>()
-    const threadRuns: { readonly childSessionId: string; readonly childTurn: number }[] = []
-    for (const record of records) {
-      if (record.type !== 'subagent.start' || record.turn !== turn) continue
-      if (record.executionForm === 'thread') threadRuns.push(record)
-      if (children.has(record.childSessionId)) continue
+    for (const run of runs) {
+      if (children.has(run.childSessionId)) continue
       try {
-        children.set(record.childSessionId, await this.rt.records(record.childSessionId))
+        children.set(run.childSessionId, await this.rt.records(run.childSessionId))
       } catch {
         // measured from the coordinator's records only
       }
     }
     const costOf = (usage: LLMUsage, of: string | undefined) => this.rt.costOf(usage, of)
-    const profile = buildOrganizationProfile({ turn, records, children, usd: 0, costOf })
+    // The task's thread runs count as the turn's, whichever of its turns started them.
+    const profile = buildOrganizationProfile({ turn, records: records.map(record => ((record.type === 'subagent.start' || record.type === 'subagent.end') && task.turns.has(record.turn) ? { ...record, turn } : record)), children, usd: 0, costOf })
     // The threads' cost: each run's own requests and its members'.
     let addUsd = 0
-    // The turn completed only when every thread run it started did, without a question left open (a thread waiting for an answer).
-    const completed = threadRuns.every(run => records.some(record => record.type === 'subagent.end' && record.childSessionId === run.childSessionId
+    // The task completed only when each of its threads' last run did, without a question left open (a thread waiting for an answer).
+    const last = new Map<string, (typeof runs)[number]>()
+    for (const run of runs) last.set(run.childSessionId, run)
+    const completed = [...last.values()].every(run => records.some(record => record.type === 'subagent.end' && record.childSessionId === run.childSessionId
       && record.childTurn === run.childTurn && record.result.status === 'completed' && reportBlocker(record.result.text) === undefined))
-    for (const run of threadRuns) {
+    for (const run of runs) {
       const child = children.get(run.childSessionId) ?? []
       let usage = ZERO_USAGE
       for (const record of child) {

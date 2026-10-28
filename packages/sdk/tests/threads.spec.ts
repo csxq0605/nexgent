@@ -341,3 +341,99 @@ describe('threads under the coordinator\'s limits', () => {
     expect(started).toBe(1)
   })
 })
+
+describe('a thread works, is checked and is measured in its own copy of the project', () => {
+  it('checks the files a thread presented where it wrote them: no "missing" retry before its copy is merged', async () => {
+    const t = await threadSdk([
+      { toolCalls: [{ name: 'start_thread', arguments: { title: 'Data', task: 'Write out/data.json and present it.' } }] },
+      { content: 'A thread is writing the data.' },
+      { content: 'The data is in out/data.json.' },
+    ], {
+      Data: [
+        { toolCalls: [{ name: 'write_file', arguments: { path: 'out/data.json', content: '{"rows": 3}\n' } }] },
+        { toolCalls: [{ name: 'present', arguments: { paths: ['out/data.json'], summary: 'The data as JSON.' } }] },
+        { content: report('wrote and presented out/data.json') },
+      ],
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    const firstRun = waitForEvent(t, event => event.type === 'member.start' && event.sessionId === coordinator.sessionId)
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Write out/data.json with the row count and present it.' })
+    const threadId = ((await firstRun) as Extract<SdkEvent, { type: 'member.start' }>).run.childSessionId
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 2))
+
+    // The thread was not sent back to fix a file it had presented: three requests, no check note.
+    expect(t.llm().calls.filter(call => call.route === 'Data')).toHaveLength(3)
+    const records = await recordsOf(t, project.projectId, threadId)
+    expect(records.filter(record => record.type === 'user.message' && record.source === 'inject' && /missing/.test(record.content))).toEqual([])
+    expect(await readFile(nodePath.join(project.root, 'out/data.json'), 'utf8')).toBe('{"rows": 3}\n')
+  })
+
+  it('lets a thread write its own copy with write_spreadsheet and run_code without asking, like a conversation', async () => {
+    const t = await threadSdk([
+      { toolCalls: [{ name: 'start_thread', arguments: { title: 'Sheet', task: 'Write out/plan.xlsx and out/sum.txt.' } }] },
+      { content: 'A thread is writing the files.' },
+      { content: 'The files are in out/.' },
+    ], {
+      Sheet: [
+        { toolCalls: [{ name: 'load_skill', arguments: { name: 'spreadsheets' } }] },
+        { toolCalls: [{ name: 'write_spreadsheet', arguments: { path: 'out/plan.xlsx', sheets: [{ name: 'Plan', rows: [['item', 'qty'], ['a', 2]] }] } }] },
+        { toolCalls: [{ name: 'run_code', arguments: { code: 'await writeFile("out/sum.txt", String(1 + 2)); return "ok"' } }] },
+        { content: report('wrote out/plan.xlsx and out/sum.txt') },
+      ],
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const asks: string[] = []
+    t.sdk.subscribe(event => {
+      if (event.type !== 'approval.request') return
+      asks.push(`${event.request.tool}: ${event.request.summary}`)
+      void t.sdk.call('approvals.respond', { projectId: project.projectId, sessionId: event.sessionId, decision: { id: event.request.id, decision: 'deny', scope: 'once' } })
+    })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Write the plan workbook out/plan.xlsx and the sum in out/sum.txt.' })
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 2))
+
+    expect(asks).toEqual([])
+    expect(existsSync(nodePath.join(project.root, 'out/plan.xlsx'))).toBe(true)
+    expect(await readFile(nodePath.join(project.root, 'out/sum.txt'), 'utf8')).toBe('3')
+  })
+
+  it('keeps a task unsettled in the organization library while a thread still works on it after a question was answered', async () => {
+    let threadId = ''
+    const t = await threadSdk([
+      { toolCalls: [{ name: 'start_thread', arguments: { title: 'Report', task: 'Write the report.' } }] },
+      { content: 'Started.' },
+      // Woken with the question: answer it; the thread works on.
+      () => ({ toolCalls: [{ name: 'message_thread', arguments: { thread: threadId, text: 'Use 2025.' } }] }),
+      { content: 'Answered.' },
+      // Woken again: done.
+      { content: 'The report is done.' },
+    ], {
+      Report: [
+        { content: report('nothing yet', 'which year should the report cover?') },
+        // The answered run takes a while.
+        { content: ['Done: wrote the 2025 report\n', 'Not done: none\n', 'Checks: none\n', 'Blockers: none'], chunkDelayMs: 500 },
+      ],
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    const firstRun = waitForEvent(t, event => event.type === 'member.start' && event.sessionId === coordinator.sessionId)
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Write the yearly report of the project.\nPut it in report.md and keep the rest of the project as it is.' })
+    threadId = ((await firstRun) as Extract<SdkEvent, { type: 'member.start' }>).run.childSessionId
+    // The coordinator answered (turn 2) and the thread is on its second run.
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 2))
+    await expect.poll(async () => (await t.sdk.call('threads.list', { projectId: project.projectId, sessionId: coordinator.sessionId }))[0]?.status).toBe('running')
+
+    const log = nodePath.join(resolveUserDataLayout(t.home).organizations, 'runs.jsonl')
+    const lines = async () => (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { type: string; completed?: boolean; waiting?: boolean })
+    // Still working: the task's run waits, with no outcome, no profile and no change derived from it.
+    await new Promise(resolve => setTimeout(resolve, 300))
+    expect((await lines()).map(line => line.type)).toEqual(['run'])
+    expect((await lines())[0]).toMatchObject({ waiting: true })
+
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 3))
+    await expect.poll(async () => (await lines()).some(line => line.type === 'profile'), { timeout: 3_000 }).toBe(true)
+    // Settled once the thread finished: the answered question is not a failure.
+    expect((await lines()).find(line => line.type === 'profile')).not.toHaveProperty('completed')
+  })
+})

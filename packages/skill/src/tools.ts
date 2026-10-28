@@ -9,8 +9,8 @@ import {
   LOAD_SKILL_TOOL,
   NexgentError,
   READ_DOCUMENT_TOOL,
+  sandboxForCall,
   type Sandbox,
-  type SandboxMode,
   type Tool,
   type ToolContext,
 } from '@nexgent/kernel'
@@ -49,18 +49,9 @@ export function loadSkillTool(registry: LayeredSkillRegistry, capabilitySkills?:
   }
 }
 
-/** A sandbox that can answer for another mode (the workspace's `LocalSandbox`). */
-interface ModalSandbox extends Sandbox {
-  withMode(mode: SandboxMode): Sandbox
-}
-
-function sandboxFor(sandbox: Sandbox, mode: SandboxMode): Sandbox {
-  return typeof (sandbox as Partial<ModalSandbox>).withMode === 'function' ? (sandbox as ModalSandbox).withMode(mode) : sandbox
-}
-
 /** Enforce the read policy for one path: deny → `sandbox/denied`; ask → the call's approval flow. */
 async function enforceRead(sandbox: Sandbox, path: string, context: ToolContext): Promise<void> {
-  const decision = await sandboxFor(sandbox, context.sandboxMode).checkRead(path)
+  const decision = await sandboxForCall(sandbox, context).checkRead(path)
   if (decision.allowed) return
   if (decision.code !== 'approval-required') {
     throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: path ${path} — ${decision.reason} [mode ${context.sandboxMode}, ${decision.code}]`, {

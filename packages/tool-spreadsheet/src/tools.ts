@@ -7,7 +7,7 @@
  */
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, extname } from 'node:path'
-import { NexgentError, type Sandbox, type SandboxMode, type Tool, type ToolContext } from '@nexgent/kernel'
+import { NexgentError, sandboxForCall, type Sandbox, type Tool, type ToolContext } from '@nexgent/kernel'
 import { csvField, DocumentError, serialToIso } from '@nexgent/skill'
 import { columnLetters, parseAddress } from './formula/lexer.js'
 import { SUPPORTED_FUNCTIONS } from './formula/functions.js'
@@ -25,17 +25,10 @@ export const MAX_READ_RANGE_CELLS = 5_000
 /** Formula values listed in a `write_spreadsheet` result at most. */
 export const MAX_LISTED_VALUES = 60
 
-interface ModalSandbox extends Sandbox {
-  withMode(mode: SandboxMode): Sandbox
-}
-
-function sandboxFor(sandbox: Sandbox, mode: SandboxMode): Sandbox {
-  return typeof (sandbox as Partial<ModalSandbox>).withMode === 'function' ? (sandbox as ModalSandbox).withMode(mode) : sandbox
-}
-
 /** Enforce the sandbox for one path: deny → `sandbox/denied`; ask → the call's approval flow. */
 async function enforce(sandbox: Sandbox, kind: 'read' | 'write', path: string, context: ToolContext): Promise<void> {
-  const scoped = sandboxFor(sandbox, context.sandboxMode)
+  // The session's working directory (a thread's copy) is its project, as for the file tools.
+  const scoped = sandboxForCall(sandbox, context)
   const decision = kind === 'read' ? await scoped.checkRead(path) : await scoped.checkWrite(path)
   if (decision.allowed) return
   if (decision.code !== 'approval-required') {
