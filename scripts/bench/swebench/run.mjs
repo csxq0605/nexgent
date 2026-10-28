@@ -35,6 +35,7 @@
  *     [--network isolated|host] [--organization solo|team]
  *     [--prompt workflow|plain] [--effort low|medium|high|xhigh|max]
  *     [--agent nexgent|claude-code] [--claude-bin <path>]
+ *     [--followup run-reminder,auto-continue[:N]]
  *
  * `--agent claude-code` (mode real only) runs Claude Code instead of Nexgent on
  * the same task text, image, network and model, for a same-model comparison:
@@ -56,6 +57,11 @@
  * `--organization` sets `NEXGENT_FORCE_ORGANIZATION` in the CLI: every root
  * turn alone (`solo`) or with members (`team`).
  *
+ * `--followup` turns on follow-up policies of the harness (`followups.mjs`):
+ * after the run, the harness may send the session more user messages with
+ * `nexgent resume <sessionId> --task <text>`, the same way a user would.
+ * Nexgent itself has no benchmark-only behavior.
+ *
  * `--budget` stops before the next instance once the summed cost of the
  * instances run so far (their token totals at `--price`, USD per million
  * tokens) plus one `--cost-cap` would pass it.
@@ -72,6 +78,7 @@ import { realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
+import { RUN_REMINDER_TEXT, anyFollowup, nextFollowup, parseEvents, parseFollowups, sessionIdOf } from './followups.mjs'
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
 const { values: args } = parseArgs({
@@ -94,10 +101,18 @@ const { values: args } = parseArgs({
     'allow-spend': { type: 'boolean', default: false },
     agent: { type: 'string', default: 'nexgent' },
     'claude-bin': { type: 'string' },
+    followup: { type: 'string' },
   },
 })
 
 const MODES = ['scripted-gold', 'scripted-empty', 'real']
+let FOLLOWUPS
+try {
+  FOLLOWUPS = parseFollowups(args.followup)
+} catch (error) {
+  console.error(error.message)
+  process.exit(2)
+}
 if (args.instances === undefined || args.out === undefined || !MODES.includes(args.mode)) {
   console.error(`usage: run.mjs --instances <jsonl> --out <dir> [--mode ${MODES.join('|')}]`)
   process.exit(2)
@@ -127,8 +142,8 @@ if (args.organization !== undefined && !['solo', 'team'].includes(args.organizat
   process.exit(2)
 }
 
-if (!['nexgent', 'claude-code'].includes(args.agent) || (args.agent === 'claude-code' && (!real || args.organization !== undefined))) {
-  console.error('--agent is nexgent or claude-code (claude-code: mode real, no --organization)')
+if (!['nexgent', 'claude-code'].includes(args.agent) || (args.agent === 'claude-code' && (!real || args.organization !== undefined || anyFollowup(FOLLOWUPS)))) {
+  console.error('--agent is nexgent or claude-code (claude-code: mode real, no --organization or --followup)')
   process.exit(2)
 }
 const CLAUDE_BIN = args.agent !== 'claude-code' ? undefined : realpathSync(args['claude-bin'] ?? spawnSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim())
@@ -207,6 +222,8 @@ function scriptFor(instance) {
   return [
     { toolCalls: [{ name: 'bash', arguments: { command } }], usage },
     { content: ['Applied the fix.'], usage },
+    // With follow-ups on, the first one (a run reminder, or a request to continue) gets one more answer.
+    ...(anyFollowup(FOLLOWUPS) ? [{ content: ['Checked the fix. TASK_COMPLETE'], usage }] : []),
   ]
 }
 
@@ -278,10 +295,27 @@ async function runInstance(instance, server) {
     if (testbedPath !== '') env.push('-e', `PATH=${testbedPath}`, '-e', 'CONDA_DEFAULT_ENV=testbed', '-e', 'CONDA_PREFIX=/opt/miniconda3/envs/testbed')
     if (server !== undefined) env.push('-e', `NEXGENT_API_BASE_URL=${server.baseUrl}`)
     const started = Date.now()
-    const cli = await run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/node/bin/node', '/opt/nexgent/apps/cli/bin/nexgent.mjs', 'run', '--project', '/testbed', '--task', taskText(instance), '--sandbox', 'full-access', '--json'], { timeoutMs: TIMEOUT_MS, env: { ...process.env, NEXGENT_API_KEY: !real ? SCRIPTED_KEY : NETWORK === 'isolated' ? PROXIED_KEY : apiKey } })
+    const cliEnv = { ...process.env, NEXGENT_API_KEY: !real ? SCRIPTED_KEY : NETWORK === 'isolated' ? PROXIED_KEY : apiKey }
+    const nexgent = (command, timeoutMs) => run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/node/bin/node', '/opt/nexgent/apps/cli/bin/nexgent.mjs', ...command, '--project', '/testbed', '--sandbox', 'full-access', '--json'], { timeoutMs, env: cliEnv })
+    const cli = await nexgent(['run', '--task', taskText(instance)], TIMEOUT_MS)
+    let stdout = cli.stdout
+    let stderr = cli.stderr
+    // Follow-up policies of the harness (none by default): more user messages to the same session, as a user would send them.
+    const sessionId = sessionIdOf(parseEvents(stdout))
+    const state = { reminded: false, continues: 0 }
+    const followups = []
+    for (let text = anyFollowup(FOLLOWUPS) && sessionId !== undefined ? nextFollowup(FOLLOWUPS, state, parseEvents(stdout)) : undefined; text !== undefined; text = nextFollowup(FOLLOWUPS, state, parseEvents(stdout))) {
+      const left = TIMEOUT_MS - (Date.now() - started)
+      if (left <= 0) break
+      followups.push(text === RUN_REMINDER_TEXT ? 'run-reminder' : 'auto-continue')
+      const more = await nexgent(['resume', sessionId, '--task', text], left)
+      stdout += more.stdout
+      stderr += more.stderr
+      cli.code = more.code
+    }
     const ms = Date.now() - started
-    await writeFile(join(dir, 'cli.jsonl'), cli.stdout)
-    await writeFile(join(dir, 'stderr.txt'), cli.stderr)
+    await writeFile(join(dir, 'cli.jsonl'), stdout)
+    await writeFile(join(dir, 'stderr.txt'), stderr)
     // Everything the run changed, new files included, without Nexgent's own records. Against HEAD, not the base
     // commit: the evaluation images add a commit of their own on top of it (file modes only).
     const diff = docker(['exec', name, 'bash', '-c', `cd /testbed && git add -A -- . ':(exclude).nexgent' && git diff --cached --binary HEAD`])
@@ -289,7 +323,7 @@ async function runInstance(instance, server) {
     await writeFile(join(dir, 'patch.diff'), patch)
     docker(['cp', `${name}:/testbed/.nexgent`, join(dir, 'nexgent-project')], { check: false })
     docker(['cp', `${name}:${HOME_IN_CONTAINER}`, join(dir, 'nexgent-home')], { check: false })
-    const usage = { ...(await tokenTotals(dir)), ms, exitCode: cli.code, patchBytes: Buffer.byteLength(patch) }
+    const usage = { ...(await tokenTotals(dir)), ms, exitCode: cli.code, patchBytes: Buffer.byteLength(patch), followups }
     await writeFile(join(dir, 'usage.json'), JSON.stringify(usage, null, 2))
     return { patch, usage }
   } finally {
