@@ -34,6 +34,17 @@
  *     [--budget <usd> --price in,out,cacheRead,cacheWrite]
  *     [--network isolated|host] [--organization solo|team]
  *     [--prompt workflow|plain] [--effort low|medium|high|xhigh|max]
+ *     [--agent nexgent|claude-code] [--claude-bin <path>]
+ *
+ * `--agent claude-code` (mode real only) runs Claude Code instead of Nexgent on
+ * the same task text, image, network and model, for a same-model comparison:
+ * the `claude` executable at `--claude-bin` (default: `claude` on PATH) is
+ * mounted read-only and run as `claude -p <task> --model <model>
+ * --effort <effort> --dangerously-skip-permissions --output-format
+ * stream-json`, with the model API through the same proxy. Web tools are
+ * turned off (`--disallowedTools WebFetch WebSearch`): web search runs on the
+ * API side and would get around the isolation. Model and effort default to
+ * Nexgent's defaults (`claude-sonnet-5-5`, `medium`) so only the agent differs.
  *
  * `--network isolated` (the default in mode real): the task container joins
  * an internal Docker network with no route out; its only peer is a proxy
@@ -57,6 +68,7 @@
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdir, readFile, writeFile, appendFile, rm } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -80,6 +92,8 @@ const { values: args } = parseArgs({
     budget: { type: 'string' },
     price: { type: 'string', default: '2,10,0.2,2.5' },
     'allow-spend': { type: 'boolean', default: false },
+    agent: { type: 'string', default: 'nexgent' },
+    'claude-bin': { type: 'string' },
   },
 })
 
@@ -112,6 +126,16 @@ if (args.organization !== undefined && !['solo', 'team'].includes(args.organizat
   console.error('--organization is solo or team')
   process.exit(2)
 }
+
+if (!['nexgent', 'claude-code'].includes(args.agent) || (args.agent === 'claude-code' && (!real || args.organization !== undefined))) {
+  console.error('--agent is nexgent or claude-code (claude-code: mode real, no --organization)')
+  process.exit(2)
+}
+const CLAUDE_BIN = args.agent !== 'claude-code' ? undefined : realpathSync(args['claude-bin'] ?? spawnSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).stdout.trim())
+/** Nexgent's defaults, so a claude-code run differs from a nexgent run in the agent only. */
+const CLAUDE_DEFAULT_MODEL = 'claude-sonnet-5-5'
+const CLAUDE_DEFAULT_EFFORT = 'medium'
+const CLAUDE_HOME = '/root/.claude-bench'
 
 const NODE_DIR = dirname(dirname(process.execPath))
 const OUT = resolve(args.out)
@@ -229,8 +253,10 @@ async function runInstance(instance, server) {
   const name = `nexgent-bench-${instance.instance_id.replace(/[^a-zA-Z0-9_.-]/g, '-')}-${process.pid}`
   // Behind a TLS-inspecting proxy the host trusts an extra CA through NODE_EXTRA_CA_CERTS; the CLI in the container needs it too.
   const caMount = EXTRA_CA === undefined ? [] : ['-v', `${EXTRA_CA}:${CA_IN_CONTAINER}:ro`]
-  docker(['run', '-d', '--name', name, '--network', NETWORK === 'isolated' ? BENCH_NET : 'host', '-v', `${REPO}:/opt/nexgent:ro`, '-v', `${NODE_DIR}:/opt/node:ro`, ...caMount, instance.image, 'tail', '-f', '/dev/null'])
+  const claudeMount = CLAUDE_BIN === undefined ? [] : ['-v', `${CLAUDE_BIN}:/opt/claude-code/claude:ro`]
+  docker(['run', '-d', '--name', name, '--network', NETWORK === 'isolated' ? BENCH_NET : 'host', '-v', `${REPO}:/opt/nexgent:ro`, '-v', `${NODE_DIR}:/opt/node:ro`, ...claudeMount, ...caMount, instance.image, 'tail', '-f', '/dev/null'])
   try {
+    if (args.agent === 'claude-code') return await runClaudeCode(instance, name, dir)
     const config = {
       version: 1,
       sandboxMode: 'full-access',
@@ -269,6 +295,63 @@ async function runInstance(instance, server) {
   } finally {
     docker(['rm', '-f', name], { check: false })
   }
+}
+
+/** The conda env `testbed` first on PATH (see runInstance), as `docker exec -e` arguments. */
+function testbedEnv(name) {
+  const testbedPath = docker(['exec', name, 'bash', '-c', 'test -d /opt/miniconda3/envs/testbed/bin && echo "/opt/miniconda3/envs/testbed/bin:$PATH"'], { check: false }).stdout.trim()
+  return testbedPath === '' ? [] : ['-e', `PATH=${testbedPath}`, '-e', 'CONDA_DEFAULT_ENV=testbed', '-e', 'CONDA_PREFIX=/opt/miniconda3/envs/testbed']
+}
+
+/** Token totals and cost of a `claude -p --output-format stream-json` run: from its final `result` line. */
+function claudeTotals(stdout) {
+  const totals = { requests: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, unknownUsage: 0 }
+  let result
+  const messages = new Set()
+  for (const line of stdout.split('\n')) {
+    if (line.trim() === '') continue
+    let record
+    try { record = JSON.parse(line) } catch { continue }
+    // One model request can come out as several `assistant` lines (one per content block): count message ids.
+    if (record.type === 'assistant') messages.add(record.message?.id ?? messages.size)
+    if (record.type === 'result') result = record
+  }
+  totals.requests = messages.size
+  if (result === undefined) return { ...totals, unknownUsage: 1 }
+  const usage = result.usage ?? {}
+  return {
+    ...totals,
+    inputTokens: usage.input_tokens ?? 0,
+    outputTokens: usage.output_tokens ?? 0,
+    cacheReadTokens: usage.cache_read_input_tokens ?? 0,
+    cacheWriteTokens: usage.cache_creation_input_tokens ?? 0,
+    turns: result.num_turns,
+    reportedUsd: result.total_cost_usd,
+    resultSubtype: result.subtype,
+  }
+}
+
+/** `--agent claude-code`: the same task in the same container, through the same proxy, with Claude Code. */
+async function runClaudeCode(instance, name, dir) {
+  // The key goes in through the environment of `docker exec`; in isolated runs it is the placeholder (the proxy sets the real one).
+  const env = ['-e', 'ANTHROPIC_API_KEY', '-e', `HOME=${CLAUDE_HOME}`, '-e', 'IS_SANDBOX=1', '-e', 'CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1', '-e', 'DISABLE_AUTOUPDATER=1']
+  if (EXTRA_CA !== undefined) env.push('-e', `NODE_EXTRA_CA_CERTS=${CA_IN_CONTAINER}`)
+  if (NETWORK === 'isolated') env.push('-e', `ANTHROPIC_BASE_URL=http://${PROXY_NAME}:${PROXY_PORT}`)
+  env.push(...testbedEnv(name))
+  docker(['exec', name, 'mkdir', '-p', CLAUDE_HOME])
+  const argv = ['-p', taskText(instance), '--model', args.model ?? CLAUDE_DEFAULT_MODEL, '--effort', args.effort ?? CLAUDE_DEFAULT_EFFORT,
+    '--dangerously-skip-permissions', '--output-format', 'stream-json', '--verbose', '--disallowedTools', 'WebFetch', 'WebSearch']
+  if (args['cost-cap'] !== undefined) argv.push('--max-budget-usd', args['cost-cap'])
+  const started = Date.now()
+  const cli = await run('docker', ['exec', '-i', ...env, '-w', '/testbed', name, '/opt/claude-code/claude', ...argv], { timeoutMs: TIMEOUT_MS, env: { ...process.env, ANTHROPIC_API_KEY: NETWORK === 'isolated' ? PROXIED_KEY : apiKey } })
+  const ms = Date.now() - started
+  await writeFile(join(dir, 'cli.jsonl'), cli.stdout)
+  await writeFile(join(dir, 'stderr.txt'), cli.stderr)
+  const patch = docker(['exec', name, 'bash', '-c', 'cd /testbed && git add -A -- . && git diff --cached --binary HEAD']).stdout
+  await writeFile(join(dir, 'patch.diff'), patch)
+  const usage = { ...claudeTotals(cli.stdout), ms, exitCode: cli.code, patchBytes: Buffer.byteLength(patch) }
+  await writeFile(join(dir, 'usage.json'), JSON.stringify(usage, null, 2))
+  return { patch, usage }
 }
 
 /**
