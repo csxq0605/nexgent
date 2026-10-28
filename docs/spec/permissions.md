@@ -274,7 +274,7 @@
 `run_code`（`@nexgent/ptc`）与 `workflow` 的脚本在独立的 Node 子进程里执行：
 
 - 每次调用一个新进程；环境变量为空（不继承宿主环境，因此读不到 `NEXGENT_API_KEY` 等任何变量）；cwd 为项目根。
-- `run_code` 与函数模块的进程进和 `bash` 同一个系统沙箱（同样的读保护和网络设置，只有会话临时目录可写；Windows 上以沙箱账户运行，引导代码从会话临时目录里的文件加载；作业启动器用本机现有的 PowerShell，没有 pwsh 7 时用 5.1），宿主函数仍在宿主里执行。`workflow` 与 `organize` 的脚本进程同样进沙箱（`ctx.sandbox` 已装载时）。名单外的域名问的是“`run_code` / `workflow` 要连接某域名”。`full-access`、`systemSandbox: 'off'` 或没有系统沙箱时照旧不进；`systemSandbox: 'required'` 而没有沙箱时不执行。
+- `run_code` 与函数模块的进程进和 `bash` 同一个系统沙箱（同样的读保护和网络设置，只有会话临时目录可写；Windows 上以沙箱账户运行，引导代码从会话临时目录里的文件加载；作业启动器用本机现有的 PowerShell，没有 pwsh 7 时用 5.1；`srt-win` 不给沙箱里的进程 stdin，宿主发给程序的消息改写进会话临时目录里的一个文件，程序轮询读取，权限模型只多放行这一个文件的读；程序 stderr 里 PowerShell 的进度记录去掉），宿主函数仍在宿主里执行。`workflow` 与 `organize` 的脚本进程同样进沙箱（`ctx.sandbox` 已装载时）。名单外的域名问的是“`run_code` / `workflow` 要连接某域名”。`full-access`、`systemSandbox: 'off'` 或没有系统沙箱时照旧不进；`systemSandbox: 'required'` 而没有沙箱时不执行。
 - 文件访问只经宿主函数（IPC 绑定），每次读写按**调用方会话的沙箱模式与路径策略**检查，与文件工具同一套规则；`read-only` 下写类宿主函数被拒，`run_code` 本身仍可运行只读代码（它在契约里声明 `selfSandboxed: true`，审批策略因此不在调用前整体拒绝它，见 §工具审批）。进程不直接拿到文件系统以外的宿主能力。
 - 输出与时长有上限（默认 60 s，最长 300 s）；超时或取消时终止整个进程树（Windows 纳入 Job Object），不得残留。
 - 工作流脚本里的 `agent()` 经宿主函数建成员，成员受上节“子会话继承”约束；脚本本身不能绕过并发与总数上限。
