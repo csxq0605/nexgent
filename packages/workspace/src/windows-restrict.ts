@@ -45,6 +45,56 @@ public static class NexgentRestrict {
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetProcessWindowStation();
+  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetThreadDesktop(uint threadId);
+  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, int objectType, uint info, IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
+  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint SetEntriesInAclW(uint count, ref ExplicitAccess entries, IntPtr oldAcl, out IntPtr newAcl);
+  [StructLayout(LayoutKind.Sequential)] struct Trustee { public IntPtr multiple; public int operation; public int form; public int type; public IntPtr name; }
+  [StructLayout(LayoutKind.Sequential)] struct ExplicitAccess { public uint permissions; public int mode; public uint inheritance; public Trustee trustee; }
+
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref IntPtr info, uint length);
+
+  static ExplicitAccess GrantAll(IntPtr sid) {
+    ExplicitAccess entry = new ExplicitAccess();
+    entry.permissions = 0x10000000; // GENERIC_ALL
+    entry.mode = 1; // GRANT_ACCESS
+    entry.trustee.form = 0; // TRUSTEE_IS_SID
+    entry.trustee.type = 5; // TRUSTEE_IS_WELL_KNOWN_GROUP
+    entry.trustee.name = sid;
+    return entry;
+  }
+
+  // Objects the shell creates (its process, threads, pipes) get the token's default DACL, which grants
+  // the account and SYSTEM. Without the account among the restricting SIDs the shell could not open
+  // its own process and would hang in start-up; grant RESTRICTED as well, as Chromium does.
+  static int AllowRestrictedByDefault(IntPtr restricted, IntPtr restrictedSid) {
+    IntPtr current = TokenInfo(restricted, 6); // TokenDefaultDacl
+    if (current == IntPtr.Zero) return Fail("GetTokenInformation(TokenDefaultDacl)");
+    ExplicitAccess entry = GrantAll(restrictedSid);
+    IntPtr updated;
+    uint error = SetEntriesInAclW(1, ref entry, Marshal.ReadIntPtr(current), out updated);
+    if (error != 0) { Console.Error.WriteLine("nexgent-sandbox: SetEntriesInAcl failed (error " + error + ")"); return 9010; }
+    if (!SetTokenInformation(restricted, 6, ref updated, (uint)IntPtr.Size)) return Fail("SetTokenInformation(TokenDefaultDacl)");
+    return 0;
+  }
+
+  // The window station and desktop srt-win made for this run grant the account: grant RESTRICTED too,
+  // for shells whose restricting SIDs leave the account out. Best effort.
+  static void OpenWindowObjects(IntPtr restrictedSid) {
+    IntPtr[] objects = new IntPtr[] { GetProcessWindowStation(), GetThreadDesktop(GetCurrentThreadId()) };
+    foreach (IntPtr handle in objects) {
+      if (handle == IntPtr.Zero) continue;
+      IntPtr dacl; IntPtr descriptor;
+      // SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION
+      if (GetSecurityInfo(handle, 7, 4, IntPtr.Zero, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor) != 0) continue;
+      ExplicitAccess entry = GrantAll(restrictedSid);
+      IntPtr updated;
+      if (SetEntriesInAclW(1, ref entry, dacl, out updated) != 0) continue;
+      SetSecurityInfo(handle, 7, 4, IntPtr.Zero, IntPtr.Zero, updated, IntPtr.Zero);
+    }
+  }
 
   static int Fail(string what) {
     int error = Marshal.GetLastWin32Error();
@@ -80,8 +130,8 @@ public static class NexgentRestrict {
     if (sidList.Length == 0 || rest.Length == 0) { Console.Error.WriteLine("nexgent-sandbox: usage: <sids> <command line>"); return 9010; }
 
     IntPtr token;
-    // TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY
-    if (!OpenProcessToken(GetCurrentProcess(), 0x0001 | 0x0002 | 0x0008, out token)) return Fail("OpenProcessToken");
+    // TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT
+    if (!OpenProcessToken(GetCurrentProcess(), 0x0001 | 0x0002 | 0x0008 | 0x0080, out token)) return Fail("OpenProcessToken");
     IntPtr user = TokenInfo(token, 1);
     if (user == IntPtr.Zero) return Fail("GetTokenInformation(TokenUser)");
     IntPtr groups = TokenInfo(token, 2);
@@ -102,12 +152,17 @@ public static class NexgentRestrict {
       uint attributes = (uint)Marshal.ReadInt32(groups, IntPtr.Size + k * entry + IntPtr.Size);
       if ((attributes & 0xC0000000) == 0xC0000000) sids.Add(Marshal.ReadIntPtr(groups, IntPtr.Size + k * entry));
     }
+    IntPtr restrictedSid;
+    if (!ConvertStringSidToSidW("S-1-5-12", out restrictedSid)) return Fail("ConvertStringSidToSid(S-1-5-12)");
+    if (!sidList.Split(',')[0].Equals("USER")) OpenWindowObjects(restrictedSid);
     SidAndAttributes[] restrict = new SidAndAttributes[sids.Count];
     for (int k = 0; k < sids.Count; k++) { restrict[k].Sid = sids[k]; restrict[k].Attributes = 0; }
 
     IntPtr restricted;
     // DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED
     if (!CreateRestrictedToken(token, 0x1 | 0x8, 0, IntPtr.Zero, 0, IntPtr.Zero, (uint)restrict.Length, restrict, out restricted)) return Fail("CreateRestrictedToken");
+    int allowed = AllowRestrictedByDefault(restricted, restrictedSid);
+    if (allowed != 0) return allowed;
 
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
