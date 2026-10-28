@@ -16,6 +16,67 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getWindowsSandboxUserStatusAsync, grantWindowsAcl, resolveSrtWin, VENDORED_SRT_WIN_EXE } from '@anthropic-ai/sandbox-runtime'
 import { buildRestrictLauncher, createWindowsSandbox, defaultWriteDenies, labelFolder, LabelRecord, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
 
+/**
+ * Runs a command line as a standard user would (the runner is an elevated administrator): this
+ * process's token through SAFER's Normal User level (Administrators deny-only, no privileges) at
+ * Medium integrity. Returns its exit code and output.
+ */
+const STANDARD_USER = `
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class StandardUser {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct StartupInfo {
+    public int cb; public string reserved; public string desktop; public string title;
+    public int x; public int y; public int xSize; public int ySize; public int xChars; public int yChars; public int fill;
+    public int flags; public short showWindow; public short reserved2; public IntPtr reserved3;
+    public IntPtr stdInput; public IntPtr stdOutput; public IntPtr stdError;
+  }
+  [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr process; public IntPtr thread; public int processId; public int threadId; }
+  [StructLayout(LayoutKind.Sequential)] struct MandatoryLabel { public IntPtr Sid; public uint Attributes; }
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SaferCreateLevel(uint scope, uint level, uint flags, out IntPtr handle, IntPtr reserved);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SaferComputeTokenFromLevel(IntPtr level, IntPtr inToken, out IntPtr outToken, uint flags, IntPtr reserved);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref MandatoryLabel info, uint length);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string sid, out IntPtr result);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation info);
+  [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
+  static int Fail(string step) { Console.Error.WriteLine(step + " failed: " + Marshal.GetLastWin32Error()); return 9100; }
+  public static int Run(string commandLine) {
+    IntPtr level, token;
+    if (!SaferCreateLevel(2, 0x20000, 1, out level, IntPtr.Zero)) return Fail("SaferCreateLevel");
+    if (!SaferComputeTokenFromLevel(level, IntPtr.Zero, out token, 0, IntPtr.Zero)) return Fail("SaferComputeTokenFromLevel");
+    MandatoryLabel label = new MandatoryLabel();
+    if (!ConvertStringSidToSidW("S-1-16-8192", out label.Sid)) return Fail("ConvertStringSidToSid");
+    label.Attributes = 0x20;
+    if (!SetTokenInformation(token, 25, ref label, (uint)Marshal.SizeOf(typeof(MandatoryLabel)))) return Fail("SetTokenInformation");
+    StartupInfo startup = new StartupInfo();
+    startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+    startup.flags = 0x100;
+    startup.stdInput = GetStdHandle(-10);
+    startup.stdOutput = GetStdHandle(-11);
+    startup.stdError = GetStdHandle(-12);
+    ProcessInformation info;
+    if (!CreateProcessAsUserW(token, null, new StringBuilder(commandLine), IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, null, ref startup, out info)) return Fail("CreateProcessAsUser");
+    WaitForSingleObject(info.process, 0xFFFFFFFF);
+    uint code;
+    GetExitCodeProcess(info.process, out code);
+    return (int)code;
+  }
+}
+'@
+exit [StandardUser]::Run($env:NX_STANDARD_USER_COMMAND)
+`
+
+function asStandardUser(commandLine: string): { code: number | null; output: string } {
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', STANDARD_USER], {
+    encoding: 'utf8', env: { ...process.env, NX_STANDARD_USER_COMMAND: commandLine }, windowsHide: true, timeout: 120_000,
+  })
+  return { code: result.status, output: `${result.stdout}${result.stderr}` }
+}
+
 const enabled = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
 
 describe.runIf(enabled)('Windows sandbox (real)', () => {
@@ -145,14 +206,47 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     expect(await readFile(nodePath.join(eproj, 'made.txt'), 'utf8'), result.stderr).toContain('inside')
     expect(await readFile(nodePath.join(eproj, 'src', 'existing.txt'), 'utf8'), result.stderr).toContain('NEW')
     expect(existsSync(nodePath.join(wide, 'e.txt'))).toBe(false)
-    // It got there by allowing the user WRITE_OWNER on the folder (Windows denied the label without it).
-    const acl = spawnSync('icacls', [eproj], { encoding: 'utf8' }).stdout
-    expect(acl).toMatch(/\(WO\)/)
-    expect(acl).toMatch(/Mandatory Label\\Low/i)
+    expect(spawnSync('icacls', [eproj], { encoding: 'utf8' }).stdout).toMatch(/Mandatory Label\\Low/i)
     // The next command finds the folder ready.
     const again = await go(`Set-Content '${nodePath.join(eproj, 'again.txt')}' again; "done"`, policy)
     expect(await readFile(nodePath.join(eproj, 'again.txt'), 'utf8'), again.stderr).toContain('again')
   }, 120_000)
+
+  it('as a standard user who owns a folder but may only modify it, labels it by allowing themselves WRITE_OWNER, and takes both back', async () => {
+    const own = nodePath.join(root, 'eown')
+    const foreign = nodePath.join(root, 'eforeign')
+    for (const dir of [own, foreign]) {
+      await mkdir(nodePath.join(dir, 'src'), { recursive: true })
+      await writeFile(nodePath.join(dir, 'src', 'existing.txt'), 'OLD')
+    }
+    // Owned by this user, as a folder they made on E:\\ would be; the other one by Administrators.
+    for (const [dir, owner] of [[own, process.env.USERNAME!], [foreign, '*S-1-5-32-544']] as const) {
+      const set = spawnSync('icacls', [dir, '/setowner', owner, '/T', '/C'], { encoding: 'utf8' })
+      expect(set.status, set.stdout + set.stderr).toBe(0)
+      const drive = spawnSync('icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-11:(OI)(CI)M', '*S-1-5-18:(OI)(CI)F', '/T', '/C'], { encoding: 'utf8' })
+      expect(drive.status, drive.stdout + drive.stderr).toBe(0)
+    }
+    // The case this fixes: Modify alone does not let a standard user change the label.
+    const plain = asStandardUser(`icacls "${own}" /setintegritylevel (OI)(CI)L`)
+    expect(plain.code, plain.output).not.toBe(0)
+    const { launcher } = await buildRestrictLauncher()
+    const label = asStandardUser(`"${launcher}" --label low "${own}"`)
+    expect(label.code, label.output).toBe(0)
+    const held = spawnSync('icacls', [own], { encoding: 'utf8' }).stdout
+    expect(held).toMatch(/\(WO\)/)
+    expect(held).toMatch(/Mandatory Label\\Low/i)
+    expect(spawnSync('icacls', [nodePath.join(own, 'src', 'existing.txt')], { encoding: 'utf8' }).stdout).toMatch(/Mandatory Label\\Low/i)
+    const unlabel = asStandardUser(`"${launcher}" --label none "${own}"`)
+    expect(unlabel.code, unlabel.output).toBe(0)
+    const after = spawnSync('icacls', [own], { encoding: 'utf8' }).stdout
+    expect(after).not.toMatch(/\(WO\)/)
+    expect(after).not.toMatch(/Mandatory Label\\Low/i)
+    // A folder someone else owns: the reason is clear.
+    const refused = asStandardUser(`"${launcher}" --label low "${foreign}"`)
+    expect(refused.code).toBe(9011)
+    expect(refused.output).toContain("only the folder's owner or an administrator can")
+    expect(spawnSync('icacls', [foreign], { encoding: 'utf8' }).stdout).not.toMatch(/\(WO\)|Mandatory Label\\Low/i)
+  }, 180_000)
 
   it('keeps .nexgent and .git/hooks read-only', async () => {
     await go(`Set-Content '.nexgent\\config.json' changed; Set-Content '.git\\hooks\\pre-commit' x; "done"`)
@@ -264,9 +358,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       await sandbox.dispose()
       expect(aclMentions(project, sid)).toBe(false)
       expect(aclMentions(temp, sid)).toBe(false)
-      // The user's own WRITE_OWNER entry goes with the label.
       expect(aclMentions(eproj, sid)).toBe(false)
-      expect(spawnSync('icacls', [eproj], { encoding: 'utf8' }).stdout).not.toMatch(/\(WO\)/)
     }, 120_000)
 
     it('clears grants a process that has ended left behind, on the next start', async () => {
