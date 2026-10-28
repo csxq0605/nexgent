@@ -233,19 +233,19 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     const label = asStandardUser(`"${launcher}" --label low "${own}"`)
     expect(label.code, label.output).toBe(0)
     const held = spawnSync('icacls', [own], { encoding: 'utf8' }).stdout
-    expect(held).toMatch(/\(WO\)/)
+    expect(held).toMatch(/[(,]WO[,)]/)
     expect(held).toMatch(/Mandatory Label\\Low/i)
     expect(spawnSync('icacls', [nodePath.join(own, 'src', 'existing.txt')], { encoding: 'utf8' }).stdout).toMatch(/Mandatory Label\\Low/i)
     const unlabel = asStandardUser(`"${launcher}" --label none "${own}"`)
     expect(unlabel.code, unlabel.output).toBe(0)
     const after = spawnSync('icacls', [own], { encoding: 'utf8' }).stdout
-    expect(after).not.toMatch(/\(WO\)/)
+    expect(after).not.toMatch(/[(,]WO[,)]/)
     expect(after).not.toMatch(/Mandatory Label\\Low/i)
     // A folder someone else owns: the reason is clear.
     const refused = asStandardUser(`"${launcher}" --label low "${foreign}"`)
     expect(refused.code).toBe(9011)
     expect(refused.output).toContain("only the folder's owner or an administrator can")
-    expect(spawnSync('icacls', [foreign], { encoding: 'utf8' }).stdout).not.toMatch(/\(WO\)|Mandatory Label\\Low/i)
+    expect(spawnSync('icacls', [foreign], { encoding: 'utf8' }).stdout).not.toMatch(/[(,]WO[,)]|Mandatory Label\\Low/i)
   }, 180_000)
 
   it('keeps .nexgent and .git/hooks read-only', async () => {
