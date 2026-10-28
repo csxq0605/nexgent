@@ -59,6 +59,7 @@ const VALID: Record<SdkMethodName, Record<string, unknown>> = {
   'handbook.setStatus': { ...p, entryId: 'e1', status: 'retired', reason: 'x' },
   'learning.status': p,
   'learning.acknowledge': {},
+  'commandSandbox.install': {},
 }
 
 describe('method whitelist', () => {

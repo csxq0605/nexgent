@@ -14,7 +14,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { NexgentError, type FunctionModuleSpec, type FunctionSpec, type Sandbox, type Tool, type ToolEffect } from '@nexgent/kernel'
-import { projectFunctions, renderProgramResult, runProgram, type RunCodeToolOptions } from '@nexgent/ptc'
+import { projectFunctions, renderProgramResult, runConfinedProgram, type RunCodeToolOptions } from '@nexgent/ptc'
 
 /** Host functions a function receives only when it declares `write`. */
 const WRITING_FUNCTIONS = new Set(['writeFile'])
@@ -73,7 +73,7 @@ export function functionModuleTools(sandbox: Sandbox, directory: string, spec: F
           source = undefined
           throw new NexgentError('tool/failed', `cannot read the module of ${spec.name}: ${(error as Error).message}`)
         }
-        const result = await runProgram({
+        const result = await runConfinedProgram(sandbox, context, toolNames[index]!, {
           ...options,
           code: program(functions.map(host => host.name)),
           cwd: context.workspace.root,

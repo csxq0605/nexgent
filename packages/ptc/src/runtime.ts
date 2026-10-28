@@ -16,10 +16,11 @@
  * and {@link runProgram} resolves only after the tree is gone.
  */
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
+import { appendFileSync, rmSync, writeFileSync } from 'node:fs'
 import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { NexgentError, type JsonValue } from '@nexgent/kernel'
-import { JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive } from '@nexgent/workspace'
+import { currentPowerShell, JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive, progressFilter, scrubEnv } from '@nexgent/workspace'
 import { BOOTSTRAP_SOURCE } from './bootstrap.js'
 import { parseProgramMessage, type CallMessage, type HostMessage } from './protocol.js'
 
@@ -106,8 +107,43 @@ export interface RunProgramOptions {
   readonly permission?: boolean
   /** Windows only: run inside a kill-on-close Job Object (default `true`). */
   readonly windowsJob?: boolean
-  /** Windows only: the `pwsh` that launches the job (default `pwsh`). */
+  /** Windows only: the PowerShell that launches the job (default: the one this machine has, pwsh 7 or Windows PowerShell 5.1). */
   readonly pwshPath?: string
+  /**
+   * Start the program through this wrapper (the OS sandbox) instead of
+   * `node` directly; it runs {@link programCommand}. On Windows the job
+   * launcher starts the wrapper.
+   */
+  readonly launch?: { readonly program: string; readonly args: readonly string[]; readonly env?: Readonly<Record<string, string>> }
+  /**
+   * Run the bootstrap from this file instead of `--eval` (the Windows
+   * sandbox, whose command line goes through PowerShell); the file must
+   * hold {@link BOOTSTRAP_SOURCE}.
+   */
+  readonly entryFile?: string
+  /**
+   * Send host messages through this file instead of the program's stdin
+   * (with {@link entryFile}): the host appends, the bootstrap reads. For a
+   * sandbox that starts the process without stdin (Windows `srt-win`).
+   */
+  readonly inputFile?: string
+}
+
+/** The PowerShell that starts the Windows job: `pwshPath`, else the one this machine has (pwsh 7, or Windows PowerShell 5.1). */
+export function jobLauncherProgram(options: { readonly pwshPath?: string }): string {
+  return options.pwshPath ?? currentPowerShell().program
+}
+
+/** The Node executable and arguments a program process runs (what an OS sandbox wraps). */
+export function programCommand(options: Pick<RunProgramOptions, 'nodePath' | 'permission' | 'entryFile' | 'inputFile'> = {}): { readonly node: string; readonly args: string[] } {
+  return {
+    node: options.nodePath ?? process.execPath,
+    args: programArgs({
+      ...(options.permission === undefined ? {} : { permission: options.permission }),
+      ...(options.entryFile === undefined ? {} : { entryFile: options.entryFile }),
+      ...(options.inputFile === undefined ? {} : { inputFile: options.inputFile }),
+    }),
+  }
 }
 
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
@@ -120,14 +156,15 @@ export function permissionFlag(version: string = process.versions.node): string 
 }
 
 /** Node arguments of a program process. */
-export function programArgs(options: { readonly permission?: boolean; readonly version?: string } = {}): string[] {
-  return [
-    ...(options.permission === false ? [] : [permissionFlag(options.version)]),
-    `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`,
-    '--input-type=module',
-    '--eval',
-    BOOTSTRAP_SOURCE,
-  ]
+export function programArgs(options: { readonly permission?: boolean; readonly version?: string; readonly entryFile?: string; readonly inputFile?: string } = {}): string[] {
+  const permission = options.permission === false ? [] : [permissionFlag(options.version)]
+  if (options.entryFile !== undefined) {
+    // The permission model reads nothing, the entry module (and the message file) included, unless allowed.
+    const files = [options.entryFile, ...(options.inputFile === undefined ? [] : [options.inputFile])]
+    const allow = options.permission === false ? [] : files.map(file => `--allow-fs-read=${file}`)
+    return [...permission, ...allow, `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`, ...files]
+  }
+  return [...permission, `--max-old-space-size=${PTC_LIMITS.maxHeapMb}`, '--input-type=module', '--eval', BOOTSTRAP_SOURCE]
 }
 
 /** The program's environment: empty on POSIX; on Windows the startup variables only. */
@@ -140,7 +177,8 @@ export function programEnv(host: Readonly<Record<string, string | undefined>> = 
       if (value !== undefined) env[name] = value
     }
   }
-  if (process.versions.electron !== undefined) env.ELECTRON_RUN_AS_NODE = '1'
+  // An Electron executable (the desktop app's own, or any given as `nodePath`) runs as Node; Node ignores it.
+  env.ELECTRON_RUN_AS_NODE = '1'
   return env
 }
 
@@ -210,20 +248,29 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     return { status: 'cancelled', output: '', outputTruncated: false, error: { name: 'AbortError', message: 'cancelled before start' }, calls: 0, durationMs: 0 }
   }
 
-  const node = options.nodePath ?? process.execPath
-  const args = programArgs({ ...(options.permission === undefined ? {} : { permission: options.permission }) })
-  const env = programEnv()
+  const { node, args } = programCommand(options)
   const useJob = process.platform === 'win32' && options.windowsJob !== false
+  const launch = options.launch
+  const program = launch?.program ?? node
+  const programArgv = launch === undefined ? args : [...launch.args]
+  // The sandbox wrapper needs the host's environment to start (PATH, the user's profile on Windows), never secrets;
+  // the program inside it gets its own (POSIX: through the wrapper; Windows: set by the wrapped script).
+  const env = launch === undefined
+    ? programEnv()
+    : { ...(process.platform === 'win32' ? scrubEnv(process.env).env : { ...programEnv(), PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_USE_ENV_PROXY: '1' }), ...launch.env }
+  const inputFile = options.inputFile
+  if (inputFile !== undefined) writeFileSync(inputFile, '')
   let child: ChildProcess
   try {
-    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : node, useJob ? jobLauncherArgs() : args, {
+    child = spawn(useJob ? jobLauncherProgram(options) : program, useJob ? jobLauncherArgs() : programArgv, {
       cwd: options.cwd,
-      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(node, args, env)) } : env,
+      env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(program, programArgv, env)) } : env,
       detached: process.platform !== 'win32',
       windowsHide: true,
-      stdio: ['pipe', 'pipe', 'pipe'],
+      stdio: [inputFile === undefined ? 'pipe' : 'ignore', 'pipe', 'pipe'],
     })
   } catch (error) {
+    if (inputFile !== undefined) rmSync(inputFile, { force: true })
     throw new NexgentError('process/failed', `cannot start the program process: ${(error as Error).message}`, { cause: error })
   }
 
@@ -247,6 +294,14 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     outputTruncated = true
   }
   const send = (message: HostMessage): void => {
+    if (inputFile !== undefined) {
+      try {
+        appendFileSync(inputFile, `${JSON.stringify(message)}\n`)
+      } catch {
+        // the run is over (the file is gone)
+      }
+      return
+    }
     if (child.stdin?.writable !== true) return
     child.stdin.write(`${JSON.stringify(message)}\n`)
   }
@@ -324,7 +379,13 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     if (lineBuffer.length > maxLine) overflow()
   })
   const stderrDecoder = new StringDecoder('utf8')
-  child.stderr?.on('data', (chunk: Buffer) => append('stderr', stderrDecoder.write(chunk)))
+  // A program started through PowerShell (the Windows sandbox) gets its progress records on stderr: noise.
+  const progress = process.platform === 'win32' && launch !== undefined ? progressFilter() : undefined
+  child.stderr?.on('data', (chunk: Buffer) => {
+    const text = stderrDecoder.write(chunk)
+    const passed = progress === undefined ? text : progress.push(text)
+    if (passed !== '') append('stderr', passed)
+  })
 
   const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve, reject) => {
     child.once('error', reject)
@@ -356,16 +417,20 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     clearTimeout(timer)
     options.signal?.removeEventListener('abort', onAbort)
     life.abort()
+    if (inputFile !== undefined) rmSync(inputFile, { force: true })
     throw new NexgentError('process/failed', `cannot start the program process: ${(error as Error).message}`, { cause: error })
   }
   clearTimeout(timer)
   options.signal?.removeEventListener('abort', onAbort)
   life.abort()
   if (lineBuffer.trim() !== '') onLine(lineBuffer)
+  const restErr = progress?.flush() ?? ''
+  if (restErr !== '') append('stderr', restErr)
   // The program never starts children (no permission), but reap the group anyway.
   if (killing !== undefined) await killing
   if (treeAlive(child)) await kill()
   child.stdin?.destroy()
+  if (inputFile !== undefined) rmSync(inputFile, { force: true })
 
   if (ended === undefined) {
     const how = exit.signal === null ? `exit code ${String(exit.code)}` : `signal ${exit.signal}`

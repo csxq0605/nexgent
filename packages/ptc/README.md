@@ -1,6 +1,6 @@
 # @nexgent/ptc
 
-程序化工具调用（PTC）的 Node 后端：模型写的 JavaScript 在一个新的、隔离的 Node 进程里运行，只能通过宿主函数（stdio 上的 NDJSON 消息）接触项目；宿主按调用方会话的沙箱检查每次访问。对模型提供 `run_code` 工具（名字、schema、`effects`、`approval` 冻结在契约 `RUN_CODE_TOOL`，`packages/kernel/src/contracts/step3-tools.ts`）；`@nexgent/workflow` 的脚本也跑在同一运行时上。权限规则见 `docs/spec/permissions.md`。
+程序化工具调用（PTC）的 Node 后端：模型写的 JavaScript 在一个新的、隔离的 Node 进程里运行，只能通过宿主函数（NDJSON 消息：程序到宿主走 stdout，宿主到程序走 stdin；Windows 系统沙箱不给进程 stdin，那里改走会话临时目录里宿主追加、程序读取的消息文件 `inputFile`）接触项目；宿主按调用方会话的沙箱检查每次访问。对模型提供 `run_code` 工具（名字、schema、`effects`、`approval` 冻结在契约 `RUN_CODE_TOOL`，`packages/kernel/src/contracts/step3-tools.ts`）；`@nexgent/workflow` 的脚本也跑在同一运行时上。权限规则见 `docs/spec/permissions.md`。
 
 运行时依赖：Node 内置模块、`@nexgent/kernel`、`@nexgent/workspace`。DSH 的 `ptc` 包只参考了设计（宿主函数经 IPC、每次一个进程），没有复制代码。
 
@@ -21,6 +21,7 @@
 - **进程。** 每次调用起一个新进程：`node --permission`（Node 22.13 前为 `--experimental-permission`）`--max-old-space-size=512 --input-type=module --eval <引导代码>`，不给任何 fs、子进程、worker 授权；环境变量为空（Windows 只保留启动必需的 `SystemRoot` 等几项，Electron 宿主加 `ELECTRON_RUN_AS_NODE=1`），引导代码再清空 `process.env`。代码作为 async 函数体运行，`return` 的 JSON 值是结果。
 - **宿主函数。** 子进程只能通过宿主函数读写项目：每次访问都按调用方会话的沙箱（`withMode(mode).forSession(sessionId)`）判定，`deny` 报 `sandbox/denied`，`ask` 走审批，只读模式下写入被拒。`writeFile` 默认不覆盖已有文件（与 `write_file` 一致），要 `overwrite: true`。读写各上限 10 MiB，`listDir` 最多 2000 项。`readSpreadsheet` 返回计算后的值（日期为 ISO 字符串、错误为错误码）和公式；`writeSpreadsheet` 走 `@nexgent/tool-spreadsheet` 的写入工具。
 - **上限。** 超时默认 60 s（1–300 s，`run_code` 的 `timeoutMs`）；输出 64 000 字符后截断并标注；返回值 256 000 字符；单行消息 16 MiB，超出即判崩溃并杀进程。超时、取消、宿主崩溃都杀整个进程树：POSIX 用独立进程组，Windows 用 `@nexgent/workspace` 的 Job Object 启动器，退路为 `taskkill /T`。
+- **系统沙箱。** `run_code` 与函数模块经 `runConfinedProgram` 在调用方会话的系统沙箱里启动 Node（`@nexgent/workspace` 的 `confineProgram`：与 `bash` 同样的读保护与网络设置，只有会话临时目录可写；Windows 上以沙箱账户运行，引导代码写到会话临时目录的文件里再以 `--allow-fs-read` 加载）。进程内的 `fetch` 经沙箱的代理（`NODE_USE_ENV_PROXY=1`）。
 - **工具结果。** 一行状态与耗时、宿主调用次数，输出，返回值（JSON），错误时附栈（只保留用户代码的帧）。非 `completed` 的结果标为错误。
 
 ## Model Experience

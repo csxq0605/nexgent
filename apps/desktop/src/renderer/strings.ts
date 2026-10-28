@@ -247,6 +247,8 @@ export const T = {
   planModeHelp: '先只读查看并给出计划，你批准后才会改动文件',
   noOsSandbox: '命令未进系统沙箱',
   osSandboxOff: '系统沙箱已关闭',
+  installSandboxHelp: '安装系统沙箱（需要管理员确认一次）',
+  installingSandbox: '正在安装沙箱…',
   costCaps: '费用上限',
   perTask: '每个任务',
   perProject: '整个项目',

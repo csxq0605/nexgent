@@ -268,12 +268,46 @@ describe('threads under the coordinator\'s limits', () => {
     const threadId = (t.events.find(event => event.type === 'member.start' && event.sessionId === coordinator.sessionId) as Extract<SdkEvent, { type: 'member.start' }>).run.childSessionId
     expect(existsSync(nodePath.join(project.root, 'result.txt'))).toBe(false)
     const threadRecords = await recordsOf(t, project.projectId, threadId)
-    expect(threadRecords[0]).toMatchObject({ type: 'session.start', plan: true })
+    expect(threadRecords.find(record => record.type === 'session.mode')).toMatchObject({ plan: true, reason: 'coordinator' })
     expect(threadRecords.find(record => record.type === 'tool.result' && record.name === 'write_file')).toMatchObject({ isError: true, error: { code: 'sandbox/denied' } })
     // The user approves the coordinator's plan: its threads leave plan mode with it, without an approval of their own.
     await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: false })
     await expect.poll(async () => (await recordsOf(t, project.projectId, threadId)).findLast(record => record.type === 'session.mode'), { timeout: 3_000 })
       .toMatchObject({ plan: false, reason: 'plan-approved' })
+  })
+
+  it('keeps plan mode the user turned on for a thread when the coordinator gives it work or leaves its own plan mode', async () => {
+    let threadId = ''
+    const t = await threadSdk([
+      { toolCalls: [{ name: 'start_thread', arguments: { title: 'Worker', task: 'Look at the project.' } }] },
+      { content: 'Assigned.' },
+      { content: 'Noted.' },
+      () => ({ toolCalls: [{ name: 'message_thread', arguments: { thread: threadId, text: 'Write result.txt now.' } }] }),
+      { content: 'Asked.' },
+      { content: 'Noted.' },
+    ], {
+      Worker: [
+        { content: report('looked') },
+        { toolCalls: [{ name: 'write_file', arguments: { path: 'result.txt', content: 'changed' } }] },
+        { content: report('tried to write result.txt') },
+      ],
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    const firstRun = waitForEvent(t, event => event.type === 'member.start' && event.sessionId === coordinator.sessionId)
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Look around' })
+    threadId = ((await firstRun) as Extract<SdkEvent, { type: 'member.start' }>).run.childSessionId
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 2))
+    // The user puts the thread itself in plan mode; the coordinator going in and out of plan mode does not end it.
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: threadId, plan: true })
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: true })
+    await t.sdk.call('sessions.setMode', { projectId: project.projectId, sessionId: coordinator.sessionId, plan: false })
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Have it write the result' })
+    await waitForEvent(t, turnEnd(coordinator.sessionId, 4))
+    expect(existsSync(nodePath.join(project.root, 'result.txt'))).toBe(false)
+    const threadRecords = await recordsOf(t, project.projectId, threadId)
+    expect(threadRecords.filter(record => record.type === 'session.mode').map(record => [record.plan, record.reason])).toEqual([[true, 'host']])
+    expect(threadRecords.find(record => record.type === 'tool.result' && record.name === 'write_file')).toMatchObject({ isError: true, error: { code: 'sandbox/denied' } })
   })
 
   it('does not start an idle thread\'s next turn through message_thread while the most threads are running', async () => {

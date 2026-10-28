@@ -24,7 +24,7 @@ import type {
   SandboxPolicy,
 } from '@nexgent/kernel'
 import { nexgentHome } from '@nexgent/kernel'
-import { commandAskScopes, commandScript, isReadOnlyCommand, matchCommandRules, programName, type CommandMatch } from './command-policy.js'
+import { commandAskScopes, commandScript, commandSegments, isReadOnlyCommand, matchCommandRules, programName, type CommandMatch } from './command-policy.js'
 import { matchGlob } from './glob.js'
 import {
   HOST_FLAVOR,
@@ -144,7 +144,17 @@ export interface LocalSandboxPolicy extends SandboxPolicy {
    * {@link LocalSandbox.forSession}.
    */
   readonly tempSessionId?: string
+  /**
+   * Windows: whether commands run without system isolation for a session
+   * in `workspace-write` (no Windows sandbox, or `systemSandbox: 'off'`);
+   * then every command that is not read-only is asked
+   * ({@link UNCONFINED_COMMAND_DESCRIPTION}). Absent = never asked for this.
+   */
+  readonly commandsUnconfined?: () => Promise<boolean>
 }
+
+/** Why a command that is not read-only is asked when Windows has no isolation for it. */
+export const UNCONFINED_COMMAND_DESCRIPTION = 'runs without a system sandbox on Windows; it can write anywhere you can'
 
 /** Construction options for {@link createSandbox}. */
 export interface SandboxOptions {
@@ -164,6 +174,8 @@ export interface SandboxOptions {
   readonly tempBase?: string
   /** Command policy overrides. */
   readonly commands?: Partial<CommandPolicy>
+  /** See {@link LocalSandboxPolicy.commandsUnconfined}. */
+  readonly commandsUnconfined?: () => Promise<boolean>
 }
 
 function rootOf(path: string): string {
@@ -204,6 +216,7 @@ export async function createSandbox(options: SandboxOptions): Promise<LocalSandb
     protectedPaths: guarded,
     extraWriteRoots: extraWrite,
     commands,
+    ...(options.commandsUnconfined === undefined ? {} : { commandsUnconfined: options.commandsUnconfined }),
   }, extra)
 }
 
@@ -503,6 +516,9 @@ export class LocalSandbox implements Sandbox {
       ...(tempSession === undefined ? {} : { tempDir: nodePath.join(this.policy.tempBase, `${SESSION_TEMP_PREFIX}${tempSession}`) }),
       writeRoots: this.policy.extraWriteRoots,
     }).filter(hit => hit.alwaysAsk || mode !== 'full-access')
+    if (dialectPlatform === 'win32' && mode === 'workspace-write' && this.policy.commandsUnconfined !== undefined && await this.policy.commandsUnconfined()) {
+      hits.push(...unconfinedHits(script, hits))
+    }
     if (hits.length === 0) return { kind: 'allow', path: cwd }
     const { options, pattern, risk } = commandAskScopes(hits)
     return {
@@ -515,6 +531,23 @@ export class LocalSandbox implements Sandbox {
       matches: hits,
     }
   }
+}
+
+/**
+ * Pure: one ask per simple command of a Windows script that is not
+ * read-only and not already asked for; each may be remembered for the
+ * session or the project like any listed command.
+ */
+export function unconfinedHits(script: string, already: readonly CommandMatch[]): CommandMatch[] {
+  const asked = new Set(already.map(hit => hit.segment))
+  const hits: CommandMatch[] = []
+  for (const tokens of commandSegments(script)) {
+    const segment = tokens.join(' ')
+    if (segment === '' || asked.has(segment) || isReadOnlyCommand(segment, 'win32')) continue
+    asked.add(segment)
+    hits.push({ kind: 'unconfined', risk: 'medium', alwaysAsk: false, pattern: segment, segment, allowedScopes: ['once', 'session', 'project'], description: UNCONFINED_COMMAND_DESCRIPTION })
+  }
+  return hits
 }
 
 /** Map a three-way assessment onto the contract's decision: `ask` is `approval-required` carrying what to ask. */

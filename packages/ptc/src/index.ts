@@ -9,6 +9,7 @@
 export * from './protocol.js'
 export { BOOTSTRAP_SOURCE, HOST_GONE_EXIT } from './bootstrap.js'
 export * from './runtime.js'
+export * from './confined.js'
 export * from './functions.js'
 export * from './tool.js'
 export { apply, name, PtcPlugin } from './plugin.js'

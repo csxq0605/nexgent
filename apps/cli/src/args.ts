@@ -8,6 +8,7 @@
  * nexgent resume <sessionId> --project <dir> [--task "<text>"] [--sandbox <mode>] [--json]
  * nexgent export <sessionId> --project <dir> [--out <dir>] [--json]
  * nexgent app [--project <dir>]
+ * nexgent sandbox install
  * nexgent --version | --help | <command> --help
  * ```
  *
@@ -19,7 +20,7 @@ import { DEFAULT_PROJECT_CONFIG, SANDBOX_MODES, type SandboxMode } from '@nexgen
 import { CliError, EXIT } from './exit-codes.js'
 
 /** Subcommands, in help order. */
-export const COMMANDS = ['run', 'resume', 'export', 'app'] as const
+export const COMMANDS = ['run', 'resume', 'export', 'app', 'sandbox'] as const
 
 /** One of {@link COMMANDS}. */
 export type Command = (typeof COMMANDS)[number]
@@ -68,6 +69,12 @@ export interface AppInvocation {
   readonly project?: string
 }
 
+/** `nexgent sandbox install`: set up the system sandbox for commands (Windows: one administrator prompt). */
+export interface SandboxInvocation {
+  readonly command: 'sandbox'
+  readonly action: 'install'
+}
+
 /** `--help`, globally or for one command. */
 export interface HelpInvocation {
   readonly command: 'help'
@@ -80,7 +87,7 @@ export interface VersionInvocation {
 }
 
 /** Everything {@link parseCliArgs} can return. */
-export type Invocation = RunInvocation | ResumeInvocation | ExportInvocation | AppInvocation | HelpInvocation | VersionInvocation
+export type Invocation = RunInvocation | ResumeInvocation | ExportInvocation | AppInvocation | SandboxInvocation | HelpInvocation | VersionInvocation
 
 /** The task `resume` sends when `--task` is omitted. */
 export const RESUME_DEFAULT_TASK = 'Continue the previous task from where it stopped.'
@@ -113,6 +120,7 @@ const ACCEPTED: Readonly<Record<Command, readonly OptionName[]>> = {
   resume: ['project', 'task', 'sandbox', 'json'],
   export: ['project', 'out', 'json'],
   app: ['project'],
+  sandbox: [],
 }
 
 function usageError(message: string): CliError {
@@ -169,6 +177,12 @@ export function parseCliArgs(argv: readonly string[]): Invocation {
     const project = optionalText('project', values.project)
     return project === undefined ? { command } : { command, project }
   }
+  if (command === 'sandbox') {
+    const [action, extra] = positionals
+    if (action !== 'install') throw usageError(action === undefined ? 'nexgent sandbox needs an action: install' : `unknown sandbox action "${action}"`)
+    if (extra !== undefined) throw usageError(`nexgent sandbox install takes no more arguments, got "${extra}"`)
+    return { command, action }
+  }
   const project = requireText('project', values.project)
   const sandbox = parseSandbox(values.sandbox)
   const json = values.json === true
@@ -220,6 +234,7 @@ export function usage(): string {
     '  resume   continue a saved session',
     '  export   write the minimal export bundle of a session',
     '  app      launch the desktop app',
+    '  sandbox  set up the system sandbox for commands (`nexgent sandbox install`)',
     '',
     'Options:',
     '  -v, --version  print the version',
@@ -281,6 +296,14 @@ export function commandUsage(command: Command): string {
         '',
         'Launch the desktop app (apps/desktop, or NEXGENT_DESKTOP_DIR), optionally on a',
         'project. Exits with 2 when the desktop app is not built or installed.',
+      ].join('\n')
+    case 'sandbox':
+      return [
+        'Usage: nexgent sandbox install',
+        '',
+        'Set up the system sandbox that confines model-run commands. On Windows this',
+        'creates a dedicated local account and a network filter, behind one',
+        'administrator prompt. Elsewhere the sandbox needs no setup.',
       ].join('\n')
   }
 }

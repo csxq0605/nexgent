@@ -84,7 +84,7 @@ function fullAccessWarning(stderr: TextSink, event: CliEvent): void {
   }
   // ADR 0022 decision 1: say once when commands run without an OS sandbox; never claim one that is not there.
   const status = event.commandSandbox
-  if (status?.kind === 'none') stderr.write(`nexgent: note: commands run without an OS sandbox here (${status.reason}); the command policy still applies\n`)
+  if (status?.kind === 'none') stderr.write(`nexgent: note: commands run without an OS sandbox here (${status.reason}); the command policy still applies${status.installable === true ? '; run `nexgent sandbox install` to set it up' : ''}\n`)
   if (status?.kind === 'off') stderr.write('nexgent: note: the OS sandbox for commands is turned off in this project (commands.systemSandbox: off)\n')
 }
 

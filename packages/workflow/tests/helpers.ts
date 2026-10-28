@@ -104,6 +104,7 @@ export async function workflowContext(options: { signal?: AbortSignal; member?: 
   const root = await tempDir()
   const services = await createWorkspaceServices({ root, sandboxMode: 'workspace-write' })
   const records: SessionRecord[] = []
+  const asks: unknown[] = []
   let seq = 1
   const context: ToolContext = {
     sessionId: 'parent-session',
@@ -113,13 +114,16 @@ export async function workflowContext(options: { signal?: AbortSignal; member?: 
     sandboxMode: 'workspace-write',
     signal: options.signal ?? new AbortController().signal,
     approved: false,
-    requestApproval: async () => false,
+    requestApproval: async ask => {
+      asks.push(ask)
+      return false
+    },
     appendRecord: async (record: ToolRecordInput) => {
       records.push({ ...record, seq: ++seq, ts: new Date().toISOString() } as SessionRecord)
     },
     ...(options.member === true ? { member: { name: 'm', executionForm: 'delegated' as const } } : {}),
   }
-  return { root: services.workspace.root, context, records }
+  return { root: services.workspace.root, context, records, asks, sandbox: services.sandbox, services }
 }
 
 /** The records of one type. */

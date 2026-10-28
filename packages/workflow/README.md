@@ -1,6 +1,6 @@
 # @nexgent/workflow
 
-工作流：`workflow` 工具在前台编排多个成员（子会话，`executionForm: workflow`），等全部结束后把每个成员的状态、回复、成果与脚本的返回值交回父会话。编排写成脚本（`agent()`、`parallel()`、`pipeline()`、`phase()`、`log()`、`args`）或声明式图；脚本跑在 `@nexgent/ptc` 的隔离进程里，并发与成员数上限由宿主执行。名字与 schema 冻结在契约 `WORKFLOW_TOOL`（`packages/kernel/src/contracts/step3-tools.ts`）；记录格式见 `docs/spec/data-formats.md` §工作流、§子会话与成员。
+工作流：`workflow` 工具在前台编排多个成员（子会话，`executionForm: workflow`），等全部结束后把每个成员的状态、回复、成果与脚本的返回值交回父会话。编排写成脚本（`agent()`、`parallel()`、`pipeline()`、`phase()`、`log()`、`args`）或声明式图；脚本跑在 `@nexgent/ptc` 的隔离进程里，`ctx.sandbox` 装载时进调用方会话的系统沙箱（与 `run_code` 相同）；并发与成员数上限由宿主执行。名字与 schema 冻结在契约 `WORKFLOW_TOOL`（`packages/kernel/src/contracts/step3-tools.ts`）；记录格式见 `docs/spec/data-formats.md` §工作流、§子会话与成员。
 
 运行时依赖：Node 内置模块、`@nexgent/kernel`、`@nexgent/preset`、`@nexgent/ptc`、`@nexgent/subagent`。`src/architecture.ts` 与 `src/architecture-store.ts` 改写自 DSH `packages/workflow/tool-workflow`（经 PR #4，`refactor/dsh-application` `fd0b2f42`），见头注与 `THIRD_PARTY_NOTICES.md`；其余只参考了设计。
 
@@ -9,7 +9,7 @@
 | Export | What it does |
 | --- | --- |
 | `WorkflowPlugin` / `apply` / `name` | 行名 `@nexgent/workflow`；有 `ctx.tools` 与 `ctx.agents` 时注册 `workflow`，成员经 `agentsMemberRunner` 跑 |
-| `workflowTool({ runner, ptc?, maxConcurrentMembers?, maxMembers? })` | 工具本身 |
+| `workflowTool({ runner, ptc?, maxConcurrentMembers?, maxMembers?, sandbox? })` | 工具本身 |
 | `runWorkflow(options)`、`WORKFLOW_PRELUDE` | 运行一段工作流脚本，写 `workflow.*` 记录 |
 | `agentsMemberRunner(agents)`、`WorkflowMemberRunner`、`renderWorkflowMemberPrompt`、`memberPreset` | 成员运行器：`@nexgent/subagent` 的 `runMember` |
 | `normalizeArchitecture`、`compileArchitecture`、`prepareArchitecture`、`architectureVersion` | 图的检查、编译为脚本、内容版本（sha256） |

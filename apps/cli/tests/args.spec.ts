@@ -35,6 +35,13 @@ describe('parseCliArgs', () => {
     })
   })
 
+  it('parses sandbox install', () => {
+    expect(parseCliArgs(['sandbox', 'install'])).toEqual({ command: 'sandbox', action: 'install' })
+    expect(() => parseCliArgs(['sandbox'])).toThrow(CliError)
+    expect(() => parseCliArgs(['sandbox', 'remove'])).toThrow(CliError)
+    expect(() => parseCliArgs(['sandbox', 'install', '--project', 'p'])).toThrow(CliError)
+  })
+
   it('parses export with and without --out', () => {
     expect(parseCliArgs(['export', SID, '--project', 'p'])).toEqual({ command: 'export', sessionId: SID, project: 'p', json: false })
     expect(parseCliArgs(['export', SID, '--project', 'p', '--out', 'bundle', '--json'])).toEqual({ command: 'export', sessionId: SID, project: 'p', out: 'bundle', json: true })

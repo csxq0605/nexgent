@@ -31,11 +31,12 @@ import {
   type JsonValue,
   type MemberResult,
   type SessionRecordInput,
+  type ToolContext,
   type ToolRecordInput,
   type ToolRestriction,
   type WorkflowStatus,
 } from '@nexgent/kernel'
-import { runProgram, type HostFunction, type ProgramResult, type RunProgramOptions } from '@nexgent/ptc'
+import { runConfinedProgram, runProgram, type HostFunction, type ProgramResult, type RunProgramOptions } from '@nexgent/ptc'
 import type { MemberRun } from '@nexgent/subagent'
 import type { WorkflowMemberRunner } from './runner.js'
 
@@ -128,6 +129,18 @@ export interface RunWorkflowOptions {
   readonly ptc?: Pick<RunProgramOptions, 'nodePath' | 'permission' | 'windowsJob' | 'pwshPath'>
   /** Fixed id (tests); default a new UUID v4. */
   readonly workflowId?: string
+  /**
+   * The calling session's sandbox (`ctx.sandbox`) and tool context: the
+   * script process runs inside the same system sandbox as `bash` and
+   * `run_code` (`permissions.md` §代码执行进程). Absent = not confined.
+   */
+  readonly confine?: { readonly sandbox: object; readonly context: ToolContext; readonly label: string }
+}
+
+/** The `confine` option for a tool call, when the project's sandbox is loaded. */
+export function confineFor(sandbox: (() => object | undefined) | undefined, context: ToolContext, label: string): { confine?: NonNullable<RunWorkflowOptions['confine']> } {
+  const current = sandbox?.()
+  return current === undefined ? {} : { confine: { sandbox: current, context, label } }
 }
 
 /** The outcome of {@link runWorkflow}. */
@@ -357,7 +370,7 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
 
   let program: ProgramResult
   try {
-    program = await runProgram({
+    const programOptions: RunProgramOptions = {
       ...options.ptc,
       code: options.script,
       cwd: options.cwd,
@@ -367,7 +380,10 @@ export async function runWorkflow(options: RunWorkflowOptions): Promise<Workflow
       timeoutMs: options.timeoutMs ?? WORKFLOW_TIMEOUT_MS,
       unboundedTimeout: true,
       signal: options.signal,
-    })
+    }
+    program = options.confine === undefined
+      ? await runProgram(programOptions)
+      : await runConfinedProgram(options.confine.sandbox, options.confine.context, options.confine.label, programOptions)
   } catch (error) {
     program = { status: 'crashed', output: '', outputTruncated: false, error: { name: 'Error', message: toErrorInfo(error).message }, calls: 0, durationMs: 0 }
   }

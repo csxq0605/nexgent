@@ -4,10 +4,13 @@
 import { mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
-import { MEMBER_WORKDIRS_DIR, NexgentError, SANDBOX_MODES, type ApprovalGrant, type Context, type SandboxMode, type ToolRegistry } from '@nexgent/kernel'
+import { MEMBER_WORKDIRS_DIR, NexgentError, SANDBOX_MODES, type ApprovalGrant, type CommandSandboxInstallResult, type CommandSandboxStatus, type Context, type SandboxMode, type ToolRegistry } from '@nexgent/kernel'
 import { loadProjectConfig, type LoadedProjectConfig, type SystemSandboxSetting } from './config.js'
+import { registerConfinement } from './confine.js'
+import { commandAllowList } from './network-policy.js'
 import { createOsSandbox, type OsSandbox, type OsSandboxStatus } from './os-sandbox.js'
 import { BackgroundShells, LocalProcessRunner, type ProcessRunnerOptions } from './process.js'
+import { createWindowsSandbox } from './windows-sandbox.js'
 import { Redactor } from './redact.js'
 import { createSandbox, OUTSIDE_WRITE_GRANT, type LocalSandbox } from './sandbox.js'
 import { memberCopyRoot, type WorkspaceTool } from './tools/common.js'
@@ -50,7 +53,9 @@ export interface WorkspaceServices {
   /** Background commands of every session (ADR 0022 decision 6). */
   readonly background: BackgroundShells
   /** Whether commands run in an OS sandbox here; resolves once the trial command ran. */
-  commandSandbox(): Promise<{ kind: 'active'; platform: string } | { kind: 'none'; reason: string } | { kind: 'off' }>
+  commandSandbox(): Promise<CommandSandboxStatus>
+  /** Where the sandbox needs a one-time install (Windows, one administrator prompt): run it, then report the new status. */
+  installCommandSandbox(): Promise<CommandSandboxInstallResult>
   /** End background commands and release the OS sandbox. */
   dispose(): Promise<void>
   readonly processes: LocalProcessRunner
@@ -70,6 +75,12 @@ export async function createWorkspaceServices(options: WorkspaceServicesOptions)
   // Created now so the read root below resolves to its real path (macOS: /var -> /private/var).
   const workdirs = nodePath.join(options.tempBase ?? tmpdir(), MEMBER_WORKDIRS_DIR)
   await mkdir(workdirs, { recursive: true }).catch(() => undefined)
+  const setting = options.systemSandbox ?? config.commands.systemSandbox
+  // Windows: restricted token + ACLs (`windows-sandbox.ts`); macOS / Linux: seatbelt / bubblewrap.
+  const osSandbox = setting === 'off' ? undefined
+    : options.osSandbox ?? (process.platform === 'win32' ? createWindowsSandbox() : createOsSandbox())
+  // The sandbox keeps its own answer (and looks again after an install).
+  const probe = (sandbox: OsSandbox): Promise<OsSandboxStatus> => sandbox.probe()
   const sandbox = await createSandbox({
     root: workspace.root,
     mode: options.sandboxMode ?? config.sandboxMode,
@@ -81,9 +92,11 @@ export async function createWorkspaceServices(options: WorkspaceServicesOptions)
       workdirs,
     ],
     extraWriteRoots: config.extraWriteRoots,
-    commands: { network: config.commands.network },
+    commands: { network: config.commands.network !== 'off' },
     ...(options.home === undefined ? {} : { nexgentHome: options.home }),
     ...(options.tempBase === undefined ? {} : { tempBase: options.tempBase }),
+    // Windows without isolation: commands that are not read-only are asked.
+    ...(process.platform === 'win32' ? { commandsUnconfined: async () => osSandbox === undefined || (await probe(osSandbox)).kind !== 'active' } : {}),
   })
   const redactor = new Redactor(options.secrets ?? [])
   const runnerOptions: ProcessRunnerOptions = {
@@ -93,8 +106,6 @@ export async function createWorkspaceServices(options: WorkspaceServicesOptions)
   }
   const processes = new LocalProcessRunner(runnerOptions)
   const background = new BackgroundShells(runnerOptions)
-  const setting = options.systemSandbox ?? config.commands.systemSandbox
-  const osSandbox = setting === 'off' ? undefined : options.osSandbox ?? createOsSandbox()
   const os: ShellSandboxDeps | undefined = osSandbox === undefined ? undefined : {
     sandbox: osSandbox,
     inputs: context => ({
@@ -109,7 +120,7 @@ export async function createWorkspaceServices(options: WorkspaceServicesOptions)
       // The project's materials and outputs live in the user data directory; commands may read them (not write).
       ...(workspace.layout.location === 'user-data' ? { allowRead: [workspace.layout.materials, workspace.layout.outputs] } : {}),
       extraDenyWrite: sandbox.policy.protectedPaths,
-      network: config.commands.network,
+      network: { mode: config.commands.network, allowedDomains: commandAllowList(config.commands.network, config.commands.allowedDomains, context.grants?.() ?? []) },
     }),
     // Running outside the sandbox is asked every time: high risk, once only.
     approveUnsandboxed: (context, { command, cwd }) => context.requestApproval({
@@ -120,16 +131,23 @@ export async function createWorkspaceServices(options: WorkspaceServicesOptions)
       subject: { kind: 'command', value: command },
     }),
   }
+  // run_code and function modules confine their process the same way (`confine.ts`).
+  if (os !== undefined) registerConfinement(sandbox, os, options.tempBase)
   const deps = { sandbox, redactor, processes, background, ...(os === undefined ? {} : { os }), ...(options.tempBase === undefined ? {} : { tempBase: options.tempBase }) }
   const tools = createWorkspaceTools(deps, options.platform)
-  let status: Promise<OsSandboxStatus> | undefined
   return {
     workspace, config, sandbox, processes, redactor, tools, background,
     commandSandbox: async () => {
       if (osSandbox === undefined) return { kind: 'off' }
-      status ??= osSandbox.probe()
-      const found = await status
-      return found.kind === 'active' ? { kind: 'active', platform: found.platform } : { kind: 'none', reason: found.reason }
+      const found = await probe(osSandbox)
+      return found.kind === 'active' ? { kind: 'active', platform: found.platform } : { kind: 'none', reason: found.reason, ...(found.installable === true ? { installable: true } : {}) }
+    },
+    installCommandSandbox: async () => {
+      if (osSandbox?.install === undefined) return { kind: 'failed', reason: 'this platform has nothing to install for the command sandbox' }
+      const result = await osSandbox.install()
+      if (result.kind !== 'installed') return result
+      const found = result.status
+      return { kind: 'installed', status: found.kind === 'active' ? { kind: 'active', platform: found.platform } : { kind: 'none', reason: found.reason, ...(found.installable === true ? { installable: true } : {}) } }
     },
     dispose: async () => {
       background.disposeAll()

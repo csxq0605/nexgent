@@ -340,7 +340,7 @@ export const sessionRecordSchema: JsonObject = {
         commandSandbox: {
           oneOf: [
             closedObject({ kind: { const: 'active' }, platform: ref('nonEmptyString') }, ['kind', 'platform']),
-            closedObject({ kind: { const: 'none' }, reason: { type: 'string' } }, ['kind', 'reason']),
+            closedObject({ kind: { const: 'none' }, reason: { type: 'string' }, installable: { type: 'boolean' } }, ['kind', 'reason']),
             closedObject({ kind: { const: 'off' } }, ['kind']),
           ],
         },
@@ -349,7 +349,7 @@ export const sessionRecordSchema: JsonObject = {
     ),
     sessionModeRecord: record(
       'session.mode',
-      { sandboxMode: ref('sandboxMode'), plan: { type: 'boolean' }, reason: { enum: ['host', 'plan-approved'] } },
+      { sandboxMode: ref('sandboxMode'), plan: { type: 'boolean' }, reason: { enum: ['host', 'plan-approved', 'coordinator'] } },
       ['sandboxMode', 'plan', 'reason'],
     ),
     userMessageRecord: record(

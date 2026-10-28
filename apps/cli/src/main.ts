@@ -6,8 +6,9 @@
 import { existsSync } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import * as path from 'node:path'
-import { isNexgentError, NexgentError } from '@nexgent/kernel'
+import { isNexgentError, NexgentError, type CommandSandboxInstallResult } from '@nexgent/kernel'
 import { createSdk } from '@nexgent/sdk'
+import { installCommandSandbox } from '@nexgent/workspace'
 import { launchDesktop, type AppLaunchOptions } from './app-launch.js'
 import { createApprovalResponder, type AnswerSource } from './approval.js'
 import { commandUsage, parseCliArgs, RESUME_DEFAULT_TASK, usage, type Invocation } from './args.js'
@@ -47,6 +48,8 @@ export interface CliDeps {
   readonly launchDesktop?: (options: AppLaunchOptions) => Promise<unknown>
   /** How long a run waits for its background learning before exiting; default {@link LEARNING_WAIT_MS}. */
   readonly learningWaitMs?: number
+  /** Default: `@nexgent/workspace` `installCommandSandbox`. */
+  readonly installCommandSandbox?: () => Promise<CommandSandboxInstallResult>
 }
 
 /** Rework D3: the longest a run waits after its turn for background learning (10 minutes). */
@@ -110,6 +113,19 @@ export async function main(argv: readonly string[], io: CliIo = processIo(), dep
         await (deps.launchDesktop ?? launchDesktop)({ env: io.env, ...(project === undefined ? {} : { project }) })
         io.stderr.write(`nexgent: desktop app started${project === undefined ? '' : ` on ${project}`}\n`)
         return EXIT.OK
+      }
+      case 'sandbox': {
+        const result = await (deps.installCommandSandbox ?? installCommandSandbox)()
+        if (result.kind === 'installed') {
+          io.stdout.write(result.status.kind === 'active' ? `nexgent: system sandbox ready (${result.status.platform})\n` : 'nexgent: system sandbox installed\n')
+          return EXIT.OK
+        }
+        if (result.kind === 'cancelled') {
+          io.stderr.write('nexgent: sandbox install cancelled\n')
+          return EXIT.ENVIRONMENT
+        }
+        io.stderr.write(`nexgent: sandbox install failed: ${result.reason}\n`)
+        return EXIT.ENVIRONMENT
       }
       case 'export':
         renderer = createRenderer(invocation.json ? 'json' : 'text', io.stdout, io.stderr)

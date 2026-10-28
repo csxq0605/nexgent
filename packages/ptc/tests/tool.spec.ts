@@ -4,12 +4,15 @@
  * host's `.nexgent/` data, and follow the session's mode.
  */
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { RUN_CODE_TOOL, type SandboxMode, type ToolContext } from '@nexgent/kernel'
 import { createWorkspaceServices } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { runCodeTool } from '../src/index.js'
+import { runCodeTool, type RunCodeToolOptions } from '../src/index.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -22,7 +25,7 @@ async function tempDir(prefix = 'nexgent-ptc-tool-'): Promise<string> {
   return dir
 }
 
-async function setup(mode: SandboxMode = 'workspace-write') {
+async function setup(mode: SandboxMode = 'workspace-write', toolOptions: RunCodeToolOptions = {}) {
   const root = await tempDir()
   const services = await createWorkspaceServices({ root, sandboxMode: mode })
   await services.workspace.ensureLayout()
@@ -35,10 +38,13 @@ async function setup(mode: SandboxMode = 'workspace-write') {
       return options.approve ?? false
     },
   })
-  const tool = runCodeTool(services.sandbox)
+  const tool = runCodeTool(services.sandbox, toolOptions)
   const run = (code: string, options: Parameters<typeof context>[0] = {}, extra: Record<string, unknown> = {}) => tool.handler({ code, ...extra }, context(options))
-  return { root: services.workspace.root, tool, run, asks }
+  return { root: services.workspace.root, tool, run, asks, services }
 }
+
+const windowsSandbox = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
+const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
 
 describe('run_code', () => {
   it('uses the contract name, schema, effects and approval', async () => {
@@ -118,7 +124,8 @@ describe('run_code', () => {
 
   it('reports a timeout and a failure as errors with the output so far', async () => {
     const { run } = await setup()
-    const slow = await run('console.log("before"); await new Promise(() => {})', {}, { timeoutMs: 1_000 })
+    // The deadline counts from the start; in the Windows sandbox starting takes about a second.
+    const slow = await run('console.log("before"); await new Promise(() => {})', {}, { timeoutMs: windowsSandbox ? 10_000 : 1_000 })
     expect(slow.isError).toBe(true)
     expect(slow.content).toMatch(/^Timed out after \d+ ms/)
     expect(slow.content).toContain('before')
@@ -128,4 +135,30 @@ describe('run_code', () => {
     expect(thrown.content).toContain('RangeError: too far')
     await expect(run('1', {}, { timeoutMs: 10 })).rejects.toMatchObject({ code: 'tool/invalid-input' })
   })
+
+  it.skipIf(!hasBwrap)('runs in the system sandbox: a host off the allow list is put to the session', async () => {
+    const { run, asks } = await setup()
+    const output = await run(`
+      try { await fetch('http://nexgent-check.invalid/'); return 'reached' } catch (error) { return 'refused' }`)
+    expect(output.isError).toBe(false)
+    expect(output.content).toContain('"refused"')
+    expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: run_code' })])
+  })
+
+  // Node, and Electron running as Node as the desktop app does (a GUI-subsystem program).
+  const electron = () => createRequire(fileURLToPath(new URL('../../../apps/desktop/package.json', import.meta.url)))('electron') as string
+  it.runIf(windowsSandbox).each([['node', undefined], ['Electron', electron]] as const)('runs in the Windows sandbox and calls host functions (srt-win gives the process no stdin): %s', async (_name, nodePath) => {
+    const { root, run, services } = await setup('workspace-write', nodePath === undefined ? {} : { nodePath: nodePath() })
+    try {
+      expect(await services.commandSandbox()).toMatchObject({ kind: 'active' })
+      const output = await run(`await writeFile('made.txt', 'from the sandbox'); console.log('logged'); return await readFile('made.txt')`)
+      expect(output.isError, output.content).toBe(false)
+      expect(output.content).toContain('"from the sandbox"')
+      expect(output.content).toContain('logged')
+      expect(output.content).not.toContain('CLIXML')
+      expect(await readFile(join(root, 'made.txt'), 'utf8')).toBe('from the sandbox')
+    } finally {
+      await services.dispose()
+    }
+  }, 180_000)
 })

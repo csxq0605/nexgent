@@ -15,15 +15,27 @@
  *   old value checked); both changed it differently, a conflict (the project
  *   keeps its own). A refresh brings the project's changes into the copy
  *   where the member left that part alone.
+ * - The checked-out part (the index, `HEAD`, and the branch `HEAD` names)
+ *   is accepted only together with the work files it describes: when a
+ *   path it changes does not hold the member's version in the project
+ *   after the files were merged (a file conflict kept the project's), it
+ *   is held back as a conflict, so the project's work files, index and
+ *   `HEAD` never disagree. Other branches and tags do not touch the work
+ *   files and are merged on their own.
  * - Only a project whose `.git` is a directory, and only when `git` runs.
  *
  * Nothing here depends on the kind of task.
  */
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { copyFile, cp, lstat, mkdir, readdir, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, cp, lstat, mkdir, readdir, readFile, readlink, rename, rm, stat, writeFile } from 'node:fs/promises'
 import * as nodePath from 'node:path'
 import type { WorkdirConflict } from '@nexgent/kernel'
+
+/** A repository conflict, with the member's value (a ref's or `HEAD`'s target, or the tree its index wrote) when it had one. */
+export interface GitConflict extends WorkdirConflict {
+  readonly theirs?: string
+}
 
 /** The repository state compared between the copy and the project. */
 export interface GitState {
@@ -168,21 +180,29 @@ export class WorkdirGit {
     return copy !== undefined && !sameState(copy, base)
   }
 
-  /** Bring what the member did to the repository into the project; returns the new base and the conflicts. */
-  async merge(base: GitState): Promise<{ readonly base: GitState; readonly applied: readonly string[]; readonly conflicts: readonly WorkdirConflict[] }> {
+  /**
+   * Bring what the member did to the repository into the project (after its
+   * files were merged); returns the new base and the conflicts.
+   */
+  async merge(base: GitState): Promise<{ readonly base: GitState; readonly applied: readonly string[]; readonly conflicts: readonly GitConflict[] }> {
     const [copy, project] = await Promise.all([gitState(this.copy), gitState(this.project)])
     if (copy === undefined || project === undefined) return { base, applied: [], conflicts: [] }
     const applied: string[] = []
-    const conflicts: WorkdirConflict[] = []
+    const conflicts: GitConflict[] = []
     if (sameState(copy, base)) return { base, applied, conflicts }
     // New objects first (the index's tree is written in the copy so it goes along); refs and the index only point to objects the project has.
-    const indexTree = copy.index !== base.index ? (await git(this.copy, ['write-tree']))?.trim() : undefined
+    const indexTree = (await git(this.copy, ['write-tree']))?.trim() || undefined
     await copyMissing(nodePath.join(this.copy, '.git', 'objects'), nodePath.join(this.project, '.git', 'objects'))
-    let index = base.index
+    const checkedOut = new Set([base.head, copy.head, project.head].filter(head => head.startsWith('ref:')).map(head => head.slice(4)))
+    const touchesWorkTree = copy.index !== base.index || copy.head !== base.head || [...checkedOut].some(name => copy.refs[name] !== base.refs[name])
+    const landed = !touchesWorkTree || (await this.landed(indexTree))
+    const held = (path: string, theirs: string | undefined): void => {
+      conflicts.push({ path, kind: 'both-changed', ...(theirs === undefined || theirs === '' ? {} : { theirs }) })
+    }
     if (copy.index !== base.index) {
-      if (project.index === base.index && indexTree !== undefined && indexTree !== '' && (await git(this.project, ['read-tree', indexTree])) !== undefined) applied.push('.git/index')
-      else if (project.index !== copy.index) conflicts.push({ path: '.git/index', kind: 'both-changed' })
-      index = copy.index
+      if (!landed) held('.git/index', indexTree)
+      else if (project.index === base.index && indexTree !== undefined && (await git(this.project, ['read-tree', indexTree])) !== undefined) applied.push('.git/index')
+      else if (project.index !== copy.index) held('.git/index', indexTree)
     }
     const refs: Record<string, string> = { ...base.refs }
     for (const name of new Set([...Object.keys(base.refs), ...Object.keys(copy.refs)])) {
@@ -190,25 +210,57 @@ export class WorkdirGit {
       const theirs = copy.refs[name]
       if (theirs === before) continue
       const ours = project.refs[name]
-      if (ours === before) {
+      if (checkedOut.has(name) && !landed) held(`.git/${name}`, theirs)
+      else if (ours === before) {
         if (await setRef(this.project, name, theirs, before)) applied.push(`.git/${name}`)
-        else conflicts.push({ path: `.git/${name}`, kind: 'both-changed' })
+        else held(`.git/${name}`, theirs)
       } else if (ours !== theirs) {
-        conflicts.push({ path: `.git/${name}`, kind: theirs === undefined ? 'deleted-by-member' : ours === undefined ? 'deleted-in-project' : 'both-changed' })
+        conflicts.push({ path: `.git/${name}`, kind: theirs === undefined ? 'deleted-by-member' : ours === undefined ? 'deleted-in-project' : 'both-changed', ...(theirs === undefined ? {} : { theirs }) })
       }
       // The copy counts as in sync with the member's value; a refresh gives it the project's where they differ.
       if (theirs === undefined) delete refs[name]
       else refs[name] = theirs
     }
     if (copy.head !== base.head) {
-      if (project.head === base.head) {
+      if (!landed) held('.git/HEAD', copy.head)
+      else if (project.head === base.head) {
         if (await setHead(this.project, copy.head)) applied.push('.git/HEAD')
-        else conflicts.push({ path: '.git/HEAD', kind: 'both-changed' })
+        else held('.git/HEAD', copy.head)
       } else if (project.head !== copy.head) {
-        conflicts.push({ path: '.git/HEAD', kind: 'both-changed' })
+        held('.git/HEAD', copy.head)
       }
     }
-    return { base: { head: copy.head, refs, index }, applied, conflicts }
+    return { base: { head: copy.head, refs, index: copy.index }, applied, conflicts }
+  }
+
+  /**
+   * Whether every path the copy's checked-out part changes against the
+   * project's (index entries, and the commit `HEAD` points to) holds the
+   * member's version in the project's work tree too. Run after the
+   * member's objects were copied into the project.
+   */
+  private async landed(copyIndexTree: string | undefined): Promise<boolean> {
+    const projectIndexTree = (await git(this.project, ['write-tree']))?.trim() || undefined
+    if (projectIndexTree === undefined || copyIndexTree === undefined) return false
+    const paths = new Set<string>()
+    const add = (listed: string | undefined): boolean => {
+      if (listed === undefined) return false
+      for (const path of listed.split('\0')) if (path !== '') paths.add(path)
+      return true
+    }
+    if (!add(await git(this.project, ['diff-tree', '-r', '--name-only', '-z', projectIndexTree, copyIndexTree]))) return false
+    const [projectHead, copyHead] = await Promise.all([headTree(this.project), headTree(this.copy)])
+    if (projectHead !== copyHead) {
+      const listed = projectHead === undefined || copyHead === undefined
+        ? await git(this.project, ['ls-tree', '-r', '--name-only', '-z', (projectHead ?? copyHead)!])
+        : await git(this.project, ['diff-tree', '-r', '--name-only', '-z', projectHead, copyHead])
+      if (!add(listed)) return false
+    }
+    for (const path of paths) {
+      const [ours, theirs] = await Promise.all([fileBytes(nodePath.join(this.project, path)), fileBytes(nodePath.join(this.copy, path))])
+      if (ours === undefined ? theirs !== undefined : theirs === undefined || !ours.equals(theirs)) return false
+    }
+    return true
   }
 
   /** Bring the project's repository changes into the copy where the member left that part alone; returns the new base. */
@@ -232,6 +284,22 @@ export class WorkdirGit {
       index = (await gitState(this.copy))?.index ?? base.index
     }
     return { head, refs, index }
+  }
+}
+
+/** The tree of the commit `HEAD` points to (`undefined` before the first commit). */
+async function headTree(dir: string): Promise<string | undefined> {
+  return (await git(dir, ['rev-parse', '--verify', '-q', 'HEAD^{tree}']))?.trim() || undefined
+}
+
+/** A work file's bytes (a link's target), or `undefined` when it is absent. */
+async function fileBytes(path: string): Promise<Buffer | undefined> {
+  try {
+    const info = await lstat(path)
+    if (info.isSymbolicLink()) return Buffer.from(`link:${await readlink(path)}`)
+    return info.isFile() ? await readFile(path) : undefined
+  } catch {
+    return undefined
   }
 }
 

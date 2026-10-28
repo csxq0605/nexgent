@@ -3,12 +3,19 @@
  * `pipeline` / `phase` / `log`, the concurrency and member bounds, member
  * failure, cancellation, graphs, and recovery planning.
  */
+import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { COLLABORATION_LIMITS, WORKFLOW_TOOL, type SessionRecord } from '@nexgent/kernel'
 import { describe, expect, it } from 'vitest'
 import { planWorkflowRecovery, workflowTool } from '../src/index.js'
 import { FakeRunner, ofType, workflowContext } from './helpers.js'
+
+const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
+
+const windowsSandbox = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
@@ -252,4 +259,31 @@ describe('workflow recovery planning', () => {
     ])
     expect(planWorkflowRecovery(records.slice(4))).toEqual([])
   })
+
+  it.skipIf(!hasBwrap)('runs the script in the system sandbox: a host off the allow list is put to the session', async () => {
+    const { context, asks, sandbox } = await workflowContext()
+    const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox }).handler({
+      script: `try { await fetch('http://nexgent-check.invalid/'); return 'reached' } catch { return 'refused' }`,
+    }, context)
+    expect(output.content).toContain('refused')
+    expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: workflow' })])
+  })
+
+  // Node, and Electron running as Node as the desktop app does (a GUI-subsystem program).
+  const electron = () => createRequire(fileURLToPath(new URL('../../../apps/desktop/package.json', import.meta.url)))('electron') as string
+  it.runIf(windowsSandbox).each([['node', undefined], ['Electron', electron]] as const)('runs the script in the Windows sandbox and talks to the host (srt-win gives it no stdin): %s', async (_name, nodePath) => {
+    const { context, sandbox, services } = await workflowContext()
+    try {
+      expect(await services.commandSandbox()).toMatchObject({ kind: 'active' })
+      const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox, ...(nodePath === undefined ? {} : { ptc: { nodePath: nodePath() } }) }).handler({
+        script: `const [a, b] = await parallel([() => agent('first', { name: 'one' }), () => agent('second', { name: 'two' })]); log('both', a.text, b.text); return [a.text, b.text]`,
+      }, context)
+      expect(output.isError, output.content).toBe(false)
+      expect(output.content).toContain('one done')
+      expect(output.content).toContain('two done')
+      expect(output.content).not.toContain('CLIXML')
+    } finally {
+      await services.dispose()
+    }
+  }, 180_000)
 })

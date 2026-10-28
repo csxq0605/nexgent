@@ -18,6 +18,8 @@ export const HOST_GONE_EXIT = 70
 
 /** The bootstrap module source. Kept free of template-literal syntax. */
 export const BOOTSTRAP_SOURCE = String.raw`
+import { openSync, readSync } from 'node:fs'
+import { StringDecoder } from 'node:string_decoder'
 import { format } from 'node:util'
 const rawWrite = process.stdout.write.bind(process.stdout)
 const send = message => rawWrite(JSON.stringify(message) + '\n')
@@ -138,17 +140,45 @@ const handle = message => {
 }
 
 let buffer = ''
-process.stdin.setEncoding('utf8')
-process.stdin.on('data', chunk => {
-  buffer += chunk
+const feed = text => {
+  buffer += text
   let index
   while ((index = buffer.indexOf('\n')) >= 0) {
     const line = buffer.slice(0, index)
     buffer = buffer.slice(index + 1)
     if (line.trim() !== '') handle(JSON.parse(line))
   }
-})
-process.stdin.on('end', () => {
-  if (!finished) process.exit(70)
-})
+}
+
+const inputFile = process.argv[2]
+if (typeof inputFile === 'string' && inputFile !== '') {
+  // Host messages come from a file the host appends to (a sandbox that gives the process no stdin).
+  const decoder = new StringDecoder('utf8')
+  const chunk = Buffer.alloc(65536)
+  let fd
+  let offset = 0
+  const poll = () => {
+    if (finished) return
+    let read = 0
+    try {
+      fd ??= openSync(inputFile, 'r')
+      let n
+      while ((n = readSync(fd, chunk, 0, chunk.length, offset)) > 0) {
+        offset += n
+        read += n
+        feed(decoder.write(chunk.subarray(0, n)))
+      }
+    } catch (error) {
+      if (fd !== undefined) return finish(false, error)
+    }
+    setTimeout(poll, read > 0 ? 0 : !booted || pending.size > 0 ? 5 : 50)
+  }
+  poll()
+} else {
+  process.stdin.setEncoding('utf8')
+  process.stdin.on('data', feed)
+  process.stdin.on('end', () => {
+    if (!finished) process.exit(70)
+  })
+}
 `
