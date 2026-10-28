@@ -46,7 +46,7 @@ import {
   type SandboxManagerLike,
 } from './os-sandbox.js'
 import { currentPowerShell } from './shell-check.js'
-import { buildRestrictLauncher, randomCapabilitySid, restrictingSids, type RestrictTools } from './windows-restrict.js'
+import { buildRestrictLauncher, randomCapabilitySid, launcherArgument, restrictingSids, type RestrictTools } from './windows-restrict.js'
 
 /** The slice of the library's `SandboxManager` used on Windows. */
 export interface WindowsManagerLike extends Pick<SandboxManagerLike, 'registerCommandNetworkLists' | 'unregisterCommandNetworkLists' | 'cleanupAfterCommand' | 'reset'> {
@@ -474,7 +474,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
         registerNetwork({ manager: b.lib.manager, gate: b.gate }, policy)
         const { argv, env } = await b.lib.manager.wrapWithSandboxArgv(
           sandboxScript(script, { CURL_HOME: b.tools.dir, ...policy.env }, isWindowsPowerShell(exe)),
-          { exe: b.tools.launcher, args: [restrictingSids(readOnly, caps), exe, '-NoProfile', '-NonInteractive', '-Command'] },
+          { exe: b.tools.launcher, args: [launcherArgument(restrictingSids(readOnly, caps), policy.env?.['TEMP'] ?? policy.env?.['TMP']), exe, '-NoProfile', '-NonInteractive', '-Command'] },
           { filesystem: { denyRead: plan.denyRead, denyWrite: plan.denyWrite } },
           signal,
           policy.cwd,

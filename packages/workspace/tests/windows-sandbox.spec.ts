@@ -13,6 +13,7 @@ import {
   isWindowsPowerShell,
   planWindowsAccess,
   PROGRESS_OFF,
+  launcherArgument,
   restrictingSids,
   RESTRICT_SOURCE,
   sandboxScript,
@@ -57,6 +58,8 @@ describe('Windows access plan', () => {
     expect(RESTRICT_SOURCE).toContain('",S-1-1-0,S-1-5-12"')
     expect(RESTRICT_SOURCE).toContain('CreateRestrictedToken(token, 0x1 | 0x8')
     expect(RESTRICT_SOURCE).toContain('0xC0000000')
+    expect(launcherArgument('USER', 'C:\\T')).toBe('USER|C:\\T')
+    expect(launcherArgument('USER', undefined)).toBe('USER')
   })
 
   it('reads tool folders under the profile, never the profile itself or a protected path', () => {
@@ -168,7 +171,7 @@ describe('createWindowsSandbox', () => {
     // Leftovers of a crashed process are cleared, the launcher's folder is readable, then the project is granted.
     expect(recovered).toEqual(['S-1-5-21-1-2-3-1001'])
     expect(grants.map(grant => [grant.sid, grant.write, grant.read])).toEqual([['S-1-5-21-1-2-3-1001', [], ['C:\\T']], ['S-1-5-21-1-2-3-1001', [project], expect.any(Array)]])
-    expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['USER', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
+    expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['USER|T', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
     expect(wraps[0]!.command).toContain(PROGRESS_OFF)
     expect(wraps[0]!.command).toContain("[Environment]::SetEnvironmentVariable('CURL_HOME', 'C:\\T')")
     expect(wraps[0]!.command.endsWith("[Environment]::SetEnvironmentVariable('TEMP', 'T')\nnpm test")).toBe(true)
@@ -186,10 +189,11 @@ describe('createWindowsSandbox', () => {
   it('lets a read-only command write only where its own capability SID is granted, and takes every grant back on dispose', async () => {
     const { temp, sandbox, policy, grants, revoked, wraps } = await setup({ provisioned: true })
     await sandbox.wrap('npm test', policy('c1'))
-    await sandbox.wrap('node x.mjs', policy('c2', { writeRoots: [temp], denyWrite: [], readOnly: true }))
+    await sandbox.wrap('node x.mjs', policy('c2', { writeRoots: [temp], denyWrite: [], readOnly: true, env: { TEMP: temp } }))
     const capability = grants.find(grant => grant.sid !== 'S-1-5-21-1-2-3-1001')!
     expect(capability.write).toEqual([temp])
-    expect((wraps[1]!.shell as { args: string[] }).args[0]).toBe(capability.sid)
+    // The shell starts with TEMP set to that directory (PowerShell needs a writable TEMP to keep its full language).
+    expect((wraps[1]!.shell as { args: string[] }).args[0]).toBe(`${capability.sid}|${temp}`)
     expect((wraps[1]!.config as { filesystem: { denyWrite: string[] } }).filesystem.denyWrite).toEqual([])
     await sandbox.wrap('node y.mjs', policy('c3', { writeRoots: [temp], denyWrite: [], readOnly: true }))
     expect(grants.filter(grant => grant.sid === capability.sid)).toHaveLength(1)

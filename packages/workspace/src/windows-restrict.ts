@@ -22,7 +22,7 @@ import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-/** C# 5 (what Windows PowerShell's `Add-Type` compiles). Usage: `nexgent-restrict.exe <sid>[,<sid>...] <command line>`; `USER` names the caller's own SID. */
+/** C# 5 (what Windows PowerShell's `Add-Type` compiles). Usage: `nexgent-restrict.exe <sid>[,<sid>...][|<temp dir>] <command line>`; `USER` names the caller's own SID. */
 export const RESTRICT_SOURCE = `using System;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -127,6 +127,16 @@ public static class NexgentRestrict {
     int end = TokenEnd(line, i);
     string sidList = line.Substring(i, end - i).Trim('"');
     string rest = line.Substring(SkipSpaces(line, end));
+    // "<sids>|<temp dir>": the shell's TEMP and TMP from its first moment (PowerShell checks its language
+    // mode by writing a file to TEMP, and the account's own temp folder is not writable to a read-only command).
+    int bar = sidList.IndexOf('|');
+    if (bar >= 0) {
+      string temp = sidList.Substring(bar + 1);
+      sidList = sidList.Substring(0, bar);
+      // A quoted argument ending in a backslash had it doubled before the closing quote.
+      if (line[i] == '"' && temp.EndsWith("\\\\\\\\")) temp = temp.Substring(0, temp.Length - 1);
+      if (temp.Length > 0) { Environment.SetEnvironmentVariable("TEMP", temp); Environment.SetEnvironmentVariable("TMP", temp); }
+    }
     if (sidList.Length == 0 || rest.Length == 0) { Console.Error.WriteLine("nexgent-sandbox: usage: <sids> <command line>"); return 9010; }
 
     IntPtr token;
@@ -196,35 +206,45 @@ export function restrictingSids(readOnly: boolean, capabilities: readonly string
   return [...(readOnly ? [] : ['USER']), ...capabilities].join(',') || 'S-1-5-12'
 }
 
+/** Pure: the launcher's first argument: the restricting SIDs, and the temp directory the shell starts with. */
+export function launcherArgument(sids: string, temp: string | undefined): string {
+  return temp === undefined || temp === '' ? sids : `${sids}|${temp}`
+}
+
 /** Pure: a random SID for one write directory (a capability: no account has it). */
 export function randomCapabilitySid(): string {
   const parts = Array.from({ length: 4 }, () => randomBytes(4).readUInt32LE(0))
   return `S-1-5-21-${parts.join('-')}`
 }
 
-let building: Promise<RestrictTools> | undefined
+const building = new Map<string, Promise<RestrictTools>>()
 
 /** Compile the launcher once (per source version) into the temp folder. Rejects when it cannot be built. */
-export function buildRestrictLauncher(base: string = tmpdir()): Promise<RestrictTools> {
-  building ??= build(base).catch((error: unknown) => {
-    building = undefined
-    throw error
-  })
-  return building
+export function buildRestrictLauncher(base: string = tmpdir(), source: string = RESTRICT_SOURCE): Promise<RestrictTools> {
+  const key = `${base}\u0000${source}`
+  let pending = building.get(key)
+  if (pending === undefined) {
+    pending = build(base, source).catch((error: unknown) => {
+      building.delete(key)
+      throw error
+    })
+    building.set(key, pending)
+  }
+  return pending
 }
 
-async function build(base: string): Promise<RestrictTools> {
-  const hash = createHash('sha256').update(RESTRICT_SOURCE).update(SANDBOX_CURLRC).digest('hex').slice(0, 16)
+async function build(base: string, source: string): Promise<RestrictTools> {
+  const hash = createHash('sha256').update(source).update(SANDBOX_CURLRC).digest('hex').slice(0, 16)
   const dir = join(base, 'nexgent-sandbox-tools', hash)
   const launcher = join(dir, 'nexgent-restrict.exe')
   if (existsSync(launcher) && existsSync(join(dir, '_curlrc'))) return { launcher, dir }
   await mkdir(dir, { recursive: true })
   await writeFile(join(dir, '_curlrc'), SANDBOX_CURLRC)
-  const source = join(dir, 'nexgent-restrict.cs')
-  await writeFile(source, RESTRICT_SOURCE)
+  const file = join(dir, 'nexgent-restrict.cs')
+  await writeFile(file, source)
   const partial = join(dir, `nexgent-restrict-${randomBytes(4).toString('hex')}.exe`)
   const quote = (text: string) => `'${text.replaceAll("'", "''")}'`
-  const script = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition ([IO.File]::ReadAllText(${quote(source)})) -OutputAssembly ${quote(partial)} -OutputType ConsoleApplication`
+  const script = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition ([IO.File]::ReadAllText(${quote(file)})) -OutputAssembly ${quote(partial)} -OutputType ConsoleApplication`
   const system = process.env.SystemRoot ?? 'C:\\Windows'
   const powershell = join(system, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   await new Promise<void>((resolve, reject) => {
