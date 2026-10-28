@@ -8,12 +8,12 @@ Each task directory holds `instruction.md` (the task text), `environment/Dockerf
   prepare: build each chosen task's image as `nexgent-bench/<task>:harbor`, with `/testbed` linked to the
            repository so every agent works in `/testbed`; write JSON lines with `instance_id`, `repo`,
            `image`, `image_name` (the same, for mini-SWE-agent), `problem_statement` (instruction.md),
-           `language`, `task_dir`.
+           `language`, `task_dir`, `patch` (the reference fix).
   grade:   for each prediction, start the task image, apply the patch in `/testbed`,
            run `tests/test.sh` and read the reward; write a report with `resolved_ids` like the
            SWE-bench harness.
 
-  harbor_tasks.py prepare --tasks <dataset dir> --out <jsonl> [--per-language N --seed S | --ids ...]
+  harbor_tasks.py prepare --tasks <dataset dir> --out <jsonl> [--per-language N --seed S | --ids ...] [--mirror <registry>]
   harbor_tasks.py grade --instances <jsonl> --predictions <predictions.jsonl|preds.json> --report <json>
 """
 import argparse
@@ -44,12 +44,23 @@ def repo_dir(base_image):
     return found
 
 
-def build(task_dir, task):
+def pull(image, mirror):
+    """Pull an image, through `mirror` (tagged back under its own name) when one is given."""
+    if sh(['docker', 'image', 'inspect', image]).returncode == 0:
+        return True
+    if mirror:
+        path = image.removeprefix('docker.io/')
+        if sh(['docker', 'pull', '-q', f'{mirror}/{path}']).returncode == 0:
+            return sh(['docker', 'tag', f'{mirror}/{path}', image]).returncode == 0
+    return sh(['docker', 'pull', '-q', image]).returncode == 0
+
+
+def build(task_dir, task, mirror=None):
     """The task's own Dockerfile plus a `/testbed` link to the repository and no entrypoint, so every runner
     can start it with its own command (built with network: it fetches `uv`)."""
     dockerfile = open(os.path.join(task_dir, 'environment', 'Dockerfile')).read()
     base = next(line.split()[1] for line in dockerfile.splitlines() if line.startswith('FROM '))
-    if sh(['docker', 'image', 'inspect', base]).returncode != 0 and sh(['docker', 'pull', '-q', base]).returncode != 0:
+    if not pull(base, mirror):
         raise RuntimeError(f'cannot pull {base}')
     repo = repo_dir(base)
     link = '' if repo == '/testbed' else f'\nRUN ln -s {repo} /testbed\n'
@@ -84,7 +95,7 @@ def prepare(args):
     with open(args.out, 'w') as out:
         for t in chosen:
             task_dir = os.path.join(root, t)
-            repo = build(task_dir, t)
+            repo = build(task_dir, t, args.mirror)
             out.write(json.dumps({
                 'instance_id': t,
                 'repo': configs[t]['repo'],
@@ -94,6 +105,8 @@ def prepare(args):
                 'language': configs[t].get('language'),
                 'repo_dir': repo,
                 'task_dir': os.path.abspath(task_dir),
+                # The reference fix, for the free scripted-gold check of run.mjs only; agents see only the problem statement.
+                'patch': configs[t].get('patch', ''),
             }) + '\n')
             print(f'{t}: built {image_tag(t)} (repository at {repo})', flush=True)
 
@@ -162,6 +175,7 @@ def main():
     p.add_argument('--per-language', type=int, default=4)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--ids', nargs='*')
+    p.add_argument('--mirror', help='registry to pull the base images through, e.g. mirror.gcr.io')
     g = sub.add_parser('grade')
     g.add_argument('--instances', required=True)
     g.add_argument('--predictions', required=True)
