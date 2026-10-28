@@ -26,6 +26,7 @@ import type {
   ActivationRevision,
   ActivationTrigger,
   ApprovalDecision,
+  CommandSandboxInstallResult,
   CommandSandboxStatus,
   CapabilityComponentRef,
   CapabilityVersion,
@@ -720,6 +721,8 @@ export interface SdkMethods {
   'learning.status': (input: { readonly projectId: string }) => Promise<LearningStatus>
   /** API 8: the user acknowledged the background-learning notice (user level; idempotent, keeps the first time). */
   'learning.acknowledge': (input: Record<string, never>) => Promise<UserSettings>
+  /** Install the command sandbox where it needs it (`commandSandbox.installable`; Windows: one administrator prompt). Sessions use it from their next command. */
+  'commandSandbox.install': (input: Record<string, never>) => Promise<CommandSandboxInstallResult>
 }
 
 /** An IPC method name. */
@@ -787,6 +790,7 @@ export const SDK_METHOD_NAMES = [
   'handbook.setStatus',
   'learning.status',
   'learning.acknowledge',
+  'commandSandbox.install',
 ] as const satisfies readonly SdkMethodName[]
 
 /** The in-process SDK object (CLI and desktop main process). */

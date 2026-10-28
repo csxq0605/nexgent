@@ -32,6 +32,8 @@ export type CommandRuleKind =
   | 'download-exec'
   | 'system'
   | 'discard-changes'
+  /** Windows without a system sandbox: any command that is not read-only (`sandbox.ts`). */
+  | 'unconfined'
 
 /** One rule hit. */
 export interface CommandMatch {

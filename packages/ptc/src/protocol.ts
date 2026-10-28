@@ -1,6 +1,8 @@
 /**
  * Messages between the host and a PTC program process: newline-delimited
- * JSON, host → program on the program's stdin, program → host on its stdout.
+ * JSON, host → program on the program's stdin (or, where a sandbox gives the
+ * process no stdin, a file the host appends to: `RunProgramOptions.inputFile`),
+ * program → host on its stdout.
  * The program's own `console` / `process.stdout` / `process.stderr` writes
  * are wrapped into `log` messages by the bootstrap, so stdout carries only
  * frames. Model code runs in that process and can write anything, so the

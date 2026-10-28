@@ -4,7 +4,8 @@ name: Windows acceptance
 # accept-step3 headless and desktop layers (D01–D10 are step 2's desktop items
 # as a regression) and the desktop package's tests (UI e2e included).
 # accept-step4/5/6 left with the old improvement and gate code. No real-model
-# step. Manual only, from the Actions tab. Uploads the summary.
+# step. Manual only, from the Actions tab. Uploads the summary. Installs the
+# Windows command sandbox first and checks it with real commands.
 on:
   workflow_dispatch:
 
@@ -16,7 +17,7 @@ jobs:
   windows:
     name: windows-latest
     runs-on: windows-latest
-    timeout-minutes: 300
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
@@ -45,6 +46,29 @@ jobs:
         timeout-minutes: 10
       - run: pnpm build
         timeout-minutes: 10
+
+      # Installs the system sandbox for commands (the runner is elevated: no prompt) and runs commands in it;
+      # the steps below then run their commands sandboxed too.
+      - name: Windows command sandbox (install + real commands)
+        id: sandbox
+        timeout-minutes: 10
+        env:
+          NEXGENT_WINDOWS_SANDBOX_TEST: '1'
+          # The runner's C: reports as a network drive, where the sandbox account cannot start; work on D:.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: pnpm --filter @nexgent/workspace exec vitest run tests/windows-sandbox-real.spec.ts tests/windows-sandbox.spec.ts
+
+      # With the sandbox installed every run_code / workflow test runs sandboxed; the first ones set it up (slow).
+      - name: run_code and workflow scripts in the command sandbox
+        timeout-minutes: 10
+        env:
+          NEXGENT_WINDOWS_SANDBOX_TEST: '1'
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          pnpm --filter @nexgent/ptc exec vitest run tests/tool.spec.ts tests/runtime.spec.ts --testTimeout=60000
+          pnpm --filter @nexgent/workflow exec vitest run tests/workflow.spec.ts --testTimeout=60000
 
       - name: accept-step3 headless + desktop
         id: hd

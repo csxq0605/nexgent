@@ -224,8 +224,10 @@ interface Side {
   readonly usd: number
 }
 
+/** The settled runs of one side: a run still waiting for its threads has no outcome yet, so it counts neither for nor against. */
 function side(runs: readonly FoldedRun[]): Side {
-  return { n: runs.length, good: runs.filter(wentWell).length, usd: runs.reduce((sum, run) => sum + run.usd, 0) }
+  const settled = runs.filter(run => run.waiting !== true)
+  return { n: settled.length, good: settled.filter(wentWell).length, usd: settled.reduce((sum, run) => sum + run.usd, 0) }
 }
 
 /** Pure: the verdict of a class's runs. */

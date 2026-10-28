@@ -47,7 +47,7 @@ import {
 import { prepareArchitecture } from './architecture.js'
 import { buildOrganizationProfile, threadRunCount, type ProfileInput } from './profile.js'
 import type { WorkflowMemberRunner } from './runner.js'
-import { runWorkflow, type RunWorkflowOptions, type WorkflowMemberSummary } from './runtime.js'
+import { confineFor, runWorkflow, type RunWorkflowOptions, type WorkflowMemberSummary } from './runtime.js'
 
 // ---------------------------------------------------------------------------
 // deciding whether members help
@@ -488,6 +488,8 @@ export interface OrganizeToolOptions {
   readonly ptc?: RunWorkflowOptions['ptc']
   readonly maxConcurrentMembers?: number
   readonly maxMembers?: number
+  /** The project's sandbox (`ctx.sandbox`) when loaded: the script process runs in the session's system sandbox. */
+  readonly sandbox?: () => object | undefined
 }
 
 /** Per root session: the organization its current turn runs, and how many in a row made no progress. */
@@ -589,6 +591,7 @@ export function organizeTool(options: OrganizeToolOptions): Tool {
         ...(options.ptc === undefined ? {} : { ptc: options.ptc }),
         ...(options.maxConcurrentMembers === undefined ? {} : { maxConcurrentMembers: options.maxConcurrentMembers }),
         ...(options.maxMembers === undefined ? {} : { maxMembers: options.maxMembers }),
+        ...confineFor(options.sandbox, context, 'organize'),
       })
       const progress = roleProgress(input.roles, result.members)
       state.stalls = progress.some(role => role.ok) ? 0 : state.stalls + 1

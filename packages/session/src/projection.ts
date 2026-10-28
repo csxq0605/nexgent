@@ -207,6 +207,8 @@ function applyRecord(draft: Draft, record: SessionRecord): void {
       meta.sandboxMode = record.sandboxMode
       if (record.plan) meta.plan = true
       else delete meta.plan
+      if (record.plan && record.reason === 'coordinator') meta.planFromCoordinator = true
+      else delete meta.planFromCoordinator
       break
     case 'goal.set':
       meta.goal = record.goal

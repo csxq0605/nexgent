@@ -42,6 +42,8 @@ Windows 上任务里的每条命令都经 PowerShell 执行。找不到 PowerShe
 - 检查：`pwsh -NoProfile -Command '$PSVersionTable.PSVersion'` 应显示 7.x。
 - 装好后重启 Nexgent。
 
+Windows 上的命令沙箱要装一次：桌面输入框旁显示“命令未进系统沙箱”时点它，或在终端运行 `nexgent sandbox install`，确认一次管理员弹窗即可。它新建一个本地账户 `srt-sandbox` 和一条网络过滤规则，命令以这个账户运行，只能读写项目和会话临时目录，联网只经域名白名单。装在用户目录下的工具（如 nvm 装的 Node）要在 `PATH` 上才能在沙箱里用。
+
 ---
 
 ## 4. 打包（未签名）

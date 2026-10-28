@@ -127,6 +127,15 @@ describe('organization library', () => {
     expect(summarizeOrganizations(decided)[0]).toMatchObject({ verdict: 'team-better', soloRuns: 5, teamRuns: 5, organization: 'plan-build-review', soloGood: 0.2, teamGood: 1, costChange: 0 })
   })
 
+  it('leaves runs still waiting for their threads out of the comparison until they settle', () => {
+    const solo = Array.from({ length: 5 }, () => run({ decision: 'solo' }))
+    const pending = Array.from({ length: 5 }, () => run({ organization: planBuild, waiting: true }))
+    expect(classVerdict([...solo, ...pending])).toBe('comparing')
+    expect(summarizeOrganizations([...solo, ...pending])[0]).toMatchObject({ verdict: 'comparing', soloRuns: 5, teamRuns: 0 })
+    // The same team runs once settled count as they went.
+    expect(classVerdict([...solo, ...pending.map(({ waiting: _waiting, ...r }) => ({ ...r, completed: false }))])).toBe('solo-better')
+  })
+
   it('suggests the organization that went well with its roles, and weighs cost', () => {
     const failedCustom = run({ organization: { name: 'custom', roles: [{ name: 'x', kind: 'implement', after: [] }] }, checks: { passed: 0, total: 1 } })
     const good = run({ organization: planBuild })
