@@ -25,7 +25,7 @@
  * start): a directory granted for writing stays writable for later
  * sandboxed commands of this process, except read-only ones.
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
@@ -45,6 +45,8 @@ import {
   type OsSandboxWrap,
   type SandboxManagerLike,
 } from './os-sandbox.js'
+import { currentPowerShell } from './shell-check.js'
+import { buildRestrictLauncher, randomCapabilitySid, restrictingSids, type RestrictTools } from './windows-restrict.js'
 
 /** The slice of the library's `SandboxManager` used on Windows. */
 export interface WindowsManagerLike extends Pick<SandboxManagerLike, 'registerCommandNetworkLists' | 'unregisterCommandNetworkLists' | 'cleanupAfterCommand' | 'reset'> {
@@ -65,8 +67,12 @@ export interface SrtWinLike {
   readonly exe: string
   /** The sandbox account; `sid` once it is provisioned. */
   userStatus(): Promise<{ readonly provisioned: boolean; readonly credPresent: boolean; readonly sid?: string }>
-  /** Additive, process-held ACEs for the account. Throws when `srt-win` fails. */
+  /** Additive, process-held ACEs for a SID (the account, or a capability SID). Throws when `srt-win` fails. */
   grant(sandboxUserSid: string, write: readonly string[], read: readonly string[]): void
+  /** Remove this process's ACEs for a SID. Never throws. */
+  revoke(sandboxUserSid: string): void
+  /** Remove ACEs that processes which have ended left behind (a crash). Never throws. */
+  recover(sandboxUserSid: string): void
   /** The one-time machine install (one administrator prompt). */
   install(): Promise<{ readonly cancelled?: true }>
 }
@@ -75,6 +81,8 @@ export interface SrtWinLike {
 export interface WindowsLibrary {
   readonly manager: WindowsManagerLike
   readonly srt: SrtWinLike
+  /** The write-restricted launcher (`windows-restrict.ts`). */
+  tools(): Promise<RestrictTools>
 }
 
 async function loadLibrary(): Promise<WindowsLibrary> {
@@ -87,11 +95,22 @@ async function loadLibrary(): Promise<WindowsLibrary> {
       exe,
       userStatus: () => lib.getWindowsSandboxUserStatusAsync({ srtWin: srtWin() }),
       grant: (sandboxUserSid, write, read) => lib.grantWindowsAcl({ sandboxUserSid, write, read, srtWin: srtWin() }),
+      revoke: sandboxUserSid => {
+        try {
+          lib.revokeWindowsAcl({ sandboxUserSid, srtWin: srtWin() })
+        } catch {
+          // best effort
+        }
+      },
+      recover: sandboxUserSid => {
+        spawnSync(exe, [lib.SRT_WIN_DISPATCH_ARG1, 'acl', 'recover', '--sandbox-user-sid', sandboxUserSid], { windowsHide: true, timeout: 60_000, stdio: 'ignore' })
+      },
       install: async () => {
         const result = await lib.installWindowsSandboxAsync({ srtWin: srtWin() })
         return result.cancelled === true ? { cancelled: true } : {}
       },
     },
+    tools: () => buildRestrictLauncher(),
   }
 }
 
@@ -104,6 +123,7 @@ interface WinBackend {
   readonly failure?: string
   readonly installable?: boolean
   readonly sid?: string
+  readonly tools?: RestrictTools
 }
 
 // One per process: the library's manager is a singleton. `generation` moves on after an install.
@@ -113,14 +133,30 @@ let loader: () => Promise<WindowsLibrary> = loadLibrary
 // What this process granted the account already, by comparable path.
 const grantedWrite = new Map<string, string>()
 const grantedRead = new Set<string>()
+// The capability SID of each directory a read-only command wrote to, and every SID this process granted to.
+const capabilities = new Map<string, string>()
+const grantees = new Set<string>()
+let exitHook: (() => void) | undefined
+
+function forgetGrants(): void {
+  grantedWrite.clear()
+  grantedRead.clear()
+  capabilities.clear()
+  grantees.clear()
+}
+
+/** Take back every ACE this process granted (the library's `reset()` only takes back what its own config stamped). */
+function revokeAll(lib: WindowsLibrary | undefined): void {
+  if (lib !== undefined) for (const sid of grantees) lib.srt.revoke(sid)
+  forgetGrants()
+}
 
 /** Tests: the library to use instead of `@anthropic-ai/sandbox-runtime`; resets the process state. */
 export function setWindowsSandboxLibrary(load: (() => Promise<WindowsLibrary>) | undefined): void {
   loader = load ?? loadLibrary
   shared = undefined
   generation += 1
-  grantedWrite.clear()
-  grantedRead.clear()
+  forgetGrants()
 }
 
 /** Pure: a Windows path for comparing (case and trailing separators ignored). */
@@ -171,17 +207,19 @@ export interface WindowsAccessPlan {
   readonly grantRead: string[]
   /** Paths the command may not read (existing, below a granted directory). */
   readonly denyRead: string[]
-  /** Paths the command may not write: its protected paths, and in read-only mode every directory granted for writing that is not its own. */
+  /** Paths the command may not write (existing, below a granted directory). */
   readonly denyWrite: string[]
 }
 
 /**
  * Pure: the grants and per-command denies for one command, given what the
  * process granted before (`heldWrite` and `heldRead` by {@link windowsKey})
- * and which paths exist.
+ * and which paths exist. A read-only command needs no denies for the
+ * directories granted for writing: its token only writes where its own
+ * capability SIDs are granted (`windows-restrict.ts`).
  */
 export function planWindowsAccess(
-  policy: { readonly writeRoots: readonly string[]; readonly readRoots: readonly string[]; readonly denyWrite: readonly string[]; readonly denyRead: readonly string[]; readonly readOnly: boolean },
+  policy: { readonly writeRoots: readonly string[]; readonly readRoots: readonly string[]; readonly denyWrite: readonly string[]; readonly denyRead: readonly string[] },
   heldWrite: ReadonlyMap<string, string>,
   heldRead: ReadonlySet<string>,
   exists: (path: string) => boolean,
@@ -190,30 +228,50 @@ export function planWindowsAccess(
   const grantRead = policy.readRoots.filter(root => !heldRead.has(windowsKey(root)) && !heldWrite.has(windowsKey(root)) && !grantWrite.some(write => windowsKey(write) === windowsKey(root)))
   const granted = [...heldWrite.values(), ...grantWrite, ...policy.readRoots]
   const below = (path: string) => granted.some(root => windowsWithin(root, path))
-  const denyRead = policy.denyRead.filter(path => exists(path) && below(path))
-  const denyWrite = policy.denyWrite.filter(path => exists(path) && below(path))
-  if (policy.readOnly) {
-    for (const root of heldWrite.values()) {
-      // Never deny a directory at or above the command's own write roots: that would take them away too.
-      if (policy.writeRoots.some(own => windowsWithin(root, own))) continue
-      if (!denyWrite.some(path => windowsKey(path) === windowsKey(root))) denyWrite.push(root)
-    }
+  return {
+    grantWrite,
+    grantRead,
+    denyRead: policy.denyRead.filter(path => exists(path) && below(path)),
+    denyWrite: policy.denyWrite.filter(path => exists(path) && below(path)),
   }
-  return { grantWrite, grantRead, denyRead, denyWrite }
 }
 
-/** The shell for the library: an absolute `pwsh.exe` / `powershell.exe` with our flags when it can be found. */
-function shellFor(shell: string | undefined): string | { exe: string; args: readonly string[] } {
-  const flags = ['-NoProfile', '-NonInteractive', '-Command']
-  const name = shell ?? 'pwsh'
-  if (nodePath.win32.isAbsolute(name)) return { exe: name, args: flags }
+/** Progress records would reach stderr as CLIXML noise on every command. */
+export const PROGRESS_OFF = "$ProgressPreference = 'SilentlyContinue'"
+
+/**
+ * Windows PowerShell 5.1 (.NET Framework) does not read `HTTPS_PROXY` /
+ * `HTTP_PROXY`, so `Invoke-WebRequest` and `WebClient` would connect
+ * directly and hit the network filter: point its default proxy at the
+ * sandbox's proxy, with the credentials in the URL.
+ */
+export const WINDOWS_POWERSHELL_PROXY = [
+  "$__nxp = if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { $env:HTTP_PROXY }",
+  "if ($__nxp) { $__nxu = [Uri]$__nxp; $__nxw = New-Object System.Net.WebProxy(('{0}://{1}:{2}' -f $__nxu.Scheme, $__nxu.Host, $__nxu.Port)); if ($__nxu.UserInfo) { $__nxi = $__nxu.UserInfo.Split([char]':', 2); $__nxw.Credentials = New-Object System.Net.NetworkCredential([Uri]::UnescapeDataString($__nxi[0]), [Uri]::UnescapeDataString($__nxi[-1])) }; [System.Net.WebRequest]::DefaultWebProxy = $__nxw }",
+  'Remove-Variable __nxp, __nxu, __nxw, __nxi -ErrorAction SilentlyContinue',
+].join('\n')
+
+/** Pure: whether a shell is Windows PowerShell 5.1 (`powershell.exe`) rather than PowerShell 7 (`pwsh.exe`). */
+export function isWindowsPowerShell(shell: string): boolean {
+  return /^powershell(\.exe)?$/i.test(nodePath.win32.basename(shell))
+}
+
+/** Pure: the script a sandboxed PowerShell runs: quiet progress, the 5.1 proxy, the variables, then `script`. */
+export function sandboxScript(script: string, env: Readonly<Record<string, string>> | undefined, windowsPowerShell: boolean): string {
+  return [PROGRESS_OFF, ...(windowsPowerShell ? [WINDOWS_POWERSHELL_PROXY] : []), withEnvironment(script, env)].join('\n')
+}
+
+/** The absolute shell to start: `shell` (default the PowerShell commands use) on `PATH`, else Windows PowerShell. */
+function shellExe(shell: string | undefined): string {
+  const name = shell ?? currentPowerShell().program
+  if (nodePath.win32.isAbsolute(name)) return name
   const file = name.toLowerCase().endsWith('.exe') ? name : `${name}.exe`
   for (const dir of (process.env.PATH ?? '').split(';')) {
     if (dir === '') continue
     const candidate = nodePath.win32.join(dir, file)
-    if (existsSync(candidate)) return { exe: candidate, args: flags }
+    if (existsSync(candidate)) return candidate
   }
-  return name
+  return nodePath.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
 function realOrUndefined(path: string): string | undefined {
@@ -242,13 +300,45 @@ async function start(lib: WindowsLibrary): Promise<WinBackend> {
     // A machine whose filter went missing is repaired by installing again.
     return { lib, gate, failure: message, installable: (typeof code === 'string' && code.startsWith('wfp_')) || /\bWFP\b/.test(message) }
   }
+  let sid: string
   try {
     const user = await lib.srt.userStatus()
     if (user.sid === undefined) return { lib, gate, failure: 'the Windows sandbox account has no SID', installable: true }
-    return { lib, gate, sid: user.sid }
+    sid = user.sid
   } catch (error) {
     return { lib, gate, failure: reasonFrom(error) }
   }
+  // ACEs a crashed process left for the account.
+  try {
+    lib.srt.recover(sid)
+  } catch {
+    // best effort
+  }
+  try {
+    const tools = await lib.tools()
+    lib.srt.grant(sid, [], [tools.dir])
+    grantees.add(sid)
+    grantedRead.add(windowsKey(tools.dir))
+    if (exitHook === undefined) {
+      exitHook = () => revokeAll(lib)
+      process.once('exit', exitHook)
+    }
+    return { lib, gate, sid, tools }
+  } catch (error) {
+    return { lib, gate, failure: `cannot set up the write-restricted launcher: ${reasonFrom(error)}` }
+  }
+}
+
+/** The capability SID of a write directory, granted modify on it the first time. */
+function capabilityFor(lib: WindowsLibrary, root: string): string {
+  const key = windowsKey(root)
+  const known = capabilities.get(key)
+  if (known !== undefined) return known
+  const sid = randomCapabilitySid()
+  lib.srt.grant(sid, [root], [])
+  capabilities.set(key, sid)
+  grantees.add(sid)
+  return sid
 }
 
 function acquire(): NonNullable<typeof shared> {
@@ -271,8 +361,6 @@ export async function installWindowsCommandSandbox(): Promise<{ readonly kind: '
     const old = shared
     shared = undefined
     generation += 1
-    grantedWrite.clear()
-    grantedRead.clear()
     // The library forgot the failed initialize; reset anything a working one left.
     if (old !== undefined) await (await old.backend).lib?.manager.reset().catch(() => undefined)
     return { kind: 'installed' }
@@ -310,11 +398,14 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
     return entry.backend
   }
 
-  async function trial(b: WinBackend & { lib: WindowsLibrary }): Promise<string | undefined> {
+  async function trial(b: WinBackend & { lib: WindowsLibrary; tools: RestrictTools }): Promise<string | undefined> {
     if (options.skipTrial === true) return undefined
     const id = randomBytes(16).toString('base64url')
     try {
-      const { argv } = await b.lib.manager.wrapWithSandboxArgv('exit 0', undefined, { filesystem: {} }, undefined, tmpdir(), { commandId: id, commandText: 'exit 0' })
+      // Through the write-restricted launcher, as every command runs.
+      const cmd = nodePath.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe')
+      const shell = { exe: b.tools.launcher, args: [restrictingSids(false, []), cmd, '/d', '/c'] }
+      const { argv } = await b.lib.manager.wrapWithSandboxArgv('exit 0', shell, { filesystem: {} }, undefined, tmpdir(), { commandId: id, commandText: 'exit 0' })
       return await new Promise<string | undefined>(resolve => {
         const child = spawn(argv[0]!, argv.slice(1), { cwd: tmpdir(), stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
         let stderr = ''
@@ -342,7 +433,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
           const b = await backend()
           current = b
           if (b.failure !== undefined || b.lib === undefined) return { kind: 'none', reason: b.failure ?? 'the sandbox library did not load', ...(b.installable === true ? { installable: true } : {}) }
-          const failure = await trial(b as WinBackend & { lib: WindowsLibrary })
+          const failure = await trial(b as WinBackend & { lib: WindowsLibrary; tools: RestrictTools })
           return failure === undefined ? { kind: 'active', platform: 'windows' } : { kind: 'none', reason: failure }
         })(),
       }
@@ -357,7 +448,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
       const found = await probe()
       if (found.kind === 'none') return { kind: 'unavailable', reason: found.reason }
       if (policy.commandId.length < MIN_COMMAND_ID_LENGTH) return { kind: 'unavailable', reason: 'the command id is too short to bind a network allow list' }
-      const b = current as WinBackend & { lib: WindowsLibrary; sid: string }
+      const b = current as WinBackend & { lib: WindowsLibrary; sid: string; tools: RestrictTools }
       try {
         const real = (root: string) => realOrUndefined(root) ?? root
         const readRoots = [
@@ -366,7 +457,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
           ...toolReadDirs((process.env.PATH ?? '').split(';'), home, [nodePath.dirname(process.execPath)], policy.denyRead, realOrUndefined),
         ]
         const plan = planWindowsAccess(
-          { writeRoots: policy.writeRoots.map(real), readRoots, denyWrite: policy.denyWrite, denyRead: policy.denyRead, readOnly: policy.readOnly === true },
+          { writeRoots: policy.writeRoots.map(real), readRoots, denyWrite: policy.denyWrite, denyRead: policy.denyRead },
           grantedWrite, grantedRead, existsSync,
         )
         if (plan.grantWrite.length > 0 || plan.grantRead.length > 0) {
@@ -374,10 +465,14 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
           for (const root of plan.grantWrite) grantedWrite.set(windowsKey(root), root)
           for (const root of plan.grantRead) grantedRead.add(windowsKey(root))
         }
+        // A read-only command writes only where its own capability SIDs are granted (its temp directory).
+        const readOnly = policy.readOnly === true
+        const caps = readOnly ? policy.writeRoots.map(root => capabilityFor(b.lib, real(root))) : []
+        const exe = shellExe(policy.shell)
         registerNetwork({ manager: b.lib.manager, gate: b.gate }, policy)
         const { argv, env } = await b.lib.manager.wrapWithSandboxArgv(
-          withEnvironment(script, policy.env),
-          shellFor(policy.shell),
+          sandboxScript(script, { CURL_HOME: b.tools.dir, ...policy.env }, isWindowsPowerShell(exe)),
+          { exe: b.tools.launcher, args: [restrictingSids(readOnly, caps), exe, '-NoProfile', '-NonInteractive', '-Command'] },
           { filesystem: { denyRead: plan.denyRead, denyWrite: plan.denyWrite } },
           signal,
           policy.cwd,
@@ -422,10 +517,9 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
       if (shared.refs <= 0) {
         const last = shared
         shared = undefined
-        grantedWrite.clear()
-        grantedRead.clear()
-        // Removes this process's ACEs too.
-        await (await last.backend).lib?.manager.reset().catch(() => undefined)
+        const lib = (await last.backend).lib
+        revokeAll(lib)
+        await lib?.manager.reset().catch(() => undefined)
       }
     },
   }

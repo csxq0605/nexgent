@@ -4,7 +4,7 @@
  * runs PowerShell commands as the sandbox account. Runs only on Windows
  * with NEXGENT_WINDOWS_SANDBOX_TEST=1 (windows-accept.yml).
  */
-import { spawn, spawnSync } from 'node:child_process'
+import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
@@ -13,6 +13,7 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { getWindowsSandboxUserStatusAsync, grantWindowsAcl, resolveSrtWin, VENDORED_SRT_WIN_EXE } from '@anthropic-ai/sandbox-runtime'
 import { createWindowsSandbox, defaultWriteDenies, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
 
 const enabled = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
@@ -24,6 +25,8 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
   let temp: string
   let outside: string
   let secret: string
+  let wide: string
+  let leftover: string
   let base: Omit<OsSandboxPolicy, 'commandId'>
 
   beforeAll(async () => {
@@ -42,13 +45,20 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     temp = nodePath.join(root, 'tmp')
     outside = nodePath.join(root, 'outside')
     secret = nodePath.join(project, 'secret')
+    wide = nodePath.join(root, 'wide')
+    leftover = nodePath.join(root, 'leftover')
     await Promise.all([
       mkdir(nodePath.join(project, '.git', 'hooks'), { recursive: true }),
       mkdir(nodePath.join(project, '.nexgent'), { recursive: true }),
       mkdir(secret, { recursive: true }),
       mkdir(temp, { recursive: true }),
       mkdir(outside, { recursive: true }),
+      mkdir(wide, { recursive: true }),
+      mkdir(leftover, { recursive: true }),
     ])
+    // Like a new data drive (E:\\): Authenticated Users and Users may modify; the sandbox account is in both groups.
+    const open = spawnSync('icacls', [wide, '/grant', '*S-1-5-11:(OI)(CI)M', '*S-1-5-32-545:(OI)(CI)M'], { encoding: 'utf8' })
+    expect(open.status, open.stdout + open.stderr).toBe(0)
     await writeFile(nodePath.join(project, 'readme.txt'), 'PROJECT-TEXT')
     await writeFile(nodePath.join(project, '.nexgent', 'config.json'), '{}')
     await writeFile(nodePath.join(secret, 'key.txt'), 'SECRET-IN-PROJECT')
@@ -70,9 +80,9 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     if (root !== undefined) await rm(root, { recursive: true, force: true })
   })
 
-  async function go(script: string, extra: Partial<OsSandboxPolicy> = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  async function go(script: string, extra: Partial<OsSandboxPolicy> = {}, using: OsSandbox = sandbox): Promise<{ code: number | null; stdout: string; stderr: string }> {
     const commandId = randomBytes(16).toString('base64url')
-    const wrapped = await sandbox.wrap(script, { ...base, ...extra, commandId })
+    const wrapped = await using.wrap(script, { ...base, ...extra, commandId })
     if (wrapped.kind !== 'wrapped') throw new Error(`not wrapped: ${wrapped.reason}`)
     try {
       return await new Promise(resolve => {
@@ -85,7 +95,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
         child.on('exit', code => { clearTimeout(timer); resolve({ code, stdout, stderr }) })
       })
     } finally {
-      sandbox.release(commandId)
+      using.release(commandId)
     }
   }
 
@@ -109,6 +119,13 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     expect(existsSync(nodePath.join(outside, 'new.txt'))).toBe(false)
   }, 120_000)
 
+  it('cannot write a folder outside whose ACL lets Authenticated Users and Users modify it', async () => {
+    const result = await go(`Set-Content '${nodePath.join(wide, 'w.txt')}' pwned; New-Item -ItemType Directory '${nodePath.join(wide, 'sub')}' | Out-Null; "done"`)
+    expect(result.stdout, result.stderr).toContain('done')
+    expect(existsSync(nodePath.join(wide, 'w.txt'))).toBe(false)
+    expect(existsSync(nodePath.join(wide, 'sub'))).toBe(false)
+  }, 120_000)
+
   it('keeps .nexgent and .git/hooks read-only', async () => {
     await go(`Set-Content '.nexgent\\config.json' changed; Set-Content '.git\\hooks\\pre-commit' x; "done"`)
     expect(await readFile(nodePath.join(project, '.nexgent', 'config.json'), 'utf8')).toBe('{}')
@@ -125,6 +142,42 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
   it('runs the Node on PATH', async () => {
     const result = await go(`node -e "console.log('node ' + process.version)"`)
     expect(result.stdout, result.stderr).toContain(`node ${process.version}`)
+  }, 120_000)
+
+  it('keeps stderr free of progress records, in PowerShell 7 and Windows PowerShell 5.1', async () => {
+    for (const shell of ['pwsh', 'powershell']) {
+      const result = await go(`Get-ChildItem | Out-Null; Import-Module Microsoft.PowerShell.Archive -ErrorAction SilentlyContinue; & node -e "console.log('node ok')"; 'ok'`, { shell })
+      expect(result.stdout, `${shell}: ${result.stderr}`).toContain('node ok')
+      expect(result.stderr, shell).not.toContain('CLIXML')
+    }
+  }, 120_000)
+
+  describe('a grant another process holds', () => {
+    let holder: ChildProcess
+
+    beforeAll(async () => {
+      // Another Nexgent (or one that crashed) granted the sandbox account modify on a folder.
+      holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore' })
+      const srtWin = resolveSrtWin({ path: VENDORED_SRT_WIN_EXE })
+      const user = await getWindowsSandboxUserStatusAsync({ srtWin })
+      grantWindowsAcl({ sandboxUserSid: user.sid!, write: [leftover], read: [], holderPid: holder.pid!, srtWin })
+    }, 120_000)
+
+    afterAll(() => { holder.kill() })
+
+    it('does not let a read-only command write there', async () => {
+      const result = await go(`Set-Content '${nodePath.join(leftover, 'ro.txt')}' x; "done"`, { writeRoots: [temp], denyWrite: [], readOnly: true })
+      expect(result.stdout, result.stderr).toContain('done')
+      expect(existsSync(nodePath.join(leftover, 'ro.txt'))).toBe(false)
+    }, 120_000)
+  })
+
+  it('lets Windows PowerShell 5.1 reach a listed host through the proxy', async () => {
+    const result = await go(`(Invoke-WebRequest -UseBasicParsing -Uri https://registry.npmjs.org/ -TimeoutSec 30).StatusCode`, {
+      shell: 'powershell',
+      network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false },
+    })
+    expect(result.stdout, result.stderr).toContain('200')
   }, 120_000)
 
   describe('network', () => {
@@ -155,5 +208,37 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       const off = await go(fetchIt(), { network: { mode: 'off', ask: async () => true } })
       expect(off.stdout).not.toContain('reached')
     }, 120_000)
+  })
+
+  describe('when the sandbox is closed', () => {
+    const sandboxSid = async () => (await getWindowsSandboxUserStatusAsync({ srtWin: resolveSrtWin({ path: VENDORED_SRT_WIN_EXE }) })).sid!
+    const aclMentions = (path: string, sid: string) => {
+      const out = spawnSync('icacls', [path], { encoding: 'utf8' }).stdout
+      return out.includes('srt-sandbox') || out.includes(sid)
+    }
+
+    it('takes back every grant it made', async () => {
+      const sid = await sandboxSid()
+      expect(aclMentions(project, sid)).toBe(true)
+      await sandbox.dispose()
+      expect(aclMentions(project, sid)).toBe(false)
+      expect(aclMentions(temp, sid)).toBe(false)
+    }, 120_000)
+
+    it('clears grants a process that has ended left behind, on the next start', async () => {
+      const sid = await sandboxSid()
+      const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore' })
+      grantWindowsAcl({ sandboxUserSid: sid, write: [outside], read: [], holderPid: holder.pid!, srtWin: resolveSrtWin({ path: VENDORED_SRT_WIN_EXE }) })
+      expect(aclMentions(outside, sid)).toBe(true)
+      holder.kill()
+      await new Promise(resolve => holder.once('exit', resolve))
+      const next = createWindowsSandbox()
+      try {
+        expect(await next.probe()).toEqual({ kind: 'active', platform: 'windows' })
+        expect(aclMentions(outside, sid)).toBe(false)
+      } finally {
+        await next.dispose()
+      }
+    }, 180_000)
   })
 })

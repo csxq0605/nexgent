@@ -11,6 +11,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { NexgentError, type ToolContext } from '@nexgent/kernel'
+import { currentPowerShell } from './shell-check.js'
 import { commandNetwork, type ShellSandboxDeps } from './tools/shell.js'
 import { ensureSessionTempDir } from './workspace.js'
 
@@ -84,7 +85,8 @@ export async function confineProgram(sandbox: object, context: ToolContext, labe
     readOnly: true,
     cwd: context.workspace.root,
     ...(command.env === undefined ? {} : { env: command.env }),
-    ...(platform === 'win32' ? { shell: 'pwsh' } : {}),
+    // The PowerShell commands use (Windows PowerShell 5.1 when PowerShell 7 is missing).
+    ...(platform === 'win32' ? { shell: currentPowerShell().program } : {}),
   }, context.signal)
   if (wrapped.kind === 'wrapped') {
     return { kind: 'wrapped', program: wrapped.program, args: wrapped.args, ...(wrapped.env === undefined ? {} : { env: wrapped.env }), release: () => registered.os.sandbox.release(commandId) }

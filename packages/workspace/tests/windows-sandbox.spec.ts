@@ -10,13 +10,19 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   createWindowsSandbox,
+  isWindowsPowerShell,
   planWindowsAccess,
+  PROGRESS_OFF,
+  restrictingSids,
+  RESTRICT_SOURCE,
+  sandboxScript,
   setWindowsSandboxLibrary,
   toolReadDirs,
   UNCONFINED_COMMAND_DESCRIPTION,
   unconfinedHits,
   windowsKey,
   WINDOWS_NOT_INSTALLED,
+  WINDOWS_POWERSHELL_PROXY,
   withEnvironment,
   type WindowsLibrary,
 } from '../src/index.js'
@@ -28,19 +34,29 @@ afterEach(async () => {
 })
 
 describe('Windows access plan', () => {
-  it('grants new roots once, denies existing protected paths below them, and in read-only mode every other write root', () => {
+  it('grants new roots once and denies existing protected paths below them', () => {
     const exists = (path: string) => !path.endsWith('missing')
     const first = planWindowsAccess(
-      { writeRoots: ['C:\\Work\\App'], readRoots: ['C:\\Users\\me\\nvm'], denyWrite: ['C:\\Work\\App\\.git\\hooks', 'C:\\Work\\App\\missing', 'D:\\Else'], denyRead: ['C:\\Users\\me\\.ssh'], readOnly: false },
+      { writeRoots: ['C:\\Work\\App'], readRoots: ['C:\\Users\\me\\nvm'], denyWrite: ['C:\\Work\\App\\.git\\hooks', 'C:\\Work\\App\\missing', 'D:\\Else'], denyRead: ['C:\\Users\\me\\.ssh'] },
       new Map(), new Set(), exists,
     )
     expect(first).toEqual({ grantWrite: ['C:\\Work\\App'], grantRead: ['C:\\Users\\me\\nvm'], denyRead: [], denyWrite: ['C:\\Work\\App\\.git\\hooks'] })
     const held = new Map([[windowsKey('C:\\Work\\App'), 'C:\\Work\\App'], [windowsKey('C:\\Temp\\s1'), 'C:\\Temp\\s1']])
-    const readOnly = planWindowsAccess(
-      { writeRoots: ['c:\\temp\\S1\\'], readRoots: ['C:\\Work\\App'], denyWrite: [], denyRead: [], readOnly: true },
+    const again = planWindowsAccess(
+      { writeRoots: ['c:\\temp\\S1\\'], readRoots: ['C:\\Work\\App'], denyWrite: [], denyRead: [] },
       held, new Set([windowsKey('C:\\Users\\me\\nvm')]), exists,
     )
-    expect(readOnly).toEqual({ grantWrite: [], grantRead: [], denyRead: [], denyWrite: ['C:\\Work\\App'] })
+    expect(again).toEqual({ grantWrite: [], grantRead: [], denyRead: [], denyWrite: [] })
+  })
+
+  it('restricts writes to the account itself, or for a read-only command to its own capability SIDs', () => {
+    expect(restrictingSids(false, [])).toBe('USER')
+    expect(restrictingSids(true, ['S-1-5-21-9-9-9-9'])).toBe('S-1-5-21-9-9-9-9')
+    expect(restrictingSids(true, [])).toBe('S-1-5-12')
+    // The launcher always adds Everyone, RESTRICTED and the logon SID, and starts the command with WRITE_RESTRICTED.
+    expect(RESTRICT_SOURCE).toContain('",S-1-1-0,S-1-5-12"')
+    expect(RESTRICT_SOURCE).toContain('CreateRestrictedToken(token, 0x1 | 0x8')
+    expect(RESTRICT_SOURCE).toContain('0xC0000000')
   })
 
   it('reads tool folders under the profile, never the profile itself or a protected path', () => {
@@ -49,6 +65,15 @@ describe('Windows access plan', () => {
       ['C:\\Windows\\System32', 'C:\\Users\\me', 'C:\\Users\\me\\nodejs-link', 'C:\\Users\\me\\.ssh\\bin', 'C:\\Users\\me\\scoop\\shims', ''],
       'C:\\Users\\me', ['C:\\Users\\me\\scoop\\shims\\'], ['C:\\Users\\me\\.ssh'], real,
     )).toEqual(['C:\\Users\\me\\AppData\\Roaming\\nvm\\v22', 'C:\\Users\\me\\scoop\\shims\\'])
+  })
+
+  it('turns progress off, routes Windows PowerShell through the proxy, then sets the variables', () => {
+    expect(isWindowsPowerShell('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')).toBe(true)
+    expect(isWindowsPowerShell('C:\\Program Files\\PowerShell\\7\\pwsh.exe')).toBe(false)
+    expect(sandboxScript('npm test', { A: '1' }, false)).toBe(`${PROGRESS_OFF}\n[Environment]::SetEnvironmentVariable('A', '1')\nnpm test`)
+    expect(sandboxScript('npm test', undefined, true)).toBe(`${PROGRESS_OFF}\n${WINDOWS_POWERSHELL_PROXY}\nnpm test`)
+    expect(WINDOWS_POWERSHELL_PROXY).toContain('[System.Net.WebRequest]::DefaultWebProxy')
+    expect(WINDOWS_POWERSHELL_PROXY).toContain('NetworkCredential')
   })
 
   it('sets the environment inside the script', () => {
@@ -67,8 +92,10 @@ describe('createWindowsSandbox', () => {
     await mkdir(join(project, '.git', 'hooks'), { recursive: true })
     const temp = join(home, 'temp')
     await mkdir(temp)
-    const grants: Array<{ write: readonly string[]; read: readonly string[] }> = []
-    const wraps: Array<{ command: string; config: unknown; cwd?: string }> = []
+    const grants: Array<{ sid: string; write: readonly string[]; read: readonly string[] }> = []
+    const revoked: string[] = []
+    const recovered: string[] = []
+    const wraps: Array<{ command: string; shell: unknown; config: unknown; cwd?: string }> = []
     const registered: string[] = []
     let installs = 0
     let resets = 0
@@ -78,8 +105,8 @@ describe('createWindowsSandbox', () => {
           if (!fake.provisioned) throw Object.assign(new Error('not provisioned'), { code: 'not_provisioned' })
           if (fake.initError !== undefined) throw Object.assign(new Error(fake.initError.message), { code: fake.initError.code })
         },
-        async wrapWithSandboxArgv(command, _shell, config, _signal, cwd) {
-          wraps.push({ command, config, ...(cwd === undefined ? {} : { cwd }) })
+        async wrapWithSandboxArgv(command, shell, config, _signal, cwd) {
+          wraps.push({ command, shell, config, ...(cwd === undefined ? {} : { cwd }) })
           return { argv: ['srt-win.exe', 'exec', '--', command], env: {} }
         },
         registerCommandNetworkLists: id => { registered.push(id) },
@@ -90,10 +117,12 @@ describe('createWindowsSandbox', () => {
       srt: {
         exe: 'srt-win.exe',
         userStatus: async () => ({ provisioned: fake.provisioned, credPresent: fake.provisioned, ...(fake.provisioned ? { sid: 'S-1-5-21-1-2-3-1001' } : {}) }),
-        grant: (_sid, write, read) => {
-          if (fake.grantError !== undefined) throw new Error(fake.grantError)
-          grants.push({ write: [...write], read: [...read] })
+        grant: (sid, write, read) => {
+          if (fake.grantError !== undefined && write.length > 0) throw new Error(fake.grantError)
+          grants.push({ sid, write: [...write], read: [...read] })
         },
+        revoke: sid => { revoked.push(sid) },
+        recover: sid => { recovered.push(sid) },
         install: async () => {
           installs += 1
           if (fake.cancel === true) return { cancelled: true }
@@ -101,6 +130,7 @@ describe('createWindowsSandbox', () => {
           return {}
         },
       },
+      tools: async () => ({ launcher: 'C:\\T\\nexgent-restrict.exe', dir: 'C:\\T' }),
     }
     setWindowsSandboxLibrary(async () => library)
     const sandbox = createWindowsSandbox({ platform: 'win32', skipTrial: true, home })
@@ -108,7 +138,7 @@ describe('createWindowsSandbox', () => {
       writeRoots: [project], denyWrite: [join(project, '.nexgent'), join(project, '.git', 'hooks')], denyRead: [],
       network: true, commandId: `${id}-0123456789abcdefghijklmnopqrstuvwxyz`, shell: 'pwsh', readRoots: [project], cwd: project, ...extra,
     })
-    return { project, temp, sandbox, policy, grants, wraps, registered, counts: () => ({ installs, resets }) }
+    return { project, temp, sandbox, policy, grants, revoked, recovered, wraps, registered, counts: () => ({ installs, resets }) }
   }
 
   it('reports not installed as installable, installs behind one prompt and is active after', async () => {
@@ -131,29 +161,48 @@ describe('createWindowsSandbox', () => {
     expect(await sandbox.probe()).toMatchObject({ kind: 'none', installable: true, reason: expect.stringContaining('WFP') })
   })
 
-  it('grants the roots once, passes the denies and the environment, and binds the network list', async () => {
-    const { project, sandbox, policy, grants, wraps, registered } = await setup({ provisioned: true })
+  it('grants the roots once, runs the shell through the write-restricted launcher, passes the denies and the environment, and binds the network list', async () => {
+    const { project, sandbox, policy, grants, recovered, wraps, registered } = await setup({ provisioned: true })
     const wrapped = await sandbox.wrap('npm test', policy('c1', { env: { TEMP: 'T' } }))
     expect(wrapped).toMatchObject({ kind: 'wrapped', program: 'srt-win.exe' })
-    expect(grants).toHaveLength(1)
-    expect(grants[0]!.write).toEqual([project])
-    expect(wraps[0]!.command).toBe("[Environment]::SetEnvironmentVariable('TEMP', 'T')\nnpm test")
+    // Leftovers of a crashed process are cleared, the launcher's folder is readable, then the project is granted.
+    expect(recovered).toEqual(['S-1-5-21-1-2-3-1001'])
+    expect(grants.map(grant => [grant.sid, grant.write, grant.read])).toEqual([['S-1-5-21-1-2-3-1001', [], ['C:\\T']], ['S-1-5-21-1-2-3-1001', [project], expect.any(Array)]])
+    expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['USER', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
+    expect(wraps[0]!.command).toContain(PROGRESS_OFF)
+    expect(wraps[0]!.command).toContain("[Environment]::SetEnvironmentVariable('CURL_HOME', 'C:\\T')")
+    expect(wraps[0]!.command.endsWith("[Environment]::SetEnvironmentVariable('TEMP', 'T')\nnpm test")).toBe(true)
     expect(wraps[0]!.cwd).toBe(project)
     // .nexgent does not exist: nothing to deny there yet.
     expect(wraps[0]!.config).toEqual({ filesystem: { denyRead: [], denyWrite: [join(project, '.git', 'hooks')] } })
     expect(registered).toEqual([policy('c1').commandId])
     await sandbox.wrap('npm test', policy('c2'))
-    expect(grants).toHaveLength(1)
+    expect(grants).toHaveLength(2)
     expect(sandbox.annotate(policy('c1').commandId, 'Access to the path is denied.', 1)).toContain('<sandbox_violations>')
     expect(sandbox.annotate(policy('c1').commandId, 'Access to the path is denied.', 0)).toBe('Access to the path is denied.')
     await sandbox.dispose()
   })
 
-  it('keeps a read-only command out of the write roots granted before', async () => {
-    const { project, temp, sandbox, policy, wraps } = await setup({ provisioned: true })
+  it('lets a read-only command write only where its own capability SID is granted, and takes every grant back on dispose', async () => {
+    const { temp, sandbox, policy, grants, revoked, wraps } = await setup({ provisioned: true })
     await sandbox.wrap('npm test', policy('c1'))
     await sandbox.wrap('node x.mjs', policy('c2', { writeRoots: [temp], denyWrite: [], readOnly: true }))
-    expect((wraps[1]!.config as { filesystem: { denyWrite: string[] } }).filesystem.denyWrite).toEqual([project])
+    const capability = grants.find(grant => grant.sid !== 'S-1-5-21-1-2-3-1001')!
+    expect(capability.write).toEqual([temp])
+    expect((wraps[1]!.shell as { args: string[] }).args[0]).toBe(capability.sid)
+    expect((wraps[1]!.config as { filesystem: { denyWrite: string[] } }).filesystem.denyWrite).toEqual([])
+    await sandbox.wrap('node y.mjs', policy('c3', { writeRoots: [temp], denyWrite: [], readOnly: true }))
+    expect(grants.filter(grant => grant.sid === capability.sid)).toHaveLength(1)
+    await sandbox.dispose()
+    expect(revoked.sort()).toEqual(['S-1-5-21-1-2-3-1001', capability.sid].sort())
+  })
+
+  it('switches Windows PowerShell 5.1 to the proxy', async () => {
+    const { sandbox, policy, wraps } = await setup({ provisioned: true })
+    await sandbox.wrap('Invoke-WebRequest https://registry.npmjs.org/', policy('c1', { shell: 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe' }))
+    expect(wraps[0]!.command).toContain(WINDOWS_POWERSHELL_PROXY)
+    await sandbox.wrap('Invoke-WebRequest https://registry.npmjs.org/', policy('c2', { shell: 'C:\\Program Files\\PowerShell\\7\\pwsh.exe' }))
+    expect(wraps[1]!.command).not.toContain(WINDOWS_POWERSHELL_PROXY)
     await sandbox.dispose()
   })
 
