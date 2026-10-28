@@ -223,7 +223,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     for (const [dir, owner] of [[own, process.env.USERNAME!], [foreign, '*S-1-5-32-544']] as const) {
       const set = spawnSync('icacls', [dir, '/setowner', owner, '/T', '/C'], { encoding: 'utf8' })
       expect(set.status, set.stdout + set.stderr).toBe(0)
-      const drive = spawnSync('icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-11:(OI)(CI)M', '*S-1-5-18:(OI)(CI)F', '/T', '/C'], { encoding: 'utf8' })
+      const drive = spawnSync('icacls', [dir, '/inheritance:r', '/grant:r', '*S-1-5-11:(OI)(CI)M', '*S-1-5-18:(OI)(CI)F'], { encoding: 'utf8' })
       expect(drive.status, drive.stdout + drive.stderr).toBe(0)
     }
     // The case this fixes: Modify alone does not let a standard user change the label.
