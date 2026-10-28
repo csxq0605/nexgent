@@ -13,6 +13,7 @@ import {
   isWindowsPowerShell,
   planWindowsAccess,
   PROGRESS_OFF,
+  stripProgressRecords,
   LabelRecord,
   launcherArgument,
   RESTRICT_SOURCE,
@@ -60,6 +61,9 @@ describe('Windows access plan', () => {
     expect(RESTRICT_SOURCE).toContain('"S-1-16-4096"')
     expect(RESTRICT_SOURCE).toContain('CreateRestrictedToken(token, 0x1, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero')
     expect(RESTRICT_SOURCE).toContain('S:(ML;OICI;NW;;;LW)')
+    // A folder the user owns but may only modify: they allow themselves WRITE_OWNER while it is labelled.
+    expect(RESTRICT_SOURCE).toContain('FileSystemRights.TakeOwnership')
+    expect(RESTRICT_SOURCE).toContain('if (low && error == 5)')
     expect(launcherArgument('C:\\T')).toBe('low|C:\\T')
     expect(launcherArgument(undefined)).toBe('low')
   })
@@ -93,6 +97,16 @@ describe('Windows access plan', () => {
     expect(WINDOWS_POWERSHELL_PROXY).toContain('NetworkCredential')
   })
 
+  it('drops PowerShell progress records from stderr and keeps everything else', () => {
+    const progress = '<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><I64 N="SourceId">1</I64><PR N="Record"><AV>Preparing modules for first use.</AV><AI>0</AI><Nil /><PI>-1</PI><PC>-1</PC><T>Completed</T><SR>-1</SR><SD> </SD></PR></MS></Obj>'
+    const error = '<S S="Error">boom_x000D__x000A_</S>'
+    const open = '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
+    expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}${progress}</Objs>\r\n`)).toBe('')
+    expect(stripProgressRecords(`warning\n#< CLIXML\n${open}${progress}</Objs>`)).toBe('warning\n')
+    expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}${error}</Objs>`)).toBe(`#< CLIXML\n${open}${error}</Objs>\n`)
+    expect(stripProgressRecords('plain error\n')).toBe('plain error\n')
+  })
+
   it('sets the environment inside the script', () => {
     expect(withEnvironment('npm test', undefined)).toBe('npm test')
     expect(withEnvironment('npm test', { TEMP: "C:\\T'1" })).toBe("[Environment]::SetEnvironmentVariable('TEMP', 'C:\\T''1')\nnpm test")
@@ -100,7 +114,7 @@ describe('Windows access plan', () => {
 })
 
 describe('createWindowsSandbox', () => {
-  interface Fake { provisioned: boolean; initError?: { code: string; message: string }; grantError?: string; cancel?: boolean }
+  interface Fake { provisioned: boolean; initError?: { code: string; message: string }; grantError?: string; cancel?: boolean; labelFailures?: number }
 
   async function setup(fake: Fake) {
     const home = await mkdtemp(join(tmpdir(), 'nexgent-winsb-'))
@@ -153,7 +167,13 @@ describe('createWindowsSandbox', () => {
         },
       },
       tools: async () => ({ launcher: 'C:\\T\\nexgent-restrict.exe', dir: 'C:\\T' }),
-      label: (_launcher, path, low) => { labels.push([path, low]) },
+      label: (_launcher, path, low) => {
+        labels.push([path, low])
+        if (low && (fake.labelFailures ?? 0) > 0) {
+          fake.labelFailures! -= 1
+          throw new Error(`cannot open ${path} for sandboxed writes: nexgent-sandbox: Windows does not let this account mark ${path} writable for the sandbox`)
+        }
+      },
       labelRecordDir: recordDir,
     }
     setWindowsSandboxLibrary(async () => library)
@@ -162,7 +182,7 @@ describe('createWindowsSandbox', () => {
       writeRoots: [project], denyWrite: [join(project, '.nexgent'), join(project, '.git', 'hooks')], denyRead: [],
       network: true, commandId: `${id}-0123456789abcdefghijklmnopqrstuvwxyz`, shell: 'pwsh', readRoots: [project], cwd: project, ...extra,
     })
-    return { project, temp, sandbox, policy, grants, revoked, recovered, wraps, registered, labels, counts: () => ({ installs, resets }) }
+    return { project, temp, sandbox, policy, grants, revoked, recovered, wraps, registered, labels, recordDir, counts: () => ({ installs, resets }) }
   }
 
   it('reports not installed as installable, installs behind one prompt and is active after', async () => {
@@ -221,6 +241,19 @@ describe('createWindowsSandbox', () => {
     await sandbox.dispose()
     expect(revoked).toEqual(['S-1-5-21-1-2-3-1001'])
     expect(labels.slice(3)).toEqual([[project, false], [temp, false]])
+  })
+
+  it('does not run a command on a folder it could not label, keeps no record of it, and tries again with the same reason next time', async () => {
+    const fake: Fake = { provisioned: true, labelFailures: 2 }
+    const { project, sandbox, policy, labels, recordDir } = await setup(fake)
+    const reason = expect.stringContaining(`does not let this account mark ${project} writable`)
+    expect(await sandbox.wrap('npm test', policy('c1'))).toMatchObject({ kind: 'unavailable', fatal: true, reason })
+    expect(new LabelRecord(recordDir, 1, () => true).heldElsewhere(project)).toBe(false)
+    expect(await sandbox.wrap('npm test', policy('c2'))).toMatchObject({ kind: 'unavailable', fatal: true, reason })
+    expect(await sandbox.wrap('npm test', policy('c3'))).toMatchObject({ kind: 'wrapped' })
+    expect(labels.filter(([path]) => path === project)).toEqual([[project, true], [project, true], [project, true]])
+    await sandbox.dispose()
+    expect(labels.at(-1)).toEqual([project, false])
   })
 
   it('switches Windows PowerShell 5.1 to the proxy', async () => {

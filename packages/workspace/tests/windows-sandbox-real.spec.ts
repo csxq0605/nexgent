@@ -27,6 +27,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
   let secret: string
   let wide: string
   let leftover: string
+  let eproj: string
   let base: Omit<OsSandboxPolicy, 'commandId'>
 
   beforeAll(async () => {
@@ -47,6 +48,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     secret = nodePath.join(project, 'secret')
     wide = nodePath.join(root, 'wide')
     leftover = nodePath.join(root, 'leftover')
+    eproj = nodePath.join(root, 'eproj')
     await Promise.all([
       mkdir(nodePath.join(project, '.git', 'hooks'), { recursive: true }),
       mkdir(nodePath.join(project, '.nexgent'), { recursive: true }),
@@ -55,10 +57,16 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       mkdir(outside, { recursive: true }),
       mkdir(wide, { recursive: true }),
       mkdir(leftover, { recursive: true }),
+      mkdir(nodePath.join(eproj, 'src'), { recursive: true }),
     ])
     // Like a new data drive (E:\\): Authenticated Users and Users may modify; the sandbox account is in both groups.
     const open = spawnSync('icacls', [wide, '/grant', '*S-1-5-11:(OI)(CI)M', '*S-1-5-32-545:(OI)(CI)M'], { encoding: 'utf8' })
     expect(open.status, open.stdout + open.stderr).toBe(0)
+    // A project made on a new data drive (E:\\): it inherits the drive's default ACL, so its owner may only
+    // modify it through Authenticated Users (no Full Control, no WRITE_OWNER to change its label).
+    await writeFile(nodePath.join(eproj, 'src', 'existing.txt'), 'OLD')
+    const drive = spawnSync('icacls', [eproj, '/inheritance:r', '/grant:r', '*S-1-5-11:(OI)(CI)M', '*S-1-5-18:(OI)(CI)F'], { encoding: 'utf8' })
+    expect(drive.status, drive.stdout + drive.stderr).toBe(0)
     await writeFile(nodePath.join(project, 'readme.txt'), 'PROJECT-TEXT')
     await mkdir(nodePath.join(project, 'src'))
     await writeFile(nodePath.join(project, 'src', 'existing.txt'), 'OLD')
@@ -128,6 +136,22 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     expect(result.stdout, result.stderr).toContain('done')
     expect(existsSync(nodePath.join(wide, 'w.txt'))).toBe(false)
     expect(existsSync(nodePath.join(wide, 'sub'))).toBe(false)
+  }, 120_000)
+
+  it('writes a project the user may only modify (a new data drive\'s default ACL), and still not outside it', async () => {
+    const policy = { writeRoots: [eproj, temp], denyWrite: defaultWriteDenies(eproj), denyRead: [], readRoots: [eproj], cwd: eproj }
+    const result = await go(`Set-Content '${nodePath.join(eproj, 'made.txt')}' inside; Set-Content '${nodePath.join(eproj, 'src', 'existing.txt')}' NEW; Set-Content '${nodePath.join(wide, 'e.txt')}' pwned; "done"`, policy)
+    expect(result.stdout, result.stderr).toContain('done')
+    expect(await readFile(nodePath.join(eproj, 'made.txt'), 'utf8'), result.stderr).toContain('inside')
+    expect(await readFile(nodePath.join(eproj, 'src', 'existing.txt'), 'utf8'), result.stderr).toContain('NEW')
+    expect(existsSync(nodePath.join(wide, 'e.txt'))).toBe(false)
+    // It got there by allowing the user WRITE_OWNER on the folder (Windows denied the label without it).
+    const acl = spawnSync('icacls', [eproj], { encoding: 'utf8' }).stdout
+    expect(acl).toMatch(/\(WO\)/)
+    expect(acl).toMatch(/Mandatory Label\\Low/i)
+    // The next command finds the folder ready.
+    const again = await go(`Set-Content '${nodePath.join(eproj, 'again.txt')}' again; "done"`, policy)
+    expect(await readFile(nodePath.join(eproj, 'again.txt'), 'utf8'), again.stderr).toContain('again')
   }, 120_000)
 
   it('keeps .nexgent and .git/hooks read-only', async () => {
@@ -240,6 +264,9 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       await sandbox.dispose()
       expect(aclMentions(project, sid)).toBe(false)
       expect(aclMentions(temp, sid)).toBe(false)
+      // The user's own WRITE_OWNER entry goes with the label.
+      expect(aclMentions(eproj, sid)).toBe(false)
+      expect(spawnSync('icacls', [eproj], { encoding: 'utf8' }).stdout).not.toMatch(/\(WO\)/)
     }, 120_000)
 
     it('clears grants a process that has ended left behind, on the next start', async () => {

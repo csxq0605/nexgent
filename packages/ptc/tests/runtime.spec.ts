@@ -5,9 +5,9 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { processGroupAlive, programScript } from '@nexgent/workspace'
+import { currentPowerShell, processGroupAlive, programScript } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
+import { jobLauncherProgram, parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -181,5 +181,12 @@ describe('runProgram', () => {
     expect(parseProgramMessage('hello')).toBeUndefined()
     expect(parseProgramMessage('{"t":"call","id":"x","fn":"a","args":[]}')).toBeUndefined()
     expect(parseProgramMessage('{"t":"log","stream":"stdout","text":"a"}')).toEqual({ t: 'log', stream: 'stdout', text: 'a' })
+  })
+})
+
+describe('Windows job launcher', () => {
+  it('starts the job with the PowerShell this machine has unless the host names one', () => {
+    expect(jobLauncherProgram({})).toBe(currentPowerShell().program)
+    expect(jobLauncherProgram({ pwshPath: 'C:\\pwsh.exe' })).toBe('C:\\pwsh.exe')
   })
 })

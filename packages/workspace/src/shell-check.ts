@@ -144,3 +144,18 @@ export function checkCommandShell(options: CommandShellCheckOptions = {}): Comma
     ...(found.notice === undefined ? {} : { notice: found.notice }),
   }
 }
+
+/**
+ * Pure: `stderr` without PowerShell's serialized progress records (`#< CLIXML`
+ * blocks holding only `<Obj S="progress">`, such as "Preparing modules for
+ * first use", which the sandbox account's fresh profile shows on every command
+ * whatever `$ProgressPreference` says). Other records stay as they were.
+ */
+export function stripProgressRecords(stderr: string): string {
+  if (!stderr.includes('#< CLIXML')) return stderr
+  return stderr.replace(/#< CLIXML\r?\n(<Objs\b[^>]*>)([\s\S]*?)(<\/Objs>)\r?\n?/g, (block: string, open: string, body: string, close: string) => {
+    const rest = body.replace(/<Obj S="progress"[^>]*>[\s\S]*?<\/Obj>/g, '')
+    if (rest.trim() === '') return ''
+    return rest === body ? block : `#< CLIXML\n${open}${rest}${close}\n`
+  })
+}

@@ -19,7 +19,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { StringDecoder } from 'node:string_decoder'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { NexgentError, type JsonValue } from '@nexgent/kernel'
-import { JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive, scrubEnv } from '@nexgent/workspace'
+import { currentPowerShell, JOB_SPEC_ENV, jobLaunchSpec, jobLauncherArgs, processGroupAlive, scrubEnv } from '@nexgent/workspace'
 import { BOOTSTRAP_SOURCE } from './bootstrap.js'
 import { parseProgramMessage, type CallMessage, type HostMessage } from './protocol.js'
 
@@ -106,7 +106,7 @@ export interface RunProgramOptions {
   readonly permission?: boolean
   /** Windows only: run inside a kill-on-close Job Object (default `true`). */
   readonly windowsJob?: boolean
-  /** Windows only: the `pwsh` that launches the job (default `pwsh`). */
+  /** Windows only: the PowerShell that launches the job (default: the one this machine has, pwsh 7 or Windows PowerShell 5.1). */
   readonly pwshPath?: string
   /**
    * Start the program through this wrapper (the OS sandbox) instead of
@@ -120,6 +120,11 @@ export interface RunProgramOptions {
    * hold {@link BOOTSTRAP_SOURCE}.
    */
   readonly entryFile?: string
+}
+
+/** The PowerShell that starts the Windows job: `pwshPath`, else the one this machine has (pwsh 7, or Windows PowerShell 5.1). */
+export function jobLauncherProgram(options: { readonly pwshPath?: string }): string {
+  return options.pwshPath ?? currentPowerShell().program
 }
 
 /** The Node executable and arguments a program process runs (what an OS sandbox wraps). */
@@ -241,7 +246,7 @@ export async function runProgram(options: RunProgramOptions): Promise<ProgramRes
     : { ...(process.platform === 'win32' ? scrubEnv(process.env).env : { ...programEnv(), PATH: process.env.PATH ?? '/usr/bin:/bin', NODE_USE_ENV_PROXY: '1' }), ...launch.env }
   let child: ChildProcess
   try {
-    child = spawn(useJob ? (options.pwshPath ?? 'pwsh') : program, useJob ? jobLauncherArgs() : programArgv, {
+    child = spawn(useJob ? jobLauncherProgram(options) : program, useJob ? jobLauncherArgs() : programArgv, {
       cwd: options.cwd,
       env: useJob ? { ...env, [JOB_SPEC_ENV]: JSON.stringify(jobLaunchSpec(program, programArgv, env)) } : env,
       detached: process.platform !== 'win32',

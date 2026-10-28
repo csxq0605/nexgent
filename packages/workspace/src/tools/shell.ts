@@ -23,7 +23,7 @@ import { NETWORK_GRANT, type NetworkMode } from '../network-policy.js'
 import { defaultWriteDenies, type OsSandbox, type OsSandboxNetwork } from '../os-sandbox.js'
 import { BackgroundShells, type LocalProcessSpec } from '../process.js'
 import { clampTimeout, DEFAULT_COMMAND_TIMEOUT_MS, MAX_COMMAND_TIMEOUT_MS } from '../sandbox.js'
-import { currentPowerShell, takePowerShellNotice } from '../shell-check.js'
+import { currentPowerShell, stripProgressRecords, takePowerShellNotice } from '../shell-check.js'
 import { ensureSessionTempDir } from '../workspace.js'
 import {
   booleanField,
@@ -340,7 +340,8 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
         if (sandboxed) os?.sandbox.release(commandId)
         throw error
       }
-      const capped = capStreams(result.stdout, result.stderr)
+      // PowerShell's progress records are noise to the model (the sandbox account shows them on every command).
+      const capped = capStreams(result.stdout, name === 'pwsh' ? stripProgressRecords(result.stderr) : result.stderr)
       const stderr = sandboxed && os !== undefined ? os.sandbox.annotate(commandId, capped.stderr, result.exitCode) : capped.stderr
       if (sandboxed) os?.sandbox.release(commandId)
       const [haveOut, haveErr] = await Promise.all([nonEmpty(files.stdout), nonEmpty(files.stderr)])

@@ -188,7 +188,14 @@ function openForWrites(lib: WindowsLibrary, roots: readonly string[]): void {
     if (labelled.has(key)) continue
     labelled.set(key, root)
     labeller.record.save([...labelled.values()])
-    lib.label(labeller.launcher, root, true)
+    try {
+      lib.label(labeller.launcher, root, true)
+    } catch (error) {
+      // Not labelled: the next command tries again, and says why if it fails again.
+      labelled.delete(key)
+      labeller.record.save([...labelled.values()])
+      throw error
+    }
   }
 }
 

@@ -31,6 +31,8 @@ import { join } from 'node:path'
 export const RESTRICT_SOURCE = `using System;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 
 public static class NexgentRestrict {
@@ -80,6 +82,25 @@ public static class NexgentRestrict {
     return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
   }
 
+  // Changing a label needs WRITE_OWNER. On a new data drive a user's own folder often grants them only Modify
+  // (through Authenticated Users), but as its owner they may always change its DACL: allow themselves
+  // WRITE_OWNER there (inherited by what it holds) for as long as the label stays, then take it back.
+  static FileSystemAccessRule OwnerChangeRule() {
+    return new FileSystemAccessRule(WindowsIdentity.GetCurrent().User, FileSystemRights.TakeOwnership,
+      InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow);
+  }
+
+  static bool AllowOwnerChange(string path, bool allow) {
+    try {
+      DirectorySecurity security = Directory.GetAccessControl(path, AccessControlSections.Access);
+      if (allow) security.AddAccessRule(OwnerChangeRule()); else security.RemoveAccessRuleSpecific(OwnerChangeRule());
+      Directory.SetAccessControl(path, security);
+      return true;
+    } catch (Exception) {
+      return false;
+    }
+  }
+
   static int SkipSpaces(string line, int i) {
     while (i < line.Length && (line[i] == ' ' || line[i] == '\\t')) i++;
     return i;
@@ -109,7 +130,17 @@ public static class NexgentRestrict {
       int levelEnd = TokenEnd(rest, 0);
       string level = rest.Substring(0, levelEnd);
       string path = Unquote(rest.Substring(SkipSpaces(rest, levelEnd)).TrimEnd());
-      uint error = Label(path, level == "low");
+      bool low = level == "low";
+      uint error = Label(path, low);
+      if (low && error == 5) {
+        if (!AllowOwnerChange(path, true)) {
+          Console.Error.WriteLine("nexgent-sandbox: Windows does not let this account mark " + path + " writable for the sandbox: only the folder's owner or an administrator can (error 5)");
+          return 9011;
+        }
+        error = Label(path, true);
+        if (error != 0) AllowOwnerChange(path, false);
+      }
+      if (!low) AllowOwnerChange(path, false);
       if (error != 0) { Console.Error.WriteLine("nexgent-sandbox: cannot label " + path + " (error " + error + ")"); return 9011; }
       return 0;
     }
