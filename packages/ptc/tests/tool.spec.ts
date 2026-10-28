@@ -124,7 +124,8 @@ describe('run_code', () => {
 
   it('reports a timeout and a failure as errors with the output so far', async () => {
     const { run } = await setup()
-    const slow = await run('console.log("before"); await new Promise(() => {})', {}, { timeoutMs: 1_000 })
+    // The deadline counts from the start; in the Windows sandbox starting takes about a second.
+    const slow = await run('console.log("before"); await new Promise(() => {})', {}, { timeoutMs: windowsSandbox ? 10_000 : 1_000 })
     expect(slow.isError).toBe(true)
     expect(slow.content).toMatch(/^Timed out after \d+ ms/)
     expect(slow.content).toContain('before')
