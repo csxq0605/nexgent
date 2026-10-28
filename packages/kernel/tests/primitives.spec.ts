@@ -253,6 +253,14 @@ describe('system prompt, schema check, timeouts, history repair', () => {
     expect(renderSystemPrompt({ ...base, sandboxMode: 'workspace-write', tools: ['run_code'].map(tool) })).not.toContain('still runs')
   })
 
+  it('asks for the work to be checked only when a shell is offered', () => {
+    const tool = (name: string) => ({ name, description: `${name} tool`, inputSchema: {}, effects: ['read' as const], approval: 'never' as const })
+    const base = { template: { persona: 'P', suffix: '' }, model: 'm', cwd: '/p', platform: 'linux' as const, sandboxMode: 'workspace-write' as const }
+    expect(renderSystemPrompt({ ...base, tools: ['read_file', 'bash'].map(tool) })).toContain('# Checking your work\n- Before you report a change')
+    expect(renderSystemPrompt({ ...base, tools: ['read_file', 'pwsh'].map(tool) })).toContain('# Checking your work')
+    expect(renderSystemPrompt({ ...base, tools: ['read_file'].map(tool) })).not.toContain('# Checking your work')
+  })
+
   it('checks the common JSON Schema keywords', () => {
     const schema = { type: 'object', properties: { n: { type: 'integer', minimum: 1 }, s: { enum: ['a', 'b'] } }, required: ['n'], additionalProperties: false }
     expect(validateJsonSchema({ n: 1, s: 'a' }, schema)).toBeUndefined()
