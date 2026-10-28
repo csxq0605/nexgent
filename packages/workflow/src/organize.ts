@@ -148,6 +148,22 @@ export interface DefaultOrganizerOptions {
   readonly memory?: () => OrganizationMemory | undefined
   /** Coordinator: the price of a usage on a model, for the organization profile (default: Claude's price weights). */
   readonly costOf?: ProfileInput['costOf']
+  /**
+   * Measurement only: every root turn is done alone (`solo`) or with members (`team`), `chosenBy: forced`;
+   * the size rule and the library are skipped, and the turns are not recorded in the library.
+   */
+  readonly force?: OrganizationDecision['decision']
+}
+
+/** Environment variable the host reads for {@link DefaultOrganizerOptions.force}: `solo` or `team`. */
+export const NEXGENT_FORCE_ORGANIZATION = 'NEXGENT_FORCE_ORGANIZATION'
+
+/** Pure: {@link DefaultOrganizerOptions.force} from an environment; anything but `solo` or `team` is an error. */
+export function forcedOrganization(env: Readonly<Record<string, string | undefined>>): OrganizationDecision['decision'] | undefined {
+  const value = env[NEXGENT_FORCE_ORGANIZATION]?.trim()
+  if (value === undefined || value === '') return undefined
+  if (value === 'solo' || value === 'team') return value
+  throw new NexgentError('config/invalid', `${NEXGENT_FORCE_ORGANIZATION} must be solo or team, got ${JSON.stringify(value)}`)
 }
 
 /** Pure: the coordinator's lines about changes to the organization (the one tried now, the ones kept). */
@@ -233,6 +249,10 @@ export function defaultOrganizer(options: DefaultOrganizerOptions = {}): TurnOrg
       const redo = input.source === 'feedback' ? asksRework(input.rating) : input.turn > 1 && asksRedo(input.text)
       if (memory !== undefined && redo) await memory.noteRework({ sessionId: input.sessionId }).catch(() => undefined)
       const solo = input.coordinator === true ? COORDINATOR_SOLO_SECTION : SOLO_SECTION
+      if (options.force !== undefined) {
+        const team = input.coordinator === true ? COORDINATOR_TEAM_SECTION : input.thread === true ? THREAD_TEAM_SECTION : TEAM_SECTION
+        return { decision: { decision: options.force, chosenBy: 'forced' }, section: options.force === 'solo' ? solo : team }
+      }
       if (isSmallTask(input.text, input.materialIds)) return { decision: { decision: 'solo', chosenBy: 'size' }, section: solo }
       // A thread's turn is classed and recorded as its own (member-level) run; the coordinator's turns as coordinator-level runs.
       const level = input.coordinator === true ? { level: 'coordinator' as const } : {}
