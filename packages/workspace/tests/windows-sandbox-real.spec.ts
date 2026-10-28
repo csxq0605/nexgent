@@ -136,7 +136,8 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     const result = await go(`Get-Content readme.txt; Set-Content ro.txt x; Set-Content (Join-Path $env:TEMP 'ok.txt') ok; "done"`, { writeRoots: [temp], denyWrite: [], readOnly: true })
     expect(result.stdout, result.stderr).toContain('PROJECT-TEXT')
     expect(existsSync(nodePath.join(project, 'ro.txt'))).toBe(false)
-    expect(existsSync(nodePath.join(temp, 'ok.txt'))).toBe(true)
+    const acl = spawnSync('icacls', [temp], { encoding: 'utf8' }).stdout
+    expect(existsSync(nodePath.join(temp, 'ok.txt')), `${result.stdout}\n${result.stderr}\n${acl}`).toBe(true)
   }, 120_000)
 
   it('runs the Node on PATH', async () => {
@@ -177,7 +178,13 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       shell: 'powershell',
       network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false },
     })
-    expect(result.stdout, result.stderr).toContain('200')
+    if (!result.stdout.includes('200')) {
+      const network = { mode: 'allowlist' as const, allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false }
+      const curl = await go(`curl.exe -sS -o NUL -w "%{http_code}" https://registry.npmjs.org/; " rc=$LASTEXITCODE"`, { network })
+      const seven = await go(`(Invoke-WebRequest -UseBasicParsing -Uri https://registry.npmjs.org/ -TimeoutSec 30).StatusCode`, { network })
+      const inner = await go(`try { (New-Object Net.WebClient).DownloadString('https://registry.npmjs.org/').Length } catch { $e = $_.Exception; while ($e) { $e.GetType().FullName + ': ' + $e.Message; $e = $e.InnerException } }; [Net.ServicePointManager]::SecurityProtocol; [System.Net.WebRequest]::DefaultWebProxy.Address`, { shell: 'powershell', network })
+      expect.fail(`5.1: ${result.stderr}\ncurl: ${curl.stdout} ${curl.stderr}\npwsh: ${seven.stdout} ${seven.stderr}\n5.1 detail: ${inner.stdout} ${inner.stderr}`)
+    }
   }, 120_000)
 
   describe('network', () => {
