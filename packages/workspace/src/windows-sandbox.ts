@@ -246,6 +246,8 @@ export const PROGRESS_OFF = "$ProgressPreference = 'SilentlyContinue'"
  * sandbox's proxy, with the credentials in the URL.
  */
 export const WINDOWS_POWERSHELL_PROXY = [
+  // .NET Framework apps built for 4.6 or earlier offer only SSL 3 / TLS 1.0 unless told otherwise; most hosts now need TLS 1.2.
+  '[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]3072',
   "$__nxp = if ($env:HTTPS_PROXY) { $env:HTTPS_PROXY } else { $env:HTTP_PROXY }",
   "if ($__nxp) { $__nxu = [Uri]$__nxp; $__nxw = New-Object System.Net.WebProxy(('{0}://{1}:{2}' -f $__nxu.Scheme, $__nxu.Host, $__nxu.Port)); if ($__nxu.UserInfo) { $__nxi = $__nxu.UserInfo.Split([char]':', 2); $__nxw.Credentials = New-Object System.Net.NetworkCredential([Uri]::UnescapeDataString($__nxi[0]), [Uri]::UnescapeDataString($__nxi[-1])) }; [System.Net.WebRequest]::DefaultWebProxy = $__nxw }",
   'Remove-Variable __nxp, __nxu, __nxw, __nxi -ErrorAction SilentlyContinue',
