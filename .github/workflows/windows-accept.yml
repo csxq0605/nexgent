@@ -59,6 +59,16 @@ jobs:
           TMP: ${{ runner.temp }}
         run: pnpm --filter @nexgent/workspace exec vitest run tests/windows-sandbox-real.spec.ts tests/windows-sandbox.spec.ts
 
+      - name: run_code and workflow scripts in the command sandbox
+        timeout-minutes: 10
+        env:
+          NEXGENT_WINDOWS_SANDBOX_TEST: '1'
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          pnpm --filter @nexgent/ptc exec vitest run tests/tool.spec.ts tests/runtime.spec.ts
+          pnpm --filter @nexgent/workflow exec vitest run tests/workflow.spec.ts
+
       - name: accept-step3 headless + desktop
         id: hd
         timeout-minutes: 60

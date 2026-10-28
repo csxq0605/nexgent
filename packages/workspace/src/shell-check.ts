@@ -159,3 +159,47 @@ export function stripProgressRecords(stderr: string): string {
     return rest === body ? block : `#< CLIXML\n${open}${rest}${close}\n`
   })
 }
+
+const CLIXML_START = '#< CLIXML'
+
+/**
+ * {@link stripProgressRecords} for a stream that arrives in pieces: `push`
+ * returns what can be passed on now (a CLIXML block is held until it closes),
+ * `flush` the rest at the end.
+ */
+export function progressFilter(): { push(text: string): string; flush(): string } {
+  let held = ''
+  return {
+    push(text: string): string {
+      held += text
+      let out = ''
+      for (;;) {
+        const start = held.indexOf(CLIXML_START)
+        if (start < 0) {
+          // Keep a tail that may be the start of a marker split across pieces.
+          let keep = Math.min(held.length, CLIXML_START.length - 1)
+          while (keep > 0 && !CLIXML_START.startsWith(held.slice(held.length - keep))) keep -= 1
+          out += held.slice(0, held.length - keep)
+          held = held.slice(held.length - keep)
+          return out
+        }
+        out += held.slice(0, start)
+        held = held.slice(start)
+        const close = held.indexOf('</Objs>')
+        if (close < 0) return out
+        let end = close + '</Objs>'.length
+        // Wait for the line break that may follow (it goes with the block).
+        if (held.length - end < 2 && '\r\n'.startsWith(held.slice(end))) return out
+        if (held.startsWith('\r\n', end)) end += 2
+        else if (held.startsWith('\n', end)) end += 1
+        out += stripProgressRecords(held.slice(0, end))
+        held = held.slice(end)
+      }
+    },
+    flush(): string {
+      const rest = stripProgressRecords(held)
+      held = ''
+      return rest
+    },
+  }
+}

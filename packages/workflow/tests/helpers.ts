@@ -123,7 +123,7 @@ export async function workflowContext(options: { signal?: AbortSignal; member?: 
     },
     ...(options.member === true ? { member: { name: 'm', executionForm: 'delegated' as const } } : {}),
   }
-  return { root: services.workspace.root, context, records, asks, sandbox: services.sandbox }
+  return { root: services.workspace.root, context, records, asks, sandbox: services.sandbox, services }
 }
 
 /** The records of one type. */

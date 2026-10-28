@@ -38,9 +38,10 @@ async function setup(mode: SandboxMode = 'workspace-write') {
   })
   const tool = runCodeTool(services.sandbox)
   const run = (code: string, options: Parameters<typeof context>[0] = {}, extra: Record<string, unknown> = {}) => tool.handler({ code, ...extra }, context(options))
-  return { root: services.workspace.root, tool, run, asks }
+  return { root: services.workspace.root, tool, run, asks, services }
 }
 
+const windowsSandbox = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
 const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
 
 describe('run_code', () => {
@@ -140,4 +141,19 @@ describe('run_code', () => {
     expect(output.content).toContain('"refused"')
     expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: run_code' })])
   })
+
+  it.runIf(windowsSandbox)('runs in the Windows sandbox and calls host functions (srt-win gives the process no stdin)', async () => {
+    const { root, run, services } = await setup()
+    try {
+      expect(await services.commandSandbox()).toMatchObject({ kind: 'active' })
+      const output = await run(`await writeFile('made.txt', 'from the sandbox'); console.log('logged'); return await readFile('made.txt')`)
+      expect(output.isError, output.content).toBe(false)
+      expect(output.content).toContain('"from the sandbox"')
+      expect(output.content).toContain('logged')
+      expect(output.content).not.toContain('CLIXML')
+      expect(await readFile(join(root, 'made.txt'), 'utf8')).toBe('from the sandbox')
+    } finally {
+      await services.dispose()
+    }
+  }, 180_000)
 })

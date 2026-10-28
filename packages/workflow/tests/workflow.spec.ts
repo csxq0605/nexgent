@@ -13,6 +13,8 @@ import { FakeRunner, ofType, workflowContext } from './helpers.js'
 
 const hasBwrap = process.platform === 'linux' && spawnSync('bwrap', ['--version']).status === 0 && spawnSync('socat', ['-V']).status === 0
 
+const windowsSandbox = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
+
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
 describe('workflow tool', () => {
@@ -264,4 +266,20 @@ describe('workflow recovery planning', () => {
     expect(output.content).toContain('refused')
     expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: workflow' })])
   })
+
+  it.runIf(windowsSandbox)('runs the script in the Windows sandbox and talks to the host (srt-win gives it no stdin)', async () => {
+    const { context, sandbox, services } = await workflowContext()
+    try {
+      expect(await services.commandSandbox()).toMatchObject({ kind: 'active' })
+      const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox }).handler({
+        script: `const [a, b] = await parallel([() => agent('first', { name: 'one' }), () => agent('second', { name: 'two' })]); log('both', a.text, b.text); return [a.text, b.text]`,
+      }, context)
+      expect(output.isError, output.content).toBe(false)
+      expect(output.content).toContain('one done')
+      expect(output.content).toContain('two done')
+      expect(output.content).not.toContain('CLIXML')
+    } finally {
+      await services.dispose()
+    }
+  }, 180_000)
 })

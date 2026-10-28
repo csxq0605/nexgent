@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { checkCommandShell, findPwsh, JOB_LAUNCHER, POWERSHELL_51_NOTICE, PWSH_MISSING_MESSAGE, resetPowerShellCache, selectPowerShell, startFailureMessage, takePowerShellNotice } from '../src/index.js'
+import { checkCommandShell, findPwsh, JOB_LAUNCHER, POWERSHELL_51_NOTICE, progressFilter, PWSH_MISSING_MESSAGE, resetPowerShellCache, selectPowerShell, startFailureMessage, takePowerShellNotice } from '../src/index.js'
 
 const files = (...paths: string[]) => (path: string): boolean => paths.includes(path)
 
@@ -80,5 +80,23 @@ describe('startFailureMessage', () => {
 
   it('keeps the original error for a direct spawn', () => {
     expect(startFailureMessage('git', enoent, false)).toBe('failed to start git: spawn pwsh ENOENT')
+  })
+})
+
+describe('progressFilter', () => {
+  it('drops progress records that arrive in pieces and passes everything else on', () => {
+    const progress = '<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><PR N="Record"><AV>Preparing modules for first use.</AV></PR></MS></Obj>'
+    const text = `before\n#< CLIXML\r\n<Objs Version="1.1.0.1">${progress}</Objs>\r\nafter\n`
+    for (const size of [1, 3, 7, 50, text.length]) {
+      const filter = progressFilter()
+      let out = ''
+      for (let i = 0; i < text.length; i += size) out += filter.push(text.slice(i, i + size))
+      out += filter.flush()
+      expect(out, String(size)).toBe('before\nafter\n')
+    }
+    const plain = progressFilter()
+    expect(plain.push('#< not clixml')).toBe('#< not clixml')
+    expect(plain.push('ab#< CLI')).toBe('ab')
+    expect(plain.flush()).toBe('#< CLI')
   })
 })

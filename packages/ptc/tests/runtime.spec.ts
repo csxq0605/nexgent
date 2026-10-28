@@ -2,12 +2,13 @@
  * The PTC process runtime: protocol, host calls, the empty environment, the
  * permission model, bounds, and that a stopped program leaves no process.
  */
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { currentPowerShell, processGroupAlive, programScript } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { jobLauncherProgram, parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
+import { BOOTSTRAP_SOURCE, jobLauncherProgram, parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -41,6 +42,10 @@ describe('program command line', () => {
     expect(args.slice(1, 2)).toEqual(['--allow-fs-read=C:\\T\\nexgent-ptc-1.mjs'])
     expect(args.at(-1)).toBe('C:\\T\\nexgent-ptc-1.mjs')
     expect(programArgs({ version: 'v22.12.0' })).toContain('--eval')
+    // Host messages through a file: readable too, and passed after the entry module.
+    const withInput = programArgs({ version: 'v22.12.0', entryFile: 'C:\\T\\e.mjs', inputFile: 'C:\\T\\in.jsonl' })
+    expect(withInput).toContain('--allow-fs-read=C:\\T\\in.jsonl')
+    expect(withInput.slice(-2)).toEqual(['C:\\T\\e.mjs', 'C:\\T\\in.jsonl'])
     expect(programScript('C:\\Program Files\\node.exe', ["it's"], 'win32')).toBe("& 'C:\\Program Files\\node.exe' 'it''s'\nexit $LASTEXITCODE")
     expect(programScript('/usr/bin/node', ["it's"], 'linux')).toBe("exec '/usr/bin/node' 'it'\\''s'")
   })
@@ -56,6 +61,21 @@ describe('runProgram', () => {
     })
     expect(result).toMatchObject({ status: 'completed', value: { args: { n: 1 }, seen: 'function' }, calls: 1 })
     expect(result.output).toBe('sum 5\nraw\nwarn\n')
+  })
+
+  it('talks through a message file when the process has no stdin (as in the Windows sandbox), and removes the file', async () => {
+    const dir = await tempDir()
+    const entryFile = join(dir, 'entry.mjs')
+    const inputFile = join(dir, 'in.jsonl')
+    await writeFile(entryFile, BOOTSTRAP_SOURCE)
+    const echo: HostFunction = { name: 'echo', call: async ([text]) => text }
+    const result = await runProgram({
+      cwd: dir, entryFile, inputFile, functions: [add, echo],
+      code: `let total = 0; for (let i = 0; i < 20; i++) total = await add(total, i); return { total, text: await echo('é'.repeat(40000)) }`,
+    })
+    expect(result).toMatchObject({ status: 'completed', value: { total: 190 }, calls: 21 })
+    expect((result.value as { text: string }).text).toBe('é'.repeat(40000))
+    expect(existsSync(inputFile)).toBe(false)
   })
 
   it('starts with an empty environment: no host variable, not even a secret, reaches the program', async () => {
