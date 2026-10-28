@@ -130,9 +130,9 @@ public static class NexgentRestrict {
       int levelEnd = TokenEnd(rest, 0);
       string level = rest.Substring(0, levelEnd);
       string path = Unquote(rest.Substring(SkipSpaces(rest, levelEnd)).TrimEnd());
-      bool low = level == "low";
-      uint error = Label(path, low);
-      if (low && error == 5) {
+      bool toLow = level == "low";
+      uint error = Label(path, toLow);
+      if (toLow && error == 5) {
         if (!AllowOwnerChange(path, true)) {
           Console.Error.WriteLine("nexgent-sandbox: Windows does not let this account mark " + path + " writable for the sandbox: only the folder's owner or an administrator can (error 5)");
           return 9011;
@@ -140,7 +140,7 @@ public static class NexgentRestrict {
         error = Label(path, true);
         if (error != 0) AllowOwnerChange(path, false);
       }
-      if (!low) AllowOwnerChange(path, false);
+      if (!toLow) AllowOwnerChange(path, false);
       if (error != 0) { Console.Error.WriteLine("nexgent-sandbox: cannot label " + path + " (error " + error + ")"); return 9011; }
       return 0;
     }

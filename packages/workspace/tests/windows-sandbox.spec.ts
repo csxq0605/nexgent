@@ -63,7 +63,7 @@ describe('Windows access plan', () => {
     expect(RESTRICT_SOURCE).toContain('S:(ML;OICI;NW;;;LW)')
     // A folder the user owns but may only modify: they allow themselves WRITE_OWNER while it is labelled.
     expect(RESTRICT_SOURCE).toContain('FileSystemRights.TakeOwnership')
-    expect(RESTRICT_SOURCE).toContain('if (low && error == 5)')
+    expect(RESTRICT_SOURCE).toContain('if (toLow && error == 5)')
     expect(launcherArgument('C:\\T')).toBe('low|C:\\T')
     expect(launcherArgument(undefined)).toBe('low')
   })
