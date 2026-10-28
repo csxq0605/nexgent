@@ -5,6 +5,8 @@
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import { COLLABORATION_LIMITS, WORKFLOW_TOOL, type SessionRecord } from '@nexgent/kernel'
 import { describe, expect, it } from 'vitest'
@@ -267,11 +269,13 @@ describe('workflow recovery planning', () => {
     expect(asks).toEqual([expect.objectContaining({ grantTool: 'network', pattern: 'nexgent-check.invalid', detail: 'command: workflow' })])
   })
 
-  it.runIf(windowsSandbox)('runs the script in the Windows sandbox and talks to the host (srt-win gives it no stdin)', async () => {
+  // Node, and Electron running as Node as the desktop app does (a GUI-subsystem program).
+  const electron = () => createRequire(fileURLToPath(new URL('../../../apps/desktop/package.json', import.meta.url)))('electron') as string
+  it.runIf(windowsSandbox).each([['node', undefined], ['Electron', electron]] as const)('runs the script in the Windows sandbox and talks to the host (srt-win gives it no stdin): %s', async (_name, nodePath) => {
     const { context, sandbox, services } = await workflowContext()
     try {
       expect(await services.commandSandbox()).toMatchObject({ kind: 'active' })
-      const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox }).handler({
+      const output = await workflowTool({ runner: new FakeRunner().run, sandbox: () => sandbox, ...(nodePath === undefined ? {} : { ptc: { nodePath: nodePath() } }) }).handler({
         script: `const [a, b] = await parallel([() => agent('first', { name: 'one' }), () => agent('second', { name: 'two' })]); log('both', a.text, b.text); return [a.text, b.text]`,
       }, context)
       expect(output.isError, output.content).toBe(false)

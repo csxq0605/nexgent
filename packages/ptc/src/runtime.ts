@@ -177,7 +177,8 @@ export function programEnv(host: Readonly<Record<string, string | undefined>> = 
       if (value !== undefined) env[name] = value
     }
   }
-  if (process.versions.electron !== undefined) env.ELECTRON_RUN_AS_NODE = '1'
+  // An Electron executable (the desktop app's own, or any given as `nodePath`) runs as Node; Node ignores it.
+  env.ELECTRON_RUN_AS_NODE = '1'
   return env
 }
 

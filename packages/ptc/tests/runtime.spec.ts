@@ -46,7 +46,12 @@ describe('program command line', () => {
     const withInput = programArgs({ version: 'v22.12.0', entryFile: 'C:\\T\\e.mjs', inputFile: 'C:\\T\\in.jsonl' })
     expect(withInput).toContain('--allow-fs-read=C:\\T\\in.jsonl')
     expect(withInput.slice(-2)).toEqual(['C:\\T\\e.mjs', 'C:\\T\\in.jsonl'])
-    expect(programScript('C:\\Program Files\\node.exe', ["it's"], 'win32')).toBe("& 'C:\\Program Files\\node.exe' 'it''s'\nexit $LASTEXITCODE")
+    // Windows: PowerShell starts the program, waits and copies its output (a GUI-subsystem Electron too).
+    const script = programScript('C:\\Program Files\\node.exe', ["it's", 'a b', 'C:\\x y\\', 'say "hi"'], 'win32')
+    expect(script).toContain("New-Object Diagnostics.ProcessStartInfo -ArgumentList 'C:\\Program Files\\node.exe'")
+    expect(script).toContain(`$psi.Arguments = 'it''s "a b" "C:\\x y\\\\" "say \\"hi\\""'`)
+    expect(script).toContain('$child.WaitForExit()')
+    expect(script.endsWith('exit $child.ExitCode')).toBe(true)
     expect(programScript('/usr/bin/node', ["it's"], 'linux')).toBe("exec '/usr/bin/node' 'it'\\''s'")
   })
 })
@@ -89,7 +94,7 @@ describe('runProgram', () => {
       delete process.env.NEXGENT_API_KEY
       delete process.env.PTC_PROBE
     }
-    expect(programEnv({ NEXGENT_API_KEY: 'x', PATH: '/bin' }, 'linux')).toEqual(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: '1' })
+    expect(programEnv({ NEXGENT_API_KEY: 'x', PATH: '/bin' }, 'linux')).toEqual({ ELECTRON_RUN_AS_NODE: '1' })
     expect(programEnv({ NEXGENT_API_KEY: 'x', Path: 'C:\\Windows', SYSTEMROOT: 'C:\\Windows' }, 'win32')).toMatchObject({ PATH: 'C:\\Windows', SystemRoot: 'C:\\Windows' })
   })
 

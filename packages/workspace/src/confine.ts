@@ -50,9 +50,45 @@ export function powerShellQuote(word: string): string {
   return `'${word.replaceAll("'", "''")}'`
 }
 
-/** Pure: the script that runs `program args` and exits with its code, in the shell of `platform`. */
+/** Pure: one argument quoted for a Windows command line (the rules `CommandLineToArgvW` and the C runtime read back). */
+export function windowsArgument(arg: string): string {
+  if (arg !== '' && !/[\s"]/.test(arg)) return arg
+  let out = '"'
+  let slashes = 0
+  for (const ch of arg) {
+    if (ch === '\\') {
+      slashes += 1
+      continue
+    }
+    out += ch === '"' ? `${'\\'.repeat(slashes * 2 + 1)}"` : `${'\\'.repeat(slashes)}${ch}`
+    slashes = 0
+  }
+  return `${out}${'\\'.repeat(slashes * 2)}"`
+}
+
+/**
+ * Pure: the script that runs `program args` and exits with its code, in the
+ * shell of `platform`. On Windows PowerShell starts the program itself,
+ * waits for it and copies its output byte for byte: `& program` would
+ * neither wait for nor capture a GUI-subsystem program such as Electron
+ * running as Node, and a pipeline would re-encode the output.
+ */
 export function programScript(program: string, args: readonly string[], platform: NodeJS.Platform): string {
-  if (platform === 'win32') return `& ${[program, ...args].map(powerShellQuote).join(' ')}\nexit $LASTEXITCODE`
+  if (platform === 'win32') {
+    return [
+      `$psi = New-Object Diagnostics.ProcessStartInfo -ArgumentList ${powerShellQuote(program)}`,
+      `$psi.Arguments = ${powerShellQuote(args.map(windowsArgument).join(' '))}`,
+      '$psi.UseShellExecute = $false',
+      '$psi.RedirectStandardOutput = $true',
+      '$psi.RedirectStandardError = $true',
+      '$psi.WorkingDirectory = (Get-Location).ProviderPath',
+      '$child = [Diagnostics.Process]::Start($psi)',
+      '$copies = [Threading.Tasks.Task[]]@($child.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput()), $child.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError()))',
+      '$child.WaitForExit()',
+      '[Threading.Tasks.Task]::WaitAll($copies)',
+      'exit $child.ExitCode',
+    ].join('\n')
+  }
   return ['exec', program, ...args].map((word, index) => (index === 0 ? word : shellQuote(word))).join(' ')
 }
 

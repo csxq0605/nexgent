@@ -103,7 +103,12 @@ describe('Windows access plan', () => {
     const open = '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">'
     expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}${progress}</Objs>\r\n`)).toBe('')
     expect(stripProgressRecords(`warning\n#< CLIXML\n${open}${progress}</Objs>`)).toBe('warning\n')
-    expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}${error}</Objs>`)).toBe(`#< CLIXML\n${open}${error}</Objs>\n`)
+    // Error strings become text; Windows PowerShell writes one block per record after a single header.
+    expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}${error}</Objs>`)).toBe('boom\r\n')
+    expect(stripProgressRecords(`#< CLIXML\r\n${open}${progress}</Objs>\r\n${open}${progress}</Objs>\r\n${open}${error}</Objs>\r\n`)).toBe('boom\r\n')
+    expect(stripProgressRecords(`#< CLIXML\r\n${open}<S S="Error">a &lt; b_x005F_c</S></Objs>`)).toBe('a < b_c')
+    // Something else serialized stays as it was.
+    expect(stripProgressRecords(`#< CLIXML\n${open}<Obj S="other"></Obj></Objs>`)).toBe(`${open}<Obj S="other"></Obj></Objs>`)
     expect(stripProgressRecords('plain error\n')).toBe('plain error\n')
   })
 

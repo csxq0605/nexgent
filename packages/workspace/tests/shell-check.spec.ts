@@ -86,13 +86,14 @@ describe('startFailureMessage', () => {
 describe('progressFilter', () => {
   it('drops progress records that arrive in pieces and passes everything else on', () => {
     const progress = '<Obj S="progress" RefId="0"><TN RefId="0"><T>System.Management.Automation.PSCustomObject</T></TN><MS><PR N="Record"><AV>Preparing modules for first use.</AV></PR></MS></Obj>'
-    const text = `before\n#< CLIXML\r\n<Objs Version="1.1.0.1">${progress}</Objs>\r\nafter\n`
+    const block = (inner: string) => `<Objs Version="1.1.0.1">${inner}</Objs>\r\n`
+    const text = `before\n#< CLIXML\r\n${block(progress)}${block(progress)}${block('<S S="Error">no such file_x000D__x000A_</S>')}after\n`
     for (const size of [1, 3, 7, 50, text.length]) {
       const filter = progressFilter()
       let out = ''
       for (let i = 0; i < text.length; i += size) out += filter.push(text.slice(i, i + size))
       out += filter.flush()
-      expect(out, String(size)).toBe('before\nafter\n')
+      expect(out, String(size)).toBe('before\nno such file\r\nafter\n')
     }
     const plain = progressFilter()
     expect(plain.push('#< not clixml')).toBe('#< not clixml')
