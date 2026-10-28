@@ -13,8 +13,8 @@ import {
   isWindowsPowerShell,
   planWindowsAccess,
   PROGRESS_OFF,
+  LabelRecord,
   launcherArgument,
-  restrictingSids,
   RESTRICT_SOURCE,
   sandboxScript,
   setWindowsSandboxLibrary,
@@ -48,18 +48,32 @@ describe('Windows access plan', () => {
       held, new Set([windowsKey('C:\\Users\\me\\nvm')]), exists,
     )
     expect(again).toEqual({ grantWrite: [], grantRead: [], denyRead: [], denyWrite: [] })
+    // A read-only command: every write root held before is denied, never one at or above its own.
+    const readOnly = planWindowsAccess(
+      { writeRoots: ['c:\\temp\\S1\\'], readRoots: ['C:\\Work\\App'], denyWrite: [], denyRead: [], readOnly: true },
+      held, new Set(), exists,
+    )
+    expect(readOnly).toEqual({ grantWrite: [], grantRead: [], denyRead: [], denyWrite: ['C:\\Work\\App'] })
   })
 
-  it('restricts writes to the account itself, or for a read-only command to its own capability SIDs', () => {
-    expect(restrictingSids(false, [])).toBe('USER')
-    expect(restrictingSids(true, ['S-1-5-21-9-9-9-9'])).toBe('S-1-5-21-9-9-9-9')
-    expect(restrictingSids(true, [])).toBe('S-1-5-12')
-    // The launcher always adds Everyone, RESTRICTED and the logon SID, and starts the command with WRITE_RESTRICTED.
-    expect(RESTRICT_SOURCE).toContain('",S-1-1-0,S-1-5-12"')
-    expect(RESTRICT_SOURCE).toContain('CreateRestrictedToken(token, 0x1 | 0x8')
-    expect(RESTRICT_SOURCE).toContain('0xC0000000')
-    expect(launcherArgument('USER', 'C:\\T')).toBe('USER|C:\\T')
-    expect(launcherArgument('USER', undefined)).toBe('USER')
+  it('starts the shell at Low integrity without privileges or restricting SIDs, from the command\'s temp directory', () => {
+    expect(RESTRICT_SOURCE).toContain('"S-1-16-4096"')
+    expect(RESTRICT_SOURCE).toContain('CreateRestrictedToken(token, 0x1, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero')
+    expect(RESTRICT_SOURCE).toContain('S:(ML;OICI;NW;;;LW)')
+    expect(launcherArgument('C:\\T')).toBe('low|C:\\T')
+    expect(launcherArgument(undefined)).toBe('low')
+  })
+
+  it('records labelled folders per process and hands back only those of ended processes nobody else holds', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nexgent-labels-'))
+    dirs.push(dir)
+    const alive = (pid: number) => pid !== 2
+    new LabelRecord(dir, 2, alive).save(['C:\\Gone', 'C:\\Shared'])
+    new LabelRecord(dir, 3, alive).save(['c:\\shared'])
+    const me = new LabelRecord(dir, 1, alive)
+    expect(me.heldElsewhere('C:\\SHARED')).toBe(true)
+    expect(me.orphaned()).toEqual(['C:\\Gone'])
+    expect(me.orphaned()).toEqual([])
   })
 
   it('reads tool folders under the profile, never the profile itself or a protected path', () => {
@@ -100,6 +114,11 @@ describe('createWindowsSandbox', () => {
     const recovered: string[] = []
     const wraps: Array<{ command: string; shell: unknown; config: unknown; cwd?: string }> = []
     const registered: string[] = []
+    const labels: Array<[string, boolean]> = []
+    const recordDir = await mkdtemp(join(tmpdir(), 'nexgent-labels-'))
+    dirs.push(recordDir)
+    // A process that has ended left a label behind.
+    new LabelRecord(recordDir, 999_999_999, () => false).save(['C:\\Crashed'])
     let installs = 0
     let resets = 0
     const library: WindowsLibrary = {
@@ -134,6 +153,8 @@ describe('createWindowsSandbox', () => {
         },
       },
       tools: async () => ({ launcher: 'C:\\T\\nexgent-restrict.exe', dir: 'C:\\T' }),
+      label: (_launcher, path, low) => { labels.push([path, low]) },
+      labelRecordDir: recordDir,
     }
     setWindowsSandboxLibrary(async () => library)
     const sandbox = createWindowsSandbox({ platform: 'win32', skipTrial: true, home })
@@ -141,7 +162,7 @@ describe('createWindowsSandbox', () => {
       writeRoots: [project], denyWrite: [join(project, '.nexgent'), join(project, '.git', 'hooks')], denyRead: [],
       network: true, commandId: `${id}-0123456789abcdefghijklmnopqrstuvwxyz`, shell: 'pwsh', readRoots: [project], cwd: project, ...extra,
     })
-    return { project, temp, sandbox, policy, grants, revoked, recovered, wraps, registered, counts: () => ({ installs, resets }) }
+    return { project, temp, sandbox, policy, grants, revoked, recovered, wraps, registered, labels, counts: () => ({ installs, resets }) }
   }
 
   it('reports not installed as installable, installs behind one prompt and is active after', async () => {
@@ -164,14 +185,16 @@ describe('createWindowsSandbox', () => {
     expect(await sandbox.probe()).toMatchObject({ kind: 'none', installable: true, reason: expect.stringContaining('WFP') })
   })
 
-  it('grants the roots once, runs the shell through the write-restricted launcher, passes the denies and the environment, and binds the network list', async () => {
-    const { project, sandbox, policy, grants, recovered, wraps, registered } = await setup({ provisioned: true })
+  it('grants and labels the roots once, runs the shell through the low-integrity launcher, passes the denies and the environment, and binds the network list', async () => {
+    const { project, sandbox, policy, grants, recovered, wraps, registered, labels } = await setup({ provisioned: true })
     const wrapped = await sandbox.wrap('npm test', policy('c1', { env: { TEMP: 'T' } }))
     expect(wrapped).toMatchObject({ kind: 'wrapped', program: 'srt-win.exe' })
     // Leftovers of a crashed process are cleared, the launcher's folder is readable, then the project is granted.
     expect(recovered).toEqual(['S-1-5-21-1-2-3-1001'])
     expect(grants.map(grant => [grant.sid, grant.write, grant.read])).toEqual([['S-1-5-21-1-2-3-1001', [], ['C:\\T']], ['S-1-5-21-1-2-3-1001', [project], expect.any(Array)]])
-    expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['USER|T', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
+    // The crashed process's label comes off, then the project is labelled Low.
+    expect(labels).toEqual([['C:\\Crashed', false], [project, true]])
+    expect(wraps[0]!.shell).toMatchObject({ exe: 'C:\\T\\nexgent-restrict.exe', args: ['low|T', expect.stringMatching(/pwsh|powershell/i), '-NoProfile', '-NonInteractive', '-Command'] })
     expect(wraps[0]!.command).toContain(PROGRESS_OFF)
     expect(wraps[0]!.command).toContain("[Environment]::SetEnvironmentVariable('CURL_HOME', 'C:\\T')")
     expect(wraps[0]!.command.endsWith("[Environment]::SetEnvironmentVariable('TEMP', 'T')\nnpm test")).toBe(true)
@@ -181,24 +204,23 @@ describe('createWindowsSandbox', () => {
     expect(registered).toEqual([policy('c1').commandId])
     await sandbox.wrap('npm test', policy('c2'))
     expect(grants).toHaveLength(2)
+    expect(labels).toHaveLength(2)
     expect(sandbox.annotate(policy('c1').commandId, 'Access to the path is denied.', 1)).toContain('<sandbox_violations>')
     expect(sandbox.annotate(policy('c1').commandId, 'Access to the path is denied.', 0)).toBe('Access to the path is denied.')
     await sandbox.dispose()
   })
 
-  it('lets a read-only command write only where its own capability SID is granted, and takes every grant back on dispose', async () => {
-    const { temp, sandbox, policy, grants, revoked, wraps } = await setup({ provisioned: true })
+  it('keeps a read-only command out of the write roots held before, and takes every grant and label back on dispose', async () => {
+    const { project, temp, sandbox, policy, revoked, wraps, labels } = await setup({ provisioned: true })
     await sandbox.wrap('npm test', policy('c1'))
     await sandbox.wrap('node x.mjs', policy('c2', { writeRoots: [temp], denyWrite: [], readOnly: true, env: { TEMP: temp } }))
-    const capability = grants.find(grant => grant.sid !== 'S-1-5-21-1-2-3-1001')!
-    expect(capability.write).toEqual([temp])
-    // The shell starts with TEMP set to that directory (PowerShell needs a writable TEMP to keep its full language).
-    expect((wraps[1]!.shell as { args: string[] }).args[0]).toBe(`${capability.sid}|${temp}`)
-    expect((wraps[1]!.config as { filesystem: { denyWrite: string[] } }).filesystem.denyWrite).toEqual([])
-    await sandbox.wrap('node y.mjs', policy('c3', { writeRoots: [temp], denyWrite: [], readOnly: true }))
-    expect(grants.filter(grant => grant.sid === capability.sid)).toHaveLength(1)
+    // The shell starts with TEMP set to its temp directory (PowerShell needs a writable TEMP to keep its full language).
+    expect((wraps[1]!.shell as { args: string[] }).args[0]).toBe(`low|${temp}`)
+    expect((wraps[1]!.config as { filesystem: { denyWrite: string[] } }).filesystem.denyWrite).toEqual([project])
+    expect(labels.slice(1)).toEqual([[project, true], [temp, true]])
     await sandbox.dispose()
-    expect(revoked.sort()).toEqual(['S-1-5-21-1-2-3-1001', capability.sid].sort())
+    expect(revoked).toEqual(['S-1-5-21-1-2-3-1001'])
+    expect(labels.slice(3)).toEqual([[project, false], [temp, false]])
   })
 
   it('switches Windows PowerShell 5.1 to the proxy', async () => {

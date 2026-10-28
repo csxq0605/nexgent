@@ -1,34 +1,39 @@
 /**
- * The write-restricted launcher for the Windows sandbox. `srt-win` runs a
+ * The low-integrity launcher for the Windows sandbox. `srt-win` runs a
  * command as the sandbox account, but that account is a member of
  * Authenticated Users and Users, so any folder whose ACL lets those groups
  * write (the default on a new data drive such as `E:\`) would be writable
  * from the sandbox. This launcher runs inside `srt-win` and starts the shell
- * with a write-restricted token (`CreateRestrictedToken(WRITE_RESTRICTED)`,
- * as Chromium and Codex do): a write passes only when the ACL also grants it
- * to one of the restricting SIDs, which are the SIDs we name (the sandbox
- * account itself, or a capability SID per write directory) plus the logon
- * SID, Everyone and RESTRICTED. Group grants such as Authenticated Users no
- * longer count for writes; reads are unchanged.
+ * at Low integrity, without privileges: Windows lets a Low process write
+ * only objects labelled Low (every unlabelled file counts as Medium), so
+ * group grants no longer open anything for writing. The sandbox labels
+ * the command's write directories Low while it holds them (`--label`), and
+ * the launcher labels the sandbox account's own profile Low once. Reads are
+ * unchanged. (A write-restricted token would do the same for files, but
+ * Schannel refuses restricted tokens: no HTTPS for curl, PowerShell or .NET.)
  *
  * Built once per machine with Windows PowerShell's `Add-Type`
  * (.NET Framework, present on every Windows) into the user's temp folder,
  * next to a `_curlrc` for curl inside the sandbox.
  */
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash, randomBytes } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { mkdir, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-/** C# 5 (what Windows PowerShell's `Add-Type` compiles). Usage: `nexgent-restrict.exe <sid>[,<sid>...][|<temp dir>] <command line>`; `USER` names the caller's own SID. */
+/**
+ * C# 5 (what Windows PowerShell's `Add-Type` compiles). Usage:
+ * `nexgent-restrict.exe low[|<temp dir>] <command line>` runs the command at Low integrity;
+ * `nexgent-restrict.exe --label low|none <path>` labels a folder (and what it holds) Low, or removes the label.
+ */
 export const RESTRICT_SOURCE = `using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 
 public static class NexgentRestrict {
-  [StructLayout(LayoutKind.Sequential)] struct SidAndAttributes { public IntPtr Sid; public uint Attributes; }
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)] struct StartupInfo {
     public int cb; public string reserved; public string desktop; public string title;
     public int x; public int y; public int xSize; public int ySize; public int xChars; public int yChars; public int fill;
@@ -36,65 +41,23 @@ public static class NexgentRestrict {
     public IntPtr stdInput; public IntPtr stdOutput; public IntPtr stdError;
   }
   [StructLayout(LayoutKind.Sequential)] struct ProcessInformation { public IntPtr process; public IntPtr thread; public int processId; public int threadId; }
+  [StructLayout(LayoutKind.Sequential)] struct MandatoryLabel { public IntPtr Sid; public uint Attributes; }
   [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
   [DllImport("advapi32.dll", SetLastError = true)] static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
-  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, uint length, out uint returned);
-  [DllImport("advapi32.dll", SetLastError = true)] static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount, IntPtr disable, uint deleteCount, IntPtr delete, uint restrictCount, SidAndAttributes[] restrict, out IntPtr created);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool CreateRestrictedToken(IntPtr existing, uint flags, uint disableCount, IntPtr disable, uint deleteCount, IntPtr delete, uint restrictCount, IntPtr restrict, out IntPtr created);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref MandatoryLabel info, uint length);
   [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string sid, out IntPtr result);
+  [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool ConvertStringSecurityDescriptorToSecurityDescriptorW(string sddl, uint revision, out IntPtr descriptor, IntPtr size);
+  [DllImport("advapi32.dll", SetLastError = true)] static extern bool GetSecurityDescriptorSacl(IntPtr descriptor, out bool present, out IntPtr sacl, out bool defaulted);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint SetNamedSecurityInfoW(string name, int objectType, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
+  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
   [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)] static extern bool CreateProcessAsUserW(IntPtr token, string application, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string directory, ref StartupInfo startup, out ProcessInformation info);
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int which);
   [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
   [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr process, out uint code);
   [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
-  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetProcessWindowStation();
-  [DllImport("user32.dll", SetLastError = true)] static extern IntPtr GetThreadDesktop(uint threadId);
-  [DllImport("advapi32.dll")] static extern uint GetSecurityInfo(IntPtr handle, int objectType, uint info, IntPtr owner, IntPtr group, out IntPtr dacl, IntPtr sacl, out IntPtr descriptor);
-  [DllImport("advapi32.dll")] static extern uint SetSecurityInfo(IntPtr handle, int objectType, uint info, IntPtr owner, IntPtr group, IntPtr dacl, IntPtr sacl);
-  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)] static extern uint SetEntriesInAclW(uint count, ref ExplicitAccess entries, IntPtr oldAcl, out IntPtr newAcl);
-  [StructLayout(LayoutKind.Sequential)] struct Trustee { public IntPtr multiple; public int operation; public int form; public int type; public IntPtr name; }
-  [StructLayout(LayoutKind.Sequential)] struct ExplicitAccess { public uint permissions; public int mode; public uint inheritance; public Trustee trustee; }
-
-  [DllImport("advapi32.dll", SetLastError = true)] static extern bool SetTokenInformation(IntPtr token, int infoClass, ref IntPtr info, uint length);
-
-  static ExplicitAccess GrantAll(IntPtr sid) {
-    ExplicitAccess entry = new ExplicitAccess();
-    entry.permissions = 0x10000000; // GENERIC_ALL
-    entry.mode = 1; // GRANT_ACCESS
-    entry.trustee.form = 0; // TRUSTEE_IS_SID
-    entry.trustee.type = 5; // TRUSTEE_IS_WELL_KNOWN_GROUP
-    entry.trustee.name = sid;
-    return entry;
-  }
-
-  // Objects the shell creates (its process, threads, pipes) get the token's default DACL, which grants
-  // the account and SYSTEM. Without the account among the restricting SIDs the shell could not open
-  // its own process and would hang in start-up; grant RESTRICTED as well, as Chromium does.
-  static int AllowRestrictedByDefault(IntPtr restricted, IntPtr restrictedSid) {
-    IntPtr current = TokenInfo(restricted, 6); // TokenDefaultDacl
-    if (current == IntPtr.Zero) return Fail("GetTokenInformation(TokenDefaultDacl)");
-    ExplicitAccess entry = GrantAll(restrictedSid);
-    IntPtr updated;
-    uint error = SetEntriesInAclW(1, ref entry, Marshal.ReadIntPtr(current), out updated);
-    if (error != 0) { Console.Error.WriteLine("nexgent-sandbox: SetEntriesInAcl failed (error " + error + ")"); return 9010; }
-    if (!SetTokenInformation(restricted, 6, ref updated, (uint)IntPtr.Size)) return Fail("SetTokenInformation(TokenDefaultDacl)");
-    return 0;
-  }
-
-  // The window station and desktop srt-win made for this run grant the account: grant RESTRICTED too,
-  // for shells whose restricting SIDs leave the account out. Best effort.
-  static void OpenWindowObjects(IntPtr restrictedSid) {
-    IntPtr[] objects = new IntPtr[] { GetProcessWindowStation(), GetThreadDesktop(GetCurrentThreadId()) };
-    foreach (IntPtr handle in objects) {
-      if (handle == IntPtr.Zero) continue;
-      IntPtr dacl; IntPtr descriptor;
-      // SE_WINDOW_OBJECT, DACL_SECURITY_INFORMATION
-      if (GetSecurityInfo(handle, 7, 4, IntPtr.Zero, IntPtr.Zero, out dacl, IntPtr.Zero, out descriptor) != 0) continue;
-      ExplicitAccess entry = GrantAll(restrictedSid);
-      IntPtr updated;
-      if (SetEntriesInAclW(1, ref entry, dacl, out updated) != 0) continue;
-      SetSecurityInfo(handle, 7, 4, IntPtr.Zero, IntPtr.Zero, updated, IntPtr.Zero);
-    }
-  }
+  [DllImport("user32.dll")] static extern IntPtr GetProcessWindowStation();
+  [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint threadId);
 
   static int Fail(string what) {
     int error = Marshal.GetLastWin32Error();
@@ -102,12 +65,19 @@ public static class NexgentRestrict {
     return 9010;
   }
 
-  static IntPtr TokenInfo(IntPtr token, int infoClass) {
-    uint size;
-    GetTokenInformation(token, infoClass, IntPtr.Zero, 0, out size);
-    IntPtr buffer = Marshal.AllocHGlobal((int)size);
-    if (!GetTokenInformation(token, infoClass, buffer, size, out size)) return IntPtr.Zero;
-    return buffer;
+  // The SACL with a Low no-write-up label inherited by everything below, or none at all.
+  static IntPtr LabelSacl(bool low) {
+    IntPtr descriptor; IntPtr sacl; bool present; bool defaulted;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(low ? "S:(ML;OICI;NW;;;LW)" : "S:", 1, out descriptor, IntPtr.Zero)) return IntPtr.Zero;
+    if (!GetSecurityDescriptorSacl(descriptor, out present, out sacl, out defaulted)) return IntPtr.Zero;
+    return sacl;
+  }
+
+  // SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION; Windows passes an inheritable label on to what the folder holds.
+  static uint Label(string path, bool low) {
+    IntPtr sacl = LabelSacl(low);
+    if (sacl == IntPtr.Zero) return (uint)Marshal.GetLastWin32Error();
+    return SetNamedSecurityInfoW(path, 1, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, sacl);
   }
 
   static int SkipSpaces(string line, int i) {
@@ -121,58 +91,64 @@ public static class NexgentRestrict {
     return i;
   }
 
+  // One argument as written: quotes taken off, and a trailing backslash that quoting doubled undone.
+  static string Unquote(string token) {
+    if (token.Length < 2 || token[0] != '"') return token;
+    string inner = token.Substring(1, token.Length - 2);
+    return inner.EndsWith("\\\\\\\\") ? inner.Substring(0, inner.Length - 1) : inner;
+  }
+
   public static int Main() {
     string line = Environment.CommandLine;
     int i = SkipSpaces(line, TokenEnd(line, SkipSpaces(line, 0)));
     int end = TokenEnd(line, i);
-    string sidList = line.Substring(i, end - i).Trim('"');
+    string first = Unquote(line.Substring(i, end - i));
     string rest = line.Substring(SkipSpaces(line, end));
-    // "<sids>|<temp dir>": the shell's TEMP and TMP from its first moment (PowerShell checks its language
-    // mode by writing a file to TEMP, and the account's own temp folder is not writable to a read-only command).
-    int bar = sidList.IndexOf('|');
-    if (bar >= 0) {
-      string temp = sidList.Substring(bar + 1);
-      sidList = sidList.Substring(0, bar);
-      // A quoted argument ending in a backslash had it doubled before the closing quote.
-      if (line[i] == '"' && temp.EndsWith("\\\\\\\\")) temp = temp.Substring(0, temp.Length - 1);
-      if (temp.Length > 0) { Environment.SetEnvironmentVariable("TEMP", temp); Environment.SetEnvironmentVariable("TMP", temp); }
+
+    if (first == "--label") {
+      int levelEnd = TokenEnd(rest, 0);
+      string level = rest.Substring(0, levelEnd);
+      string path = Unquote(rest.Substring(SkipSpaces(rest, levelEnd)).TrimEnd());
+      uint error = Label(path, level == "low");
+      if (error != 0) { Console.Error.WriteLine("nexgent-sandbox: cannot label " + path + " (error " + error + ")"); return 9011; }
+      return 0;
     }
-    if (sidList.Length == 0 || rest.Length == 0) { Console.Error.WriteLine("nexgent-sandbox: usage: <sids> <command line>"); return 9010; }
+
+    // "low|<temp dir>": the shell's TEMP and TMP from its first moment (PowerShell checks its language mode by
+    // writing a file to TEMP, and the account's own temp folder may not be labelled yet).
+    int bar = first.IndexOf('|');
+    string mode = bar < 0 ? first : first.Substring(0, bar);
+    if (bar >= 0 && bar + 1 < first.Length) {
+      string temp = first.Substring(bar + 1);
+      Environment.SetEnvironmentVariable("TEMP", temp);
+      Environment.SetEnvironmentVariable("TMP", temp);
+    }
+    if (mode != "low" || rest.Length == 0) { Console.Error.WriteLine("nexgent-sandbox: usage: low[|<temp>] <command line>"); return 9010; }
+
+    // The sandbox account's own profile (caches, tool settings) stays writable: label it Low, once.
+    string profile = Environment.GetEnvironmentVariable("USERPROFILE");
+    if (!string.IsNullOrEmpty(profile)) {
+      string marker = Path.Combine(profile, "AppData", "Local", "nexgent-sandbox-low");
+      if (!File.Exists(marker) && Label(profile, true) == 0) { try { File.WriteAllText(marker, ""); } catch (Exception) { } }
+    }
+    // The window station and desktop srt-win made for this run: Low as well. Best effort.
+    IntPtr windowLabel = LabelSacl(true);
+    if (windowLabel != IntPtr.Zero) {
+      SetSecurityInfo(GetProcessWindowStation(), 7, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, windowLabel);
+      SetSecurityInfo(GetThreadDesktop(GetCurrentThreadId()), 7, 0x10, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, windowLabel);
+    }
 
     IntPtr token;
     // TOKEN_ASSIGN_PRIMARY | TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ADJUST_DEFAULT
     if (!OpenProcessToken(GetCurrentProcess(), 0x0001 | 0x0002 | 0x0008 | 0x0080, out token)) return Fail("OpenProcessToken");
-    IntPtr user = TokenInfo(token, 1);
-    if (user == IntPtr.Zero) return Fail("GetTokenInformation(TokenUser)");
-    IntPtr groups = TokenInfo(token, 2);
-    if (groups == IntPtr.Zero) return Fail("GetTokenInformation(TokenGroups)");
-
-    System.Collections.Generic.List<IntPtr> sids = new System.Collections.Generic.List<IntPtr>();
-    foreach (string name in (sidList + ",S-1-1-0,S-1-5-12").Split(',')) {
-      if (name.Length == 0) continue;
-      if (name == "USER") { sids.Add(Marshal.ReadIntPtr(user)); continue; }
-      IntPtr sid;
-      if (!ConvertStringSidToSidW(name, out sid)) return Fail("ConvertStringSidToSid(" + name + ")");
-      sids.Add(sid);
-    }
-    // The logon SID: objects of this logon session (window station, desktop, named objects) grant it.
-    int count = Marshal.ReadInt32(groups);
-    int entry = 2 * IntPtr.Size;
-    for (int k = 0; k < count; k++) {
-      uint attributes = (uint)Marshal.ReadInt32(groups, IntPtr.Size + k * entry + IntPtr.Size);
-      if ((attributes & 0xC0000000) == 0xC0000000) sids.Add(Marshal.ReadIntPtr(groups, IntPtr.Size + k * entry));
-    }
-    IntPtr restrictedSid;
-    if (!ConvertStringSidToSidW("S-1-5-12", out restrictedSid)) return Fail("ConvertStringSidToSid(S-1-5-12)");
-    if (!sidList.Split(',')[0].Equals("USER")) OpenWindowObjects(restrictedSid);
-    SidAndAttributes[] restrict = new SidAndAttributes[sids.Count];
-    for (int k = 0; k < sids.Count; k++) { restrict[k].Sid = sids[k]; restrict[k].Attributes = 0; }
-
-    IntPtr restricted;
-    // DISABLE_MAX_PRIVILEGE | WRITE_RESTRICTED
-    if (!CreateRestrictedToken(token, 0x1 | 0x8, 0, IntPtr.Zero, 0, IntPtr.Zero, (uint)restrict.Length, restrict, out restricted)) return Fail("CreateRestrictedToken");
-    int allowed = AllowRestrictedByDefault(restricted, restrictedSid);
-    if (allowed != 0) return allowed;
+    IntPtr low;
+    // DISABLE_MAX_PRIVILEGE, no restricting SIDs (Schannel refuses restricted tokens)
+    if (!CreateRestrictedToken(token, 0x1, 0, IntPtr.Zero, 0, IntPtr.Zero, 0, IntPtr.Zero, out low)) return Fail("CreateRestrictedToken");
+    MandatoryLabel label = new MandatoryLabel();
+    if (!ConvertStringSidToSidW("S-1-16-4096", out label.Sid)) return Fail("ConvertStringSidToSid");
+    label.Attributes = 0x20; // SE_GROUP_INTEGRITY
+    // TokenIntegrityLevel
+    if (!SetTokenInformation(low, 25, ref label, (uint)Marshal.SizeOf(typeof(MandatoryLabel)))) return Fail("SetTokenInformation(TokenIntegrityLevel)");
 
     StartupInfo startup = new StartupInfo();
     startup.cb = Marshal.SizeOf(typeof(StartupInfo));
@@ -181,7 +157,7 @@ public static class NexgentRestrict {
     startup.stdOutput = GetStdHandle(-11);
     startup.stdError = GetStdHandle(-12);
     ProcessInformation info;
-    if (!CreateProcessAsUserW(restricted, null, new StringBuilder(rest), IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, null, ref startup, out info)) return Fail("CreateProcessAsUser");
+    if (!CreateProcessAsUserW(low, null, new StringBuilder(rest), IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, null, ref startup, out info)) return Fail("CreateProcessAsUser");
     WaitForSingleObject(info.process, 0xFFFFFFFF);
     uint code;
     if (!GetExitCodeProcess(info.process, out code)) return Fail("GetExitCodeProcess");
@@ -201,20 +177,93 @@ export interface RestrictTools {
   readonly dir: string
 }
 
-/** Pure: the restricting SIDs for one command, as the launcher's first argument. */
-export function restrictingSids(readOnly: boolean, capabilities: readonly string[]): string {
-  return [...(readOnly ? [] : ['USER']), ...capabilities].join(',') || 'S-1-5-12'
+/** Pure: the launcher's first argument: Low integrity, and the temp directory the shell starts with. */
+export function launcherArgument(temp: string | undefined): string {
+  return temp === undefined || temp === '' ? 'low' : `low|${temp}`
 }
 
-/** Pure: the launcher's first argument: the restricting SIDs, and the temp directory the shell starts with. */
-export function launcherArgument(sids: string, temp: string | undefined): string {
-  return temp === undefined || temp === '' ? sids : `${sids}|${temp}`
+/** Label `path` (and what it holds) Low, so a sandboxed command may write there, or take the label off. Throws when it fails. */
+export function labelFolder(launcher: string, path: string, low: boolean): void {
+  const result = spawnSync(launcher, ['--label', low ? 'low' : 'none', path], { windowsHide: true, timeout: 600_000, encoding: 'utf8' })
+  if (result.status !== 0) throw new Error(`cannot ${low ? 'open' : 'close'} ${path} for sandboxed writes: ${(result.stderr || result.error?.message || `exit ${String(result.status)}`).trim()}`)
 }
 
-/** Pure: a random SID for one write directory (a capability: no account has it). */
-export function randomCapabilitySid(): string {
-  const parts = Array.from({ length: 4 }, () => randomBytes(4).readUInt32LE(0))
-  return `S-1-5-21-${parts.join('-')}`
+/**
+ * Which folders each Nexgent process labelled, one file per process id in
+ * `dir`, so that the labels a crashed process left behind come off on the
+ * next start, and a folder another running process still uses keeps its label.
+ */
+export class LabelRecord {
+  constructor(private readonly dir: string, private readonly pid: number = process.pid, private readonly alive: (pid: number) => boolean = isAlive) {}
+
+  /** Write this process's labelled folders. */
+  save(paths: readonly string[]): void {
+    try {
+      mkdirSync(this.dir, { recursive: true })
+      const file = join(this.dir, `${this.pid}.json`)
+      if (paths.length === 0) rmSync(file, { force: true })
+      else writeFileSync(file, JSON.stringify(paths))
+    } catch {
+      // the labels still come off on dispose
+    }
+  }
+
+  /** Folders labelled by processes that have ended, minus those a running process still holds; their records are dropped. */
+  orphaned(): string[] {
+    const dead: string[] = []
+    const held = new Set<string>()
+    let names: string[] = []
+    try {
+      names = readdirSync(this.dir).filter(name => /^\d+\.json$/.test(name))
+    } catch {
+      return []
+    }
+    for (const name of names) {
+      const pid = Number(name.slice(0, -5))
+      let paths: string[] = []
+      try {
+        const parsed: unknown = JSON.parse(readFileSync(join(this.dir, name), 'utf8'))
+        if (Array.isArray(parsed)) paths = parsed.filter((path): path is string => typeof path === 'string')
+      } catch {
+        // unreadable: nothing to take back
+      }
+      if (pid !== this.pid && !this.alive(pid)) {
+        dead.push(...paths)
+        try {
+          rmSync(join(this.dir, name), { force: true })
+        } catch {
+          // tried again next start
+        }
+      } else {
+        for (const path of paths) held.add(path.toLowerCase())
+      }
+    }
+    return [...new Set(dead)].filter(path => !held.has(path.toLowerCase()))
+  }
+
+  /** Whether another running process holds `path`. */
+  heldElsewhere(path: string): boolean {
+    try {
+      for (const name of readdirSync(this.dir)) {
+        const pid = Number(name.slice(0, -5))
+        if (!/^\d+\.json$/.test(name) || pid === this.pid || !this.alive(pid)) continue
+        const parsed: unknown = JSON.parse(readFileSync(join(this.dir, name), 'utf8'))
+        if (Array.isArray(parsed) && parsed.some(other => typeof other === 'string' && other.toLowerCase() === path.toLowerCase())) return true
+      }
+    } catch {
+      // nothing readable: nobody else
+    }
+    return false
+  }
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM'
+  }
 }
 
 const building = new Map<string, Promise<RestrictTools>>()

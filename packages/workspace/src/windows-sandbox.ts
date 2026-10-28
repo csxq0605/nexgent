@@ -46,7 +46,7 @@ import {
   type SandboxManagerLike,
 } from './os-sandbox.js'
 import { currentPowerShell } from './shell-check.js'
-import { buildRestrictLauncher, randomCapabilitySid, launcherArgument, restrictingSids, type RestrictTools } from './windows-restrict.js'
+import { buildRestrictLauncher, labelFolder, LabelRecord, launcherArgument, type RestrictTools } from './windows-restrict.js'
 
 /** The slice of the library's `SandboxManager` used on Windows. */
 export interface WindowsManagerLike extends Pick<SandboxManagerLike, 'registerCommandNetworkLists' | 'unregisterCommandNetworkLists' | 'cleanupAfterCommand' | 'reset'> {
@@ -67,7 +67,7 @@ export interface SrtWinLike {
   readonly exe: string
   /** The sandbox account; `sid` once it is provisioned. */
   userStatus(): Promise<{ readonly provisioned: boolean; readonly credPresent: boolean; readonly sid?: string }>
-  /** Additive, process-held ACEs for a SID (the account, or a capability SID). Throws when `srt-win` fails. */
+  /** Additive, process-held ACEs for the account. Throws when `srt-win` fails. */
   grant(sandboxUserSid: string, write: readonly string[], read: readonly string[]): void
   /** Remove this process's ACEs for a SID. Never throws. */
   revoke(sandboxUserSid: string): void
@@ -81,8 +81,12 @@ export interface SrtWinLike {
 export interface WindowsLibrary {
   readonly manager: WindowsManagerLike
   readonly srt: SrtWinLike
-  /** The write-restricted launcher (`windows-restrict.ts`). */
+  /** The low-integrity launcher (`windows-restrict.ts`). */
   tools(): Promise<RestrictTools>
+  /** Label a folder Low (writable to sandboxed commands where the account may write) or take the label off. Throws when it fails. */
+  label(launcher: string, path: string, low: boolean): void
+  /** Where each process records the folders it labelled. */
+  readonly labelRecordDir: string
 }
 
 async function loadLibrary(): Promise<WindowsLibrary> {
@@ -111,6 +115,8 @@ async function loadLibrary(): Promise<WindowsLibrary> {
       },
     },
     tools: () => buildRestrictLauncher(),
+    label: labelFolder,
+    labelRecordDir: nodePath.join(tmpdir(), 'nexgent-sandbox-tools', 'labels'),
   }
 }
 
@@ -133,22 +139,54 @@ let loader: () => Promise<WindowsLibrary> = loadLibrary
 // What this process granted the account already, by comparable path.
 const grantedWrite = new Map<string, string>()
 const grantedRead = new Set<string>()
-// The capability SID of each directory a read-only command wrote to, and every SID this process granted to.
-const capabilities = new Map<string, string>()
-const grantees = new Set<string>()
+// The folders this process labelled Low, the account it granted to, and the launcher that labels.
+const labelled = new Map<string, string>()
+let grantee: string | undefined
+let labeller: { readonly launcher: string; readonly record: LabelRecord } | undefined
 let exitHook: (() => void) | undefined
 
 function forgetGrants(): void {
   grantedWrite.clear()
   grantedRead.clear()
-  capabilities.clear()
-  grantees.clear()
+  labelled.clear()
+  grantee = undefined
+  labeller = undefined
 }
 
-/** Take back every ACE this process granted (the library's `reset()` only takes back what its own config stamped). */
+/**
+ * Take back every ACE this process granted (the library's `reset()` only
+ * takes back what its own config stamped) and every Low label, except on a
+ * folder another running Nexgent still uses.
+ */
 function revokeAll(lib: WindowsLibrary | undefined): void {
-  if (lib !== undefined) for (const sid of grantees) lib.srt.revoke(sid)
+  if (lib !== undefined) {
+    if (grantee !== undefined) lib.srt.revoke(grantee)
+    if (labeller !== undefined) {
+      for (const path of labelled.values()) {
+        if (labeller.record.heldElsewhere(path)) continue
+        try {
+          lib.label(labeller.launcher, path, false)
+        } catch {
+          // a later start takes it off (the record says this process labelled it)
+          continue
+        }
+      }
+      labeller.record.save([])
+    }
+  }
   forgetGrants()
+}
+
+/** Label the write roots Low (once each), recorded first so a crash leaves a way back. */
+function openForWrites(lib: WindowsLibrary, roots: readonly string[]): void {
+  if (labeller === undefined) throw new Error('the sandbox launcher is not ready')
+  for (const root of roots) {
+    const key = windowsKey(root)
+    if (labelled.has(key)) continue
+    labelled.set(key, root)
+    labeller.record.save([...labelled.values()])
+    lib.label(labeller.launcher, root, true)
+  }
 }
 
 /** Tests: the library to use instead of `@anthropic-ai/sandbox-runtime`; resets the process state. */
@@ -219,7 +257,7 @@ export interface WindowsAccessPlan {
  * capability SIDs are granted (`windows-restrict.ts`).
  */
 export function planWindowsAccess(
-  policy: { readonly writeRoots: readonly string[]; readonly readRoots: readonly string[]; readonly denyWrite: readonly string[]; readonly denyRead: readonly string[] },
+  policy: { readonly writeRoots: readonly string[]; readonly readRoots: readonly string[]; readonly denyWrite: readonly string[]; readonly denyRead: readonly string[]; readonly readOnly?: boolean },
   heldWrite: ReadonlyMap<string, string>,
   heldRead: ReadonlySet<string>,
   exists: (path: string) => boolean,
@@ -228,12 +266,16 @@ export function planWindowsAccess(
   const grantRead = policy.readRoots.filter(root => !heldRead.has(windowsKey(root)) && !heldWrite.has(windowsKey(root)) && !grantWrite.some(write => windowsKey(write) === windowsKey(root)))
   const granted = [...heldWrite.values(), ...grantWrite, ...policy.readRoots]
   const below = (path: string) => granted.some(root => windowsWithin(root, path))
-  return {
-    grantWrite,
-    grantRead,
-    denyRead: policy.denyRead.filter(path => exists(path) && below(path)),
-    denyWrite: policy.denyWrite.filter(path => exists(path) && below(path)),
+  const denyRead = policy.denyRead.filter(path => exists(path) && below(path))
+  const denyWrite = policy.denyWrite.filter(path => exists(path) && below(path))
+  if (policy.readOnly === true) {
+    for (const root of heldWrite.values()) {
+      // Never deny a directory at or above the command's own write roots: that would take them away too.
+      if (policy.writeRoots.some(own => windowsWithin(root, own))) continue
+      if (!denyWrite.some(path => windowsKey(path) === windowsKey(root))) denyWrite.push(root)
+    }
   }
+  return { grantWrite, grantRead, denyRead, denyWrite }
 }
 
 /** Progress records would reach stderr as CLIXML noise on every command. */
@@ -319,28 +361,26 @@ async function start(lib: WindowsLibrary): Promise<WinBackend> {
   try {
     const tools = await lib.tools()
     lib.srt.grant(sid, [], [tools.dir])
-    grantees.add(sid)
+    grantee = sid
     grantedRead.add(windowsKey(tools.dir))
+    const record = new LabelRecord(lib.labelRecordDir)
+    labeller = { launcher: tools.launcher, record }
+    // Low labels a crashed process left behind.
+    for (const path of record.orphaned()) {
+      try {
+        lib.label(tools.launcher, path, false)
+      } catch {
+        // gone, or no longer ours to change
+      }
+    }
     if (exitHook === undefined) {
       exitHook = () => revokeAll(lib)
       process.once('exit', exitHook)
     }
     return { lib, gate, sid, tools }
   } catch (error) {
-    return { lib, gate, failure: `cannot set up the write-restricted launcher: ${reasonFrom(error)}` }
+    return { lib, gate, failure: `cannot set up the sandbox launcher: ${reasonFrom(error)}` }
   }
-}
-
-/** The capability SID of a write directory, granted modify on it the first time. */
-function capabilityFor(lib: WindowsLibrary, root: string): string {
-  const key = windowsKey(root)
-  const known = capabilities.get(key)
-  if (known !== undefined) return known
-  const sid = randomCapabilitySid()
-  lib.srt.grant(sid, [root], [])
-  capabilities.set(key, sid)
-  grantees.add(sid)
-  return sid
 }
 
 function acquire(): NonNullable<typeof shared> {
@@ -404,9 +444,9 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
     if (options.skipTrial === true) return undefined
     const id = randomBytes(16).toString('base64url')
     try {
-      // Through the write-restricted launcher, as every command runs.
+      // Through the low-integrity launcher, as every command runs.
       const cmd = nodePath.win32.join(process.env.SystemRoot ?? 'C:\\Windows', 'System32', 'cmd.exe')
-      const shell = { exe: b.tools.launcher, args: [restrictingSids(false, []), cmd, '/d', '/c'] }
+      const shell = { exe: b.tools.launcher, args: [launcherArgument(undefined), cmd, '/d', '/c'] }
       const { argv } = await b.lib.manager.wrapWithSandboxArgv('exit 0', shell, { filesystem: {} }, undefined, tmpdir(), { commandId: id, commandText: 'exit 0' })
       return await new Promise<string | undefined>(resolve => {
         const child = spawn(argv[0]!, argv.slice(1), { cwd: tmpdir(), stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true })
@@ -459,7 +499,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
           ...toolReadDirs((process.env.PATH ?? '').split(';'), home, [nodePath.dirname(process.execPath)], policy.denyRead, realOrUndefined),
         ]
         const plan = planWindowsAccess(
-          { writeRoots: policy.writeRoots.map(real), readRoots, denyWrite: policy.denyWrite, denyRead: policy.denyRead },
+          { writeRoots: policy.writeRoots.map(real), readRoots, denyWrite: policy.denyWrite, denyRead: policy.denyRead, readOnly: policy.readOnly === true },
           grantedWrite, grantedRead, existsSync,
         )
         if (plan.grantWrite.length > 0 || plan.grantRead.length > 0) {
@@ -467,14 +507,13 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): OsSan
           for (const root of plan.grantWrite) grantedWrite.set(windowsKey(root), root)
           for (const root of plan.grantRead) grantedRead.add(windowsKey(root))
         }
-        // A read-only command writes only where its own capability SIDs are granted (its temp directory).
-        const readOnly = policy.readOnly === true
-        const caps = readOnly ? policy.writeRoots.map(root => capabilityFor(b.lib, real(root))) : []
+        // A Low process writes only where a Low label and the account's ACE meet.
+        openForWrites(b.lib, policy.writeRoots.map(real))
         const exe = shellExe(policy.shell)
         registerNetwork({ manager: b.lib.manager, gate: b.gate }, policy)
         const { argv, env } = await b.lib.manager.wrapWithSandboxArgv(
           sandboxScript(script, { CURL_HOME: b.tools.dir, ...policy.env }, isWindowsPowerShell(exe)),
-          { exe: b.tools.launcher, args: [launcherArgument(restrictingSids(readOnly, caps), policy.env?.['TEMP'] ?? policy.env?.['TMP']), exe, '-NoProfile', '-NonInteractive', '-Command'] },
+          { exe: b.tools.launcher, args: [launcherArgument(policy.env?.['TEMP'] ?? policy.env?.['TMP']), exe, '-NoProfile', '-NonInteractive', '-Command'] },
           { filesystem: { denyRead: plan.denyRead, denyWrite: plan.denyWrite } },
           signal,
           policy.cwd,

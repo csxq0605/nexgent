@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { getWindowsSandboxUserStatusAsync, grantWindowsAcl, resolveSrtWin, VENDORED_SRT_WIN_EXE } from '@anthropic-ai/sandbox-runtime'
-import { createWindowsSandbox, defaultWriteDenies, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
+import { buildRestrictLauncher, createWindowsSandbox, defaultWriteDenies, labelFolder, LabelRecord, type OsSandbox, type OsSandboxPolicy } from '../src/index.js'
 
 const enabled = process.platform === 'win32' && process.env.NEXGENT_WINDOWS_SANDBOX_TEST === '1'
 
@@ -60,6 +60,8 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     const open = spawnSync('icacls', [wide, '/grant', '*S-1-5-11:(OI)(CI)M', '*S-1-5-32-545:(OI)(CI)M'], { encoding: 'utf8' })
     expect(open.status, open.stdout + open.stderr).toBe(0)
     await writeFile(nodePath.join(project, 'readme.txt'), 'PROJECT-TEXT')
+    await mkdir(nodePath.join(project, 'src'))
+    await writeFile(nodePath.join(project, 'src', 'existing.txt'), 'OLD')
     await writeFile(nodePath.join(project, '.nexgent', 'config.json'), '{}')
     await writeFile(nodePath.join(secret, 'key.txt'), 'SECRET-IN-PROJECT')
     await writeFile(nodePath.join(outside, 'private.txt'), 'OUTSIDE-TEXT')
@@ -104,11 +106,13 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
   })
 
   it('reads and writes the project and the temp directory', async () => {
-    const result = await go(`Get-Content readme.txt; Set-Content made.txt hello; Get-Content made.txt; Set-Content (Join-Path $env:TEMP 't.txt') t; Get-Content (Join-Path $env:TEMP 't.txt')`)
+    const result = await go(`Get-Content readme.txt; Set-Content made.txt hello; Get-Content made.txt; Set-Content src\\existing.txt NEW; Set-Content (Join-Path $env:TEMP 't.txt') t; Get-Content (Join-Path $env:TEMP 't.txt')`)
     expect(result.stdout, result.stderr).toContain('PROJECT-TEXT')
     expect(result.stdout).toContain('hello')
     expect(result.stdout).toMatch(/^t\r?$/m)
     expect(await readFile(nodePath.join(project, 'made.txt'), 'utf8')).toContain('hello')
+    // A file that was there before the project was opened for writes.
+    expect(await readFile(nodePath.join(project, 'src', 'existing.txt'), 'utf8'), result.stderr).toContain('NEW')
   }, 120_000)
 
   it('cannot read or write outside, nor read a protected path inside the project', async () => {
@@ -178,6 +182,12 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       shell: 'powershell',
       network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false },
     })
+    // curl.exe and PowerShell 7 use Schannel too.
+    const others = await go(`curl.exe -sS -o NUL -w "curl %{http_code}" https://registry.npmjs.org/; ''; 'pwsh ' + (Invoke-WebRequest -UseBasicParsing -Uri https://registry.npmjs.org/ -TimeoutSec 30).StatusCode`, {
+      network: { mode: 'allowlist', allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false },
+    })
+    expect(others.stdout, others.stderr).toContain('curl 200')
+    expect(others.stdout, others.stderr).toContain('pwsh 200')
     if (!result.stdout.includes('200')) {
       const network = { mode: 'allowlist' as const, allowedDomains: ['registry.npmjs.org'], owner: 's', ask: async () => false }
       const curl = await go(`curl.exe -sS -o NUL -w "%{http_code}" https://registry.npmjs.org/; " rc=$LASTEXITCODE"`, { network })
@@ -221,7 +231,7 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
     const sandboxSid = async () => (await getWindowsSandboxUserStatusAsync({ srtWin: resolveSrtWin({ path: VENDORED_SRT_WIN_EXE }) })).sid!
     const aclMentions = (path: string, sid: string) => {
       const out = spawnSync('icacls', [path], { encoding: 'utf8' }).stdout
-      return out.includes('srt-sandbox') || out.includes(sid)
+      return out.includes('srt-sandbox') || out.includes(sid) || /Mandatory Label\\Low/i.test(out)
     }
 
     it('takes back every grant it made', async () => {
@@ -236,6 +246,10 @@ describe.runIf(enabled)('Windows sandbox (real)', () => {
       const sid = await sandboxSid()
       const holder = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 600000)'], { stdio: 'ignore' })
       grantWindowsAcl({ sandboxUserSid: sid, write: [outside], read: [], holderPid: holder.pid!, srtWin: resolveSrtWin({ path: VENDORED_SRT_WIN_EXE }) })
+      // ...and labelled the folder Low, as the sandbox does.
+      const tools = await buildRestrictLauncher()
+      labelFolder(tools.launcher, outside, true)
+      new LabelRecord(nodePath.join(tmpdir(), 'nexgent-sandbox-tools', 'labels'), holder.pid!).save([outside])
       expect(aclMentions(outside, sid)).toBe(true)
       holder.kill()
       await new Promise(resolve => holder.once('exit', resolve))
