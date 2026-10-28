@@ -153,7 +153,8 @@
 | `approvals` | `ApprovalGrant[]` | `[]` | `project` 范围的审批授权；语义见 `permissions.md`。迁移后移到用户数据目录的 `grants.json`，迁移没完成的项目仍在这里读写 |
 | `extraReadRoots` | `string[]` | `[]` | 额外可读的绝对目录；语义见 `permissions.md`；改动它总要审批 |
 | `extraWriteRoots` | `string[]` | `[]` | 额外可写的绝对目录（文件工具与命令沙箱）；改动它总要审批 |
-| `commands.network` | boolean | `true` | 命令能否联网（有系统沙箱的平台上生效）；改动 `commands` 总要审批 |
+| `commands.network` | `"allowlist" \| "any" \| "off"`（旧值 `true` / `false` 读作 `any` / `off`） | `"allowlist"` | 命令能连哪些域名：`allowlist` 放行常用包源、代码托管、`allowedDomains` 和用户放行过的域名，其他域名问一次；macOS / Linux 的系统沙箱里生效；改动 `commands` 总要审批 |
+| `commands.allowedDomains` | string[] | `[]` | 额外直接放行的域名：`host`、`*.host`，可带 `:port` |
 | `commands.systemSandbox` | `"auto" \| "required" \| "off"` | `"auto"` | 命令的系统沙箱；`required` 时没有沙箱就不执行命令，`off` 由用户关；语义见 `permissions.md` §命令策略 |
 | `checkRetries` | integer 0–5 | 2 | 根轮里本轮的确定性检查（本轮跑过的测试命令最近一次退出码非 0、本轮交付的文件缺失或解析不了）失败时，内核把失败项（截断到 2000 字符，开头 `[Nexgent] Automatic check`）作为一条 `user.message { source: "inject" }` 发回模型，在同一轮里接着做，最多这么多次；模型对重试说明只回了文字、没调用工具时（已说明检查为什么过不了，或在问用户）不再重试；重试的模型调用计入这一轮的步数与费用上限，用户停止立即结束；0 关闭；成员不重试；改动它总要审批 |
 | `checkCommands` | string[]（≤ 5 条，每条 ≤ 500 字符） | `[]` | 项目自己的完成检查命令。根轮改动过项目（有可能写入或执行的调用成功过）时，在轮末检查前于项目根目录依次运行，经注册的 `bash`（Windows 为 `pwsh`）工具，沙箱与命令策略同模型的命令；需要审批的命令不运行，算失败。每条成为一个 id 为 `check-<n>` 的 `test-command` 检查，退出码 0 为通过；失败时和其他检查一样触发自动重试，重试说明里带输出末尾（≤ 600 字符）。每次重试前后的检查写一条账本 `check.retry`。改动它总要审批 |
@@ -250,7 +251,7 @@
 
 | `type` | 何时写 | 专有字段 |
 | --- | --- | --- |
-| `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
+| `session.start` | 创建会话时，必为 `seq: 1` | `version: 1`、`projectRoot`、`model`、`sandboxMode`、`parentSessionId?`、`title?`、`member?`（子会话必有，与 `parentSessionId` 同时出现）、`capabilityVersion?`（会话打开时采用中的能力版本）、`plan?`（`true` 表示以计划模式开始）、`commandSandbox?`（`{ kind: "active", platform }` \| `{ kind: "none", reason, installable? }` \| `{ kind: "off" }`：本会话的命令是否在系统沙箱里跑；`installable` 表示装一次就能用，Windows 上要管理员确认一次）、`thread?`（`{ coordinatorSessionId, title }`：本会话是总对话起的讨论串，见 §讨论串） |
 | `turn.start` | 一轮开始（一条用户消息及其触发的全部模型调用与工具调用） | `turn`、`handbook?`（这一轮注入的经验手册条目 id，按检索顺序，至多 `HANDBOOK_TOP_K` 个；没注入时不写）、`organization?`（这一轮是否用成员，`{ decision: "solo" \| "team", chosenBy: "size" \| "control" \| "default" \| "memory" \| "forced" \| "retry", suggested?: OrganizationName, change? }`；只在根会话、装了 `ctx.organizer` 时写，见 §工作流“按任务组队”；`retry` 只出现在旧记录里；`change` 是协调者复盘给这一轮的改动说明 `OrganizationChangeNote`，见 §组织库“协调者复盘”） |
 | `user.message` | 用户消息进入会话，或注入的合成上下文，或反馈轮的提示，或对话与讨论串之间的消息 | `turn`、`content`、`source: "user" \| "inject" \| "feedback" \| "thread"`、`materials?` |
 | `assistant.message` | 一次模型调用的流结束（含被取消的流） | `turn`、`step`、`requestId`、`content`、`toolCalls?`、`usage`、`finishReason`、`interrupted?`、`providerContent?`、`refusal?`、`reasoning?` |
@@ -263,7 +264,7 @@
 | `approval.grant` | 用户选择 `session` 范围放行，紧跟对应的 `approval.decision` | `grant: { tool, pattern?, grantedAt }` |
 | `material.added` | 宿主把一份资料复制进 `materials/` 后 | `turn?`、`material: MaterialRef` |
 | `turn.rewind` | 宿主经 `sessions.rewind` 把文件退回某一轮开始前之后，两轮之间 | `toTurn`、`restored`（写回原内容的文件）、`deleted`（删掉的文件）；不带 `turn`。写下后模型的下一次请求带一条 `<context>` 包裹的简短说明，写明哪些文件被撤回，并提醒先读文件再下结论；带 `cause` 的记录不进时间线 |
-| `session.mode` | 会话中途换模式：宿主切换（`sessions.setMode`），或用户经 `exit_plan` 批准计划 | `sandboxMode`（此后的执行模式）、`plan`（计划模式是否还开着）、`reason: "host" \| "plan-approved"`；从下一次工具调用起生效 |
+| `session.mode` | 会话中途换模式：宿主切换（`sessions.setMode`），或用户经 `exit_plan` 批准计划，或讨论串跟着协调者进出计划模式 | `sandboxMode`（此后的执行模式）、`plan`（计划模式是否还开着）、`reason: "host" \| "plan-approved" \| "coordinator"`（`coordinator`：讨论串因协调者在计划模式而进入；它随协调者的计划获批以 `plan-approved` 离开；用户自己给讨论串开的计划模式只由用户切换或批准结束）；从下一次工具调用起生效；投影的 `metadata.planFromCoordinator` 表示当前计划模式来自协调者 |
 | `deliverable.presented` | `present` 生成一个成果版本后，在该调用的 `tool.result` 之前 | `turn`、`step`、`toolCallId`、`deliverable: DeliverableVersionRef` |
 | `turn.files` | 每轮 `turn.end` 之前（装了文件追踪时，空列表也写） | `turn`、`changes: FileChange[]`、`omitted?` |
 | `feedback` | 反馈轮的 `turn.start` 之后 | `turn`、`feedback: FeedbackEntry` |
@@ -826,7 +827,7 @@ The earlier part of this conversation was compacted. Summary:
 - **`MemberResult`。** `{ status, text, deliverables, usage, requestCount, error?, merge? }`；`status` 为 `completed | failed | cancelled | budget | interrupted`，`text` 是成员最后一段回复（中断时为已流出的前缀），`deliverables` 是本次运行里 `present` 产出的版本（`DeliverableVersionRef[]`），`error` 只在非 `completed` 时出现。`budget` 表示任务树或成员份额的费用上限挡下了成员的下一次请求，或成员用完了自己的请求次数上限（`delegate` / 工作流 `agent()` 的 `maxRequests`，即 `BudgetShare.maxRequests`，按每次运行计）。
 - **成员的工作副本**：可写的成员（模式不是 `read-only`）在自己的项目副本里工作，同时运行的成员互不覆盖文件。
   - 位置：`<系统临时目录>/nexgent-workdirs/<项目键>/<成员会话 id>/`，项目键是项目真实路径的 sha256 前 16 位。副本复制项目文件，包括 `.gitignore` 忽略的文件（不含 `.git/` 与根目录 `.nexgent/`；含被忽略文件时超过下面的上限，就按快照扫描的规则不复制被忽略文件，基准文件记 `ignored: false`）；跳过的 `node_modules/`、`.venv/`、`venv/` 以链接放进副本（Windows 用 junction），命令能找到已装的依赖；符号链接照样复制成链接（Windows 不复制），不参与合并。项目超过 200 MiB 或 20 000 个文件时不建副本，成员照旧在项目目录里工作。副本的基准内容按 sha256 存在同一目录的 `objects/`，供三方合并；每个文件的基准（上次同步时的内容哈希与可执行位）存在副本自己的 `.nexgent/workdir-base.json`（扫描不含根目录 `.nexgent/`，所以不合回）。同一会话再打开时（恢复的讨论串或成员）副本保持原样，上一轮出错、停下或进程退出留下的没合回的改动由下一次合并带回项目；关闭时副本里没有未合回的改动才删除。
-  - 项目是 git 仓库时，副本带自己的 `.git/`：复制除 `objects/` 外的内容，`objects/info/alternates` 指向项目的对象库，成员可以照常查看历史、diff、提交、切分支。基准文件的 `git` 记上次同步时的 `{ head, refs, index }`（`head` 是 `ref:<分支>` 或提交哈希，`index` 是 `git ls-files -s` 的 sha256）。每轮开始时项目改了而副本没动的分支、HEAD 与索引带进副本；每轮结束时先把副本新增的对象复制进项目，再对索引、每个分支/标签与 HEAD 做三方比较：只有副本改了的写进项目（分支用带旧值检查的 `update-ref`），双方都改了算冲突，项目保留自己的，冲突路径记作 `.git/HEAD`、`.git/index` 或 `.git/<引用名>`。
+  - 项目是 git 仓库时，副本带自己的 `.git/`：复制除 `objects/` 外的内容，`objects/info/alternates` 指向项目的对象库，成员可以照常查看历史、diff、提交、切分支。基准文件的 `git` 记上次同步时的 `{ head, refs, index }`（`head` 是 `ref:<分支>` 或提交哈希，`index` 是 `git ls-files -s` 的 sha256）。每轮开始时项目改了而副本没动的分支、HEAD 与索引带进副本；每轮结束时先把副本新增的对象复制进项目，再对索引、每个分支/标签与 HEAD 做三方比较：只有副本改了的写进项目（分支用带旧值检查的 `update-ref`），双方都改了算冲突，项目保留自己的，冲突路径记作 `.git/HEAD`、`.git/index` 或 `.git/<引用名>`。检出的部分（索引、HEAD 和 HEAD 指向的分支）要和它描述的工作文件一起接受：它改到的路径在文件合并后若不是成员的版本（例如文件冲突保留了项目的），这几项一律算冲突、不写进项目，项目的工作文件、索引与 HEAD 始终一致；其他分支和标签不涉及工作文件，照常合并。git 冲突的 `copy` 是一个文本文件，内容是成员那边的值（提交、索引写出的树，或 HEAD 指向的分支）。
   - 成员的文件工具、命令的工作目录与系统沙箱的可写根都换成副本；项目本身对它只读。系统提示里的工作目录是副本，并说明轮末会合回。
   - 成员每轮开始时，把项目里在上次同步后变化、而成员没动过的文件带进副本。每轮结束时（在根轮快照完成之后）逐个文件合回项目，基准是副本上次同步时的项目：只有成员改了的，写进项目（或删除）；双方都改了且都是文本（不超过 1 MiB、UTF-8、无 NUL）、改动的行不重叠也不相邻的，逐行合并后写进项目和副本；其余算冲突，项目保留自己的版本，成员的版本存到 `conflicts/<成员会话 id>/<n>/<路径>`，父会话可以读。同一项目的合并依次进行。
   - 合并结果写在 `MemberResult.merge`：`{ applied, merged, conflicts, held? }`；以 `error` 结束的一轮不合并，写 `{ applied: [], merged: [], conflicts: [], held: true }`：半成品留在它自己的副本里，等它之后某一轮正常结束时一起合入；`applied` 是已进入项目的路径，`merged` 是其中逐行合并的，`conflicts` 每项 `{ path, kind: both-changed | deleted-in-project | deleted-by-member, copy? }`（`copy` 是成员版本的绝对路径，成员删除文件时没有）。`delegate`、`workflow` 与 `organize` 的工具结果列出合入的文件与冲突。成员在项目目录里工作时没有 `merge`。
@@ -873,7 +874,7 @@ The earlier part of this conversation was compacted. Summary:
 - `{ type: "rework", sessionId, runId?, at }`：用户要求返工，标在该会话此前最后一条 `run` 上（带 `runId` 时标那一条）。三种来源：同一会话之后的反馈轮没有评分或评分 ≤3；同一会话之后的用户消息第一句说结果不对或要重做、撤销（`asksRedo`：中文“重做、不对、错了、改回、撤销……”与英文 “redo、undo、revert、that's wrong……”只认开头，“不是我要的、改回去、doesn't work”等整句里出现也算）；某条 `run` 交付的文件全部不见了、且之后没有 Nexgent 的轮删过它们（下一个记录的轮结束时检查本项目最近 50 条，带 `runId`）。反馈轮本身不记为新的 `run`。
 - `{ type: "review", sessionId, turn, score, at }`：结局评审给这一轮的外部评审分数（0–1）。没有测试也没有用户信号的轮以 0.3 的比例请评审，其他轮 0.1，比例不可设置；有评审且分数低于 0.7 的运行不算顺利。
 - 同类任务：新任务的词与某条记录的 Jaccard 重合 ≥ 0.25 时归入其中最像的那类。词对不上任何类的轮，记录时按 `traits`（至少 3 项）找做法最像的一条，重合 ≥ 0.6 就归入它的类，否则成新类；这样说法不同、做法相同的任务落在同一类，之后两种说法的任务都能按词找到它。开始一轮时词对不上任何类，先按同一 `projectRoot` 最近一条带 `traits` 的记录用同样的规则找类（`projectClass`），找到就用这一类的建议与改法，记录时也留在这一类，这一轮试的改动因此能被判定。
-- 一次运行“顺利”：轮次正常完成，没有失败的检查，用户中途没有纠正，之后没有返工；有 `review` 行时分数不低于 0.7。还在 `waiting` 的运行结局未知，不算顺利；`profile` 行带 `completed: false`（这一轮起的讨论串运行有一次没有正常完成，或停在 `Blockers:` 等回答）时这次运行算没完成。
+- 一次运行“顺利”：轮次正常完成，没有失败的检查，用户中途没有纠正，之后没有返工；有 `review` 行时分数不低于 0.7。还在 `waiting` 的运行结局未知，不算顺利，也不计入单干与组队比较、组织选择与汇总的次数（结算后才计）；`profile` 行带 `completed: false`（这一轮起的讨论串运行有一次没有正常完成，或停在 `Blockers:` 等回答）时这次运行算没完成。
 - 结论：同类里组队与单独做各至少 5 次后，一方顺利率的 90% 区间下限（Wilson）高于另一方的顺利率，就是那一方更好；否则还在比较。
 - 选择：用更好的一方（没有结论时是组队）；另一方作对照，没有结论时占 1/5，有结论后占 1/10，对照的轮记 `control: true`、`chosenBy: "control"`。组队时从三种内置分工与本类里顺利过的 `custom` 分工中按汤普森抽样挑一个，比本类组队平均花费每多 100% 扣 0.1；建议带上它在本类最近一次顺利运行的角色（任务中改出来的分工也算），写进本轮“How this task is organized”一节，并记为 `turn.start.organization.suggested`。本类已有记录时 `chosenBy` 为 `memory`。
 - 界面：SDK `learning.status.organizations` 按类给出 `OrganizationClassSummary`（关键词、两边次数、结论、常用分工、两边顺利率、花费变化；同类组队且有画像的运行满 4 次时另有 `sinceStart { costChange, timeChange, qualityHeld }`，最近与最初各至多 3 次的中位数比较；`changesKept?`、`changesReverted?`），能力页标题下一句话说运行最多的那类。

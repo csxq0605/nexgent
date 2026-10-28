@@ -1,6 +1,6 @@
 # @nexgent/cli
 
-The `nexgent` command: `nexgent run` (new session, one task), `nexgent resume <sessionId>` (continue one), `nexgent export <sessionId>` (minimal export bundle) and `nexgent app` (launch the desktop app).
+The `nexgent` command: `nexgent run` (new session, one task), `nexgent resume <sessionId>` (continue one), `nexgent export <sessionId>` (minimal export bundle), `nexgent app` (launch the desktop app) and `nexgent sandbox install` (set up the Windows command sandbox, one administrator prompt).
 
 **Status (step 2, W4):** the CLI goes through `@nexgent/sdk`, the in-process API the desktop app shares. `run` / `resume` open the project and the session through the SDK (kernel default profile + `@nexgent/llm`, `@nexgent/session`, `@nexgent/workspace`, `@nexgent/context`, `@nexgent/skill`, `@nexgent/tasking`) behind one seam, [`src/runtime.ts`](src/runtime.ts); their behavior is unchanged except that each turn now also records its file changes (`turn.files`) and gets the step-2 context (instructions file, materials, skills).
 
@@ -11,6 +11,7 @@ nexgent run --project <dir> --task "<text>" [--sandbox <mode>] [--model <id>] [-
 nexgent resume <sessionId> --project <dir> [--task "<text>"] [--sandbox <mode>] [--json]
 nexgent export <sessionId> --project <dir> [--out <dir>] [--json]
 nexgent app [--project <dir>]
+nexgent sandbox install
 nexgent --version | --help | <command> --help
 ```
 

@@ -117,6 +117,7 @@ nexgent run --project <dir> --task "<text>" [--sandbox <mode>] [--model <id>] [-
 nexgent resume <sessionId> --project <dir> [--task "<text>"] [--sandbox <mode>] [--json]
 nexgent export <sessionId> --project <dir> [--out <dir>] [--json]
 nexgent app [--project <dir>]
+nexgent sandbox install                      # Windows：装一次命令沙箱（一次管理员确认）
 ```
 
 在仓库里用 `node apps/cli/bin/nexgent.mjs` 代替 `nexgent`。

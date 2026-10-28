@@ -2,12 +2,13 @@
  * The PTC process runtime: protocol, host calls, the empty environment, the
  * permission model, bounds, and that a stopped program leaves no process.
  */
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { processGroupAlive } from '@nexgent/workspace'
+import { currentPowerShell, processGroupAlive, programScript } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { parseProgramMessage, permissionFlag, programEnv, runProgram, type HostFunction } from '../src/index.js'
+import { BOOTSTRAP_SOURCE, jobLauncherProgram, parseProgramMessage, permissionFlag, programArgs, programEnv, runProgram, type HostFunction } from '../src/index.js'
 
 const dirs: string[] = []
 afterEach(async () => {
@@ -34,6 +35,27 @@ function leftover(pid: number | undefined): boolean {
 
 const add: HostFunction = { name: 'add', call: async ([a, b]) => (a as number) + (b as number) }
 
+describe('program command line', () => {
+  it('starts from an entry file the permission model may read, or from --eval', () => {
+    const args = programArgs({ version: 'v22.12.0', entryFile: 'C:\\T\\nexgent-ptc-1.mjs' })
+    expect(args[0]).toBe(permissionFlag('v22.12.0'))
+    expect(args.slice(1, 2)).toEqual(['--allow-fs-read=C:\\T\\nexgent-ptc-1.mjs'])
+    expect(args.at(-1)).toBe('C:\\T\\nexgent-ptc-1.mjs')
+    expect(programArgs({ version: 'v22.12.0' })).toContain('--eval')
+    // Host messages through a file: readable too, and passed after the entry module.
+    const withInput = programArgs({ version: 'v22.12.0', entryFile: 'C:\\T\\e.mjs', inputFile: 'C:\\T\\in.jsonl' })
+    expect(withInput).toContain('--allow-fs-read=C:\\T\\in.jsonl')
+    expect(withInput.slice(-2)).toEqual(['C:\\T\\e.mjs', 'C:\\T\\in.jsonl'])
+    // Windows: PowerShell starts the program, waits and copies its output (a GUI-subsystem Electron too).
+    const script = programScript('C:\\Program Files\\node.exe', ["it's", 'a b', 'C:\\x y\\', 'say "hi"'], 'win32')
+    expect(script).toContain("New-Object Diagnostics.ProcessStartInfo -ArgumentList 'C:\\Program Files\\node.exe'")
+    expect(script).toContain(`$psi.Arguments = 'it''s "a b" "C:\\x y\\\\" "say \\"hi\\""'`)
+    expect(script).toContain('$child.WaitForExit()')
+    expect(script.endsWith('exit $child.ExitCode')).toBe(true)
+    expect(programScript('/usr/bin/node', ["it's"], 'linux')).toBe("exec '/usr/bin/node' 'it'\\''s'")
+  })
+})
+
 describe('runProgram', () => {
   it('runs the body, binds host functions and globals, captures output and returns the value', async () => {
     const result = await runProgram({
@@ -44,6 +66,21 @@ describe('runProgram', () => {
     })
     expect(result).toMatchObject({ status: 'completed', value: { args: { n: 1 }, seen: 'function' }, calls: 1 })
     expect(result.output).toBe('sum 5\nraw\nwarn\n')
+  })
+
+  it('talks through a message file when the process has no stdin (as in the Windows sandbox), and removes the file', async () => {
+    const dir = await tempDir()
+    const entryFile = join(dir, 'entry.mjs')
+    const inputFile = join(dir, 'in.jsonl')
+    await writeFile(entryFile, BOOTSTRAP_SOURCE)
+    const echo: HostFunction = { name: 'echo', call: async ([text]) => text }
+    const result = await runProgram({
+      cwd: dir, entryFile, inputFile, functions: [add, echo],
+      code: `let total = 0; for (let i = 0; i < 20; i++) total = await add(total, i); return { total, text: await echo('é'.repeat(40000)) }`,
+    })
+    expect(result).toMatchObject({ status: 'completed', value: { total: 190 }, calls: 21 })
+    expect((result.value as { text: string }).text).toBe('é'.repeat(40000))
+    expect(existsSync(inputFile)).toBe(false)
   })
 
   it('starts with an empty environment: no host variable, not even a secret, reaches the program', async () => {
@@ -57,7 +94,7 @@ describe('runProgram', () => {
       delete process.env.NEXGENT_API_KEY
       delete process.env.PTC_PROBE
     }
-    expect(programEnv({ NEXGENT_API_KEY: 'x', PATH: '/bin' }, 'linux')).toEqual(process.versions.electron === undefined ? {} : { ELECTRON_RUN_AS_NODE: '1' })
+    expect(programEnv({ NEXGENT_API_KEY: 'x', PATH: '/bin' }, 'linux')).toEqual({ ELECTRON_RUN_AS_NODE: '1' })
     expect(programEnv({ NEXGENT_API_KEY: 'x', Path: 'C:\\Windows', SYSTEMROOT: 'C:\\Windows' }, 'win32')).toMatchObject({ PATH: 'C:\\Windows', SystemRoot: 'C:\\Windows' })
   })
 
@@ -169,5 +206,12 @@ describe('runProgram', () => {
     expect(parseProgramMessage('hello')).toBeUndefined()
     expect(parseProgramMessage('{"t":"call","id":"x","fn":"a","args":[]}')).toBeUndefined()
     expect(parseProgramMessage('{"t":"log","stream":"stdout","text":"a"}')).toEqual({ t: 'log', stream: 'stdout', text: 'a' })
+  })
+})
+
+describe('Windows job launcher', () => {
+  it('starts the job with the PowerShell this machine has unless the host names one', () => {
+    expect(jobLauncherProgram({})).toBe(currentPowerShell().program)
+    expect(jobLauncherProgram({ pwshPath: 'C:\\pwsh.exe' })).toBe('C:\\pwsh.exe')
   })
 })

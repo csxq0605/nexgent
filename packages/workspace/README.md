@@ -58,8 +58,8 @@ pattern / subject`（命令取命中的分段，路径取项目相对路径）�
 
 ## Not done yet
 
-- Windows ACL 隔离未接。Job Object 由启动器建立，每次命令多一次 `pwsh` 启动（约数百毫秒）。
-- Windows 命令仍没有文件边界（系统沙箱只有 Linux bubblewrap 与 macOS seatbelt）；黑名单可被绕过，见 permissions.md §已知边界。
+- Job Object 由启动器建立，每次命令多一次 `pwsh` 启动（约数百毫秒）。
+- Windows 沙箱装好前命令没有文件边界；黑名单可被绕过，见 permissions.md §已知边界。
 - 凭证文件中的密钥值不会自动进入脱敏表（只有被清洗的环境变量值与插件配置 `secrets`）。
 - `list_files` / `search_text` 是纯 JS 实现，语义向 ripgrep 看齐但不保证与它逐字一致（正则是 JavaScript 语法）；`multiline` 整文件读入，超过 16 MiB 的文件跳过并提示。
 
@@ -72,9 +72,11 @@ pattern / subject`（命令取命中的分段，路径取项目相对路径）�
 
 ## 命令的系统沙箱、后台运行与输出（ADR 0022 决策 1、6、7）
 
-- **系统沙箱**（`src/os-sandbox.ts`，`createOsSandbox()`）：包装 `@anthropic-ai/sandbox-runtime`（钉 0.0.80，Apache-2.0）。库的 `SandboxManager` 是进程级单例，所以全局只初始化一次（延迟、不带网络与文件规则），写根、写保护、读保护和网络开关全部作为每次 `wrapWithSandbox` 的 `customConfig` 传入，不同项目的会话可以在同一进程并发。网络允许时不加网络段（命令用宿主网络，不走代理）；`network: false` 时给空白名单（新网络命名空间，无网络）。`probe()` 做依赖检查并真跑一条试验命令，失败返回 `{ kind: 'none', reason }`，`wrap()` 返回 `unavailable`，从不抛错。Linux 需要 `bwrap`、`socat`、`rg`；Windows 与缺依赖的平台为 `none`。
+- **系统沙箱**（`src/os-sandbox.ts`，`createOsSandbox()`）：包装 `@anthropic-ai/sandbox-runtime`（钉 0.0.80，Apache-2.0）。库的 `SandboxManager` 是进程级单例，所以全局只初始化一次（延迟，全局只有空的域名名单），写根、写保护、读保护作为每次 `wrapWithSandbox` 的 `customConfig` 传入，不同项目的会话可以在同一进程并发。网络：每条命令都只经库的本机代理出去；命令的域名名单（`network-policy.ts`：常用包源、`commands.allowedDomains`、`network` 授权）按随机的 `commandId` 登记给代理；名单外的域名由 `NetworkGate` 交给正在运行的命令所属的会话询问（`askHost`），多个会话分不清时拒绝。`probe()` 做依赖检查并真跑一条试验命令，失败返回 `{ kind: 'none', reason }`，`wrap()` 返回 `unavailable`，从不抛错。Linux 需要 `bwrap`、`socat`、`rg`；缺依赖的平台为 `none`。
 - **网络桥的寿命**（Linux）：库为网络常驻 `socat` 桥。进程内只生成一个包装脚本（临时目录里，退出时删除），让 `socat` 经 `setpriv --pdeathsig KILL` 启动，宿主被强杀时桥随之结束；没有 `setpriv` 时用库的默认方式。`WorkspacePlugin` 在 `agents` 可用时就开始探测，所以第一个会话不等探测；新会话与重开的会话都等探测完成，`session.start` 记 `commandSandbox`（经 `AgentsService.useCommandSandboxProbe`）。
 - **策略输入**由宿主经 `ShellToolDeps.os`（`ShellSandboxDeps`）给出：`inputs(context)` 返回 `ShellSandboxInputs`（是否启用、`required`、项目根、只读、本会话放行的写根、读保护路径、读保护里仍可读的路径 `allowRead`——迁移到用户数据目录的项目的 `materials/` 与 `outputs/`、网络）。工具参数 `sandbox: false` 请求沙箱外重跑，经 `approveUnsandboxed` 钩子批准，没有钩子就拒绝。
 - **后台运行**：`bash` / `pwsh` 的 `run_in_background` 立即返回编号；`shell_output`（读新增输出和状态）、`shell_kill`（杀进程树）。登记表是 `BackgroundShells`，宿主在会话关闭时调用 `backgroundShellsFor(deps).disposeSession(sessionId)`；宿主进程退出时同步 SIGKILL 所有后台进程树。
 - **输出**：每个流在进程里保留头尾（默认合计 64 KiB，中间写 `[nexgent: N bytes omitted from the middle]`）；给模型的文本最多约 30 000 字符，头尾各半；完整的（已脱敏的）stdout / stderr 写到会话临时目录，被截断时路径附在结果里，没截断就删。
+- **Windows 系统沙箱**（`src/windows-sandbox.ts`，`createWindowsSandbox()`）：库的 `srt-win` 后端。命令以沙箱账户 `srt-sandbox` 运行；写目录与要读的目录（项目、`allowRead`、`PATH` 上用户目录下的工具目录、Node 所在目录）经 `grantWindowsAcl` 授权（本进程持有，`dispose` 最后一个实例时 `reset` 撤掉），读 / 写保护路径作为每条命令的 `--deny-*`；shell 经 `windows-restrict.ts` 的 `nexgent-restrict.exe` 以低完整性级别启动，写目录贴低完整性标签（`labelFolder`，`LabelRecord` 按进程记下；用户只有修改权限的自有目录先给自己加 WRITE_OWNER 再贴，摘标签时去掉；贴不上时不记录、命令不执行并写明原因），盘的默认 ACL 给 Authenticated Users / Users 的写权限不再生效；只读命令对本进程此前授权的写目录加拒绝写入；`dispose` 时显式撤销本进程的全部授权并摘掉标签，启动时 `acl recover` 与标签记录清理崩溃残留；网络经 WFP 只能连库的代理，与其他平台共用 `NetworkGate`。命令要的环境变量写在 PowerShell 脚本开头（沙箱进程从自己的配置文件环境起步）；`pwsh` 工具与沙箱里的程序把 stderr 里的 CLIXML 还原成文本（`stripProgressRecords` / 流式 `progressFilter`：进度记录去掉，错误与警告保留文字）。没装时 `probe()` 为 `{ kind: 'none', installable: true }`；`install()` / `installCommandSandbox()` 弹一次管理员确认后重新探测。授权或包装失败返回 `fatal`，命令不执行。宿主在沙箱没装时经 `commandsUnconfined` 让不是只读的命令逐条审批。
+- **其他进程**（`src/confine.ts`）：`confineProgram` 把 `run_code` 与函数模块的 Node 进程按调用方会话包进同一个系统沙箱（只有会话临时目录可写）。
 - **Windows**：没有 `pwsh` 时回退到 Windows PowerShell 5.1，工具描述和第一条结果里提示一次；Job Object 启动器按 `$PSVersionTable` 选 `ArgumentList`（7）或手工转义的 `Arguments`（5.1）。

@@ -96,6 +96,7 @@ export const METHOD_SPECS: Readonly<Record<SdkMethodName, MethodSpec>> = {
   'handbook.setStatus': { projectId: id, entryId: id, status: { kind: 'handbookStatus' }, reason: { kind: 'string', optional: true } },
   'learning.status': project,
   'learning.acknowledge': {},
+  'commandSandbox.install': {},
 }
 
 const SANDBOX_MODES = new Set(['read-only', 'workspace-write', 'full-access'])

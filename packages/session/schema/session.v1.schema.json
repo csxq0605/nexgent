@@ -1071,6 +1071,9 @@
                 },
                 "reason": {
                   "type": "string"
+                },
+                "installable": {
+                  "type": "boolean"
                 }
               }
             },
@@ -1124,7 +1127,8 @@
         "reason": {
           "enum": [
             "host",
-            "plan-approved"
+            "plan-approved",
+            "coordinator"
           ]
         }
       }

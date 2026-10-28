@@ -96,3 +96,42 @@ export function errorScope(scope: CostCapScope): 'task' | 'conversation' | 'proj
 export function errorMetric(limit: CostLimit): 'usd' | 'tokens' | 'requests' {
   return limit === 'maxUsd' ? 'usd' : limit === 'maxTokens' ? 'tokens' : 'requests'
 }
+
+/**
+ * The model requests the project's agents sent in this process, by request
+ * id, with when each was sent and what it has cost so far. Shared by every
+ * agent of the project (`AgentsService`), so `costCaps.perProject` holds
+ * across sessions that run at the same time: a request is reserved here
+ * before it is sent, with no await between the cap check and the
+ * reservation, and the ledger's records of a request this book holds are
+ * not counted again (one boundary: the request id, not when either was read).
+ */
+export class ProjectSpendBook {
+  private readonly entries = new Map<string, { readonly at: number; readonly spend: Spend }>()
+
+  /** Count a request about to be sent (or one already sent that the book did not see go out). */
+  reserve(requestId: string, at = Date.now()): void {
+    if (!this.entries.has(requestId)) this.entries.set(requestId, { at, spend: { requests: 1, tokens: 0, usd: 0, estimated: false } })
+  }
+
+  /** Add a reserved request's known tokens and dollars once its usage is known. */
+  settle(requestId: string, tokens: number, usd: number, estimated: boolean): void {
+    const entry = this.entries.get(requestId)
+    if (entry === undefined) return
+    entry.spend.tokens += tokens
+    entry.spend.usd += usd
+    if (estimated) entry.spend.estimated = true
+  }
+
+  /** Whether the book counts this request (its ledger records are then left out). */
+  has(requestId: string): boolean {
+    return this.entries.has(requestId)
+  }
+
+  /** What the requests sent at or after `from` (epoch ms) have cost. */
+  since(from: number): Spend {
+    let total = zeroSpend()
+    for (const entry of this.entries.values()) if (entry.at >= from) total = addSpend(total, entry.spend)
+    return total
+  }
+}

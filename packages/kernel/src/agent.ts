@@ -56,6 +56,7 @@ import {
   type HostRecordInput,
   type HostRecordType,
   type SessionLock,
+  type SessionModeReason,
   type SessionRecord,
   type SessionRecordInput,
   type SessionState,
@@ -85,7 +86,7 @@ import { validateJsonSchema } from './json-schema.js'
 import { exitPlanTool } from './plan-mode.js'
 import { renderSystemPrompt, type SystemPromptTemplate } from './system-prompt.js'
 import type { TaskTree } from './task-tree.js'
-import { addSpend, capStatus, errorMetric, errorScope, subtractSpend, usageUsd, warningKey, zeroSpend, type CapStatus, type CostWarning, type Spend } from './cost-caps.js'
+import { addSpend, capStatus, errorMetric, errorScope, subtractSpend, usageUsd, warningKey, zeroSpend, ProjectSpendBook, type CapStatus, type CostWarning, type Spend } from './cost-caps.js'
 import { abortPromise, deadline, timeoutOf, TimeoutReason } from './util/timeout.js'
 
 /** Timeout code of the kernel's whole-request model deadline. */
@@ -322,6 +323,8 @@ export interface AgentInit {
   readonly sandboxMode: SandboxMode
   /** ADR 0022: start (or resume) in plan mode. */
   readonly plan?: boolean
+  /** Resumed plan mode was taken from the coordinator ({@link Agent.planFromCoordinator}). */
+  readonly planFromCoordinator?: boolean
   readonly settings: AgentSettings
   readonly projectConfig: ProjectConfig
   readonly history: readonly Exclude<LLMMessage, { role: 'system' }>[]
@@ -347,13 +350,11 @@ export interface AgentInit {
   /** Step 3: a member's own share of the tree's cost cap. */
   readonly budget?: BudgetShare
   /**
-   * What every agent of the project in this process has spent since it
-   * started, counted as each request goes out (shared and updated in
-   * place), so `costCaps.perProject` holds across sessions that run at the
-   * same time. Absent: only this agent's own spending is added to the
-   * ledger's total.
+   * The requests every agent of the project in this process sent, by id
+   * (shared), so `costCaps.perProject` holds across sessions that run at the
+   * same time. Absent: the agent keeps its own.
    */
-  readonly projectSpend?: Spend
+  readonly projectBook?: ProjectSpendBook
   /** Step 3: the open members this agent started (cancelled with `parent` when its turn ends). */
   readonly children?: () => readonly Agent[]
   /** A member: its parent's {@link Agent.unreadSteers} (messages the parent got while working and has not read yet). */
@@ -707,8 +708,11 @@ export class Agent {
   private outcomeWritten = false
   private lastReason: TurnEndReason | undefined
   private budgetError: ErrorInfo | undefined
-  /** `perProject` usage read from the ledger at turn start, and the live totals (the project's in this process, else this agent's) at that moment. */
-  private projectUsage: { requests: number; tokens: number; usd: number; estimated: boolean; liveRequests: number; liveTokens: number; liveUsd: number } | undefined
+  /** `perProject`: the ledger's requests inside the window, by request id, read at turn start, and where the window starts. */
+  private projectUsage: { readonly ledger: ReadonlyMap<string, Spend>; readonly from: number } | undefined
+
+  /** The project's requests sent in this process (shared by its agents), else this agent's own. */
+  private readonly projectBook: ProjectSpendBook
   private turnDenials = new Set<string>()
   /** Approval questions run one at a time, also when calls of one step run concurrently (ADR 0017 decision 5). */
   private approvalQueue: Promise<unknown> = Promise.resolve()
@@ -787,7 +791,9 @@ export class Agent {
     this.ctx = init.ctx
     this.model = init.model
     this.mode = init.sandboxMode
+    this.projectBook = init.projectBook ?? new ProjectSpendBook()
     this.planning = init.plan === true
+    this.planByCoordinator = this.planning && init.planFromCoordinator === true
     if (this.planning) this.offerExitPlan()
     this.attribution = init.attribution
     this.member = init.member
@@ -833,7 +839,7 @@ export class Agent {
    * switch in the app or CLI); the model leaves plan mode only through
    * `exit_plan`'s approval.
    */
-  async setMode(change: { readonly sandboxMode?: SandboxMode; readonly plan?: boolean }, reason: 'host' | 'plan-approved' = 'host'): Promise<void> {
+  async setMode(change: { readonly sandboxMode?: SandboxMode; readonly plan?: boolean }, reason: SessionModeReason = 'host'): Promise<void> {
     if (this.closed) throw new NexgentError('session/locked', `session ${this.sessionId} is closed`)
     const sandboxMode = change.sandboxMode ?? this.mode
     const plan = change.plan ?? this.planning
@@ -845,6 +851,7 @@ export class Agent {
       this.planTool = undefined
     }
     this.planning = plan
+    if (change.plan !== undefined) this.planByCoordinator = plan && reason === 'coordinator'
     for (const listener of [...this.modeListeners]) {
       try {
         listener({ sandboxMode, plan, reason })
@@ -854,15 +861,26 @@ export class Agent {
     }
   }
 
+  /**
+   * Plan mode is on only because the coordinator's is (switched on with
+   * reason `coordinator`); plan mode the user turned on for this session
+   * is not, and only the user's approval or switch ends it.
+   */
+  get planFromCoordinator(): boolean {
+    return this.planning && this.planByCoordinator
+  }
+
+  private planByCoordinator = false
+
   /** Listen for {@link setMode} switches (after `session.mode` is written); returns the unsubscribe. */
-  onModeChange(listener: (change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void): () => void {
+  onModeChange(listener: (change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: SessionModeReason }) => void): () => void {
     this.modeListeners.add(listener)
     return () => {
       this.modeListeners.delete(listener)
     }
   }
 
-  private readonly modeListeners = new Set<(change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: 'host' | 'plan-approved' }) => void>()
+  private readonly modeListeners = new Set<(change: { readonly sandboxMode: SandboxMode; readonly plan: boolean; readonly reason: SessionModeReason }) => void>()
 
   private offerExitPlan(): void {
     if (this.planTool !== undefined) return
@@ -1186,29 +1204,24 @@ export class Agent {
   }
 
   /** Count model requests and their known tokens for this agent and its task tree. */
-  private charge(requests: number, usage: LLMUsage | undefined): void {
+  private charge(requestId: string, requests: number, usage: LLMUsage | undefined): void {
     const tokens = usage === undefined ? 0 : knownTokens(usage)
     this.stats.requestCount += requests
     this.stats.tokens += tokens
     if (usage !== undefined) this.stats.totalUsage = addUsage(this.stats.totalUsage, usage)
     this.init.tree.requests += requests
     this.init.tree.tokens += tokens
-    const project = this.init.projectSpend
-    if (project !== undefined) {
-      project.requests += requests
-      project.tokens += tokens
-    }
+    if (requests > 0) this.projectBook.reserve(requestId)
     if (usage !== undefined) {
       // Rework D3 (ADR 0017 decision 6): dollars from the provider's price table.
       const { usd, estimated } = usageUsd(this.init.llm, this.model, usage)
       this.stats.usd += usd
       this.init.tree.usd += usd
       this.init.tree.turnUsd += usd
-      if (project !== undefined) project.usd += usd
+      this.projectBook.settle(requestId, tokens, usd, estimated)
       if (estimated) {
         this.init.tree.usdEstimated = true
         this.init.tree.turnUsdEstimated = true
-        if (project !== undefined) project.estimated = true
       }
     }
     if (this.member !== undefined) this.init.tree.chargeMember(this.sessionId, requests, usage)
@@ -1971,7 +1984,7 @@ export class Agent {
       const words = pickUserWords(await this.userWordsOutside(tail))
       const summary = result.summary + renderPickedUserWords(words)
       // The summary request is a model request of this task (`requestCount` counts every request).
-      this.charge(1, result.usage)
+      this.charge(result.requestId, 1, result.usage)
       await this.append({
         type: 'compaction',
         turn,
@@ -2063,10 +2076,11 @@ export class Agent {
    * Sum the project's usage inside `costCaps.perProject.windowDays` from the
    * ledger (`permissions.md` §费用上限): every `llm.request.start` counts as a
    * request, `llm.request.end` usage adds its known `inputTokens +
-   * outputTokens` and its estimated dollars. Read once per turn; requests
-   * sent later in the turn are added from the live totals: every agent's of
-   * the project in this process ({@link AgentInit.projectSpend}), so
-   * sessions running at the same time share the cap. An
+   * outputTokens` and its estimated dollars. Read once per turn and kept by
+   * request id; a request the project's agents sent in this process
+   * ({@link AgentInit.projectBook}) counts from that book instead, whether
+   * or not the read saw its records, so sessions running at the same time
+   * share the cap and nothing is counted twice or missed. An
    * unknown total is not under the cap: a failed read returns the error that
    * ends the turn before any request is sent. A root turn also reads the
    * conversation's spending for `perConversation` (rework D3) and the
@@ -2083,7 +2097,7 @@ export class Agent {
     if (!needsProject && conversation === undefined) return undefined
     const windowDays = project?.windowDays ?? DEFAULT_PROJECT_WINDOW_DAYS
     const from = Date.now() - windowDays * 86_400_000
-    const projectSpend = zeroSpend()
+    const projectLedger = new Map<string, Spend>()
     const root = tree.rootSessionId
     const rootSpend = zeroSpend()
     const rootTasks = new Set<string>()
@@ -2109,7 +2123,11 @@ export class Agent {
         const usage = record.type === 'llm.request.end' ? record.usage : undefined
         const model = record.type === 'llm.request.end' ? record.model : undefined
         const hostEstimated = record.type === 'llm.request.end' && record.usageEstimated === true
-        if (needsProject && inWindow) add(projectSpend, record, usage, model, hostEstimated)
+        if (needsProject && inWindow && (record.type === 'llm.request.start' || record.type === 'llm.request.end')) {
+          const spend = projectLedger.get(record.requestId) ?? zeroSpend()
+          add(spend, record, usage, model, hostEstimated)
+          projectLedger.set(record.requestId, spend)
+        }
         // Learning never counts against a conversation (permissions.md §学习与学习预算).
         if (conversation === undefined || record.learningPhase !== undefined) continue
         if (record.sessionId === root) {
@@ -2125,10 +2143,7 @@ export class Agent {
       const info = toErrorInfo(error)
       return { ...info, message: `the per-project cost cap cannot be checked because the ledger could not be read (${info.message}); no model request was sent` }
     }
-    if (needsProject) {
-      const live = this.liveProjectSpend()
-      this.projectUsage = { ...projectSpend, liveRequests: live.requests, liveTokens: live.tokens, liveUsd: live.usd }
-    }
+    if (needsProject) this.projectUsage = { ledger: projectLedger, from }
     if (conversation !== undefined) {
       let base = rootSpend
       for (const [taskId, spend] of memberSpend) if (rootTasks.has(taskId)) base = addSpend(base, spend)
@@ -2150,22 +2165,13 @@ export class Agent {
         return addSpend(read.base, subtractSpend({ requests: tree.requests, tokens: tree.tokens, usd: tree.usd, estimated: tree.usdEstimated }, { requests: read.requests, tokens: read.tokens, usd: read.usd, estimated: false }))
       }
       case 'perProject': {
-        const base = this.projectUsage
-        if (base === undefined) return undefined
-        const live = this.liveProjectSpend()
-        return {
-          requests: base.requests + live.requests - base.liveRequests,
-          tokens: base.tokens + live.tokens - base.liveTokens,
-          usd: base.usd + live.usd - base.liveUsd,
-          estimated: base.estimated || live.estimated || tree.usdEstimated,
-        }
+        const read = this.projectUsage
+        if (read === undefined) return undefined
+        let spend = this.projectBook.since(read.from)
+        for (const [requestId, logged] of read.ledger) if (!this.projectBook.has(requestId)) spend = addSpend(spend, logged)
+        return spend
       }
     }
-  }
-
-  /** What the project has spent in this process so far (every agent's), or this agent's own spending without a shared count. */
-  private liveProjectSpend(): Spend {
-    return this.init.projectSpend ?? { requests: this.stats.requestCount, tokens: this.stats.tokens, usd: this.stats.usd, estimated: false }
   }
 
   /** Rework D3: the caps that apply to this agent, by scope. */
@@ -2264,6 +2270,8 @@ export class Agent {
         const delayMs = STEP_RESEND_DELAY_MS * 2 ** (resend - 1)
         this.emit({ type: 'request.retry', sessionId: this.sessionId, turn, step, requestId: outcome.requestId, attempt: resend + 1, delayMs, error: outcome.error! })
         if (!(await pause(delayMs, signal))) break
+        // A resend is a new request: not past a cap another session reached meanwhile.
+        if (this.budgetExhausted() !== undefined) break
         outcome = await this.requestModel(turn, step, signal)
       }
       tracker.usage = addUsage(tracker.usage, outcome.usage)
@@ -2381,7 +2389,7 @@ export class Agent {
       effort: this.init.effort,
       signal: requestSignal,
     }
-    this.charge(1, undefined)
+    this.charge(requestId, 1, undefined)
     this.emit({ type: 'request.start', sessionId: this.sessionId, turn, step, requestId, model: this.model })
 
     let content = ''
@@ -2488,7 +2496,7 @@ export class Agent {
 
     const reportedUsage = usage ?? UNKNOWN_USAGE
     if (usage !== undefined) this.lastUsage = usage
-    this.charge(0, reportedUsage)
+    this.charge(requestId, 0, reportedUsage)
     await this.warnCosts(turn)
     const ordered = [...calls.entries()].sort((a, b) => a[0] - b[0]).map(([, call]) => call)
     const base = { requestId, content, usage: reportedUsage, ...(reasoning === '' ? {} : { reasoning }) }

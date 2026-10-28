@@ -181,7 +181,13 @@ export function Composer(): JSX.Element {
           ) : (
             state.sessionMeta?.plan === true && <span className="faint small model-chip" title={T.planModeHelp} data-testid="plan-chip">{T.planMode}</span>
           )}
-          {sandboxNote !== undefined && <span className="faint small model-chip" title={sandboxNote.title} data-testid="sandbox-note">{sandboxNote.text}</span>}
+          {sandboxNote !== undefined && (status?.kind === 'none' && status.installable === true ? (
+            <button type="button" className="faint small model-chip chip-button" title={`${T.installSandboxHelp}\n${status.reason}`} onClick={() => void store.installCommandSandbox()} disabled={state.sandboxInstalling === true} data-testid="sandbox-install">
+              {state.sandboxInstalling === true ? T.installingSandbox : sandboxNote.text}
+            </button>
+          ) : (
+            <span className="faint small model-chip" title={sandboxNote.title} data-testid="sandbox-note">{sandboxNote.text}</span>
+          ))}
           <span className="composer-status">{state.running ? (state.stopping ? T.stopping : T.busy) : ''}</span>
           {state.running && (
             <button type="button" className="send-button" aria-label={T.stop} title={T.stop} onClick={() => void store.cancel()} disabled={state.stopping} data-testid="stop">

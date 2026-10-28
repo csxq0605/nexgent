@@ -21,10 +21,12 @@ export const WorkflowPlugin = {
       // As in @nexgent/subagent: the `ctx.agents` augmentation may come from the kernel's sources under the test type check.
       const agents: unknown = scope.agents
       const runner = agentsMemberRunner(agents as AgentsService, capabilityPresetLookup(ctx))
-      const tool = workflowTool({ runner })
+      // The script process runs in the calling session's system sandbox once `ctx.sandbox` is loaded.
+      const sandbox = () => (ctx as unknown as { get(name: string): unknown }).get('sandbox') as object | undefined
+      const tool = workflowTool({ runner, sandbox })
       scope.effect(() => scope.tools.register(tool), `tools.register(${tool.definition.name})`)
       // New direction step 2: one entry point for organizing members.
-      const organize = organizeTool({ runner, agent: sessionId => (agents as AgentsService).get(sessionId) })
+      const organize = organizeTool({ runner, sandbox, agent: sessionId => (agents as AgentsService).get(sessionId) })
       scope.effect(() => scope.tools.register(organize), `tools.register(${organize.definition.name})`)
     })
     // New direction step 2: whether members help with a root turn.

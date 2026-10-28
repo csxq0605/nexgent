@@ -8,7 +8,7 @@
  * shutdown) cancels running turns with cause `shutdown` and closes every
  * agent.
  */
-import { zeroSpend, type Spend } from './cost-caps.js'
+import { ProjectSpendBook } from './cost-caps.js'
 import { randomUUID } from 'node:crypto'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -204,8 +204,8 @@ export class AgentsService extends Service {
   private readonly home: Context
   private readonly config: AgentsConfig
   private readonly live = new Map<string, Agent>()
-  /** What the project's agents in this process have spent (`costCaps.perProject` across sessions running at the same time). */
-  private readonly projectSpend: Spend = zeroSpend()
+  /** The requests the project's agents in this process sent (`costCaps.perProject` across sessions running at the same time). */
+  private readonly projectBook = new ProjectSpendBook()
   private readonly entries = new Map<Agent, AgentEntry>()
   private grantWriter: ProjectGrantWriter | undefined
   private readonly closeListeners = new Set<(sessionId: string) => void>()
@@ -433,7 +433,7 @@ export class AgentsService extends Service {
       sessionGrants: args.grants,
       projectGrantWriter: () => this.grantWriter,
       tree: args.tree,
-      projectSpend: this.projectSpend,
+      projectBook: this.projectBook,
       attribution,
       ...(member === undefined
         ? {}
@@ -791,6 +791,7 @@ export class AgentsService extends Service {
         effort: parent === undefined ? loaded!.input.effort ?? this.config.effort : preset?.effort ?? parent.effort,
         sandboxMode,
         ...(state.metadata.plan === true && parent === undefined ? { plan: true } : {}),
+        ...(state.metadata.planFromCoordinator === true && parent === undefined ? { planFromCoordinator: true } : {}),
         projectConfig,
         history: state.messages,
         lastTurn: state.metadata.lastTurn,

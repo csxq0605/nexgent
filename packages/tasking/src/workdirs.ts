@@ -515,7 +515,17 @@ export class LocalMemberWorkdir implements MemberWorkdir {
     if (this.git !== undefined && this.gitBase !== undefined) {
       const repository = await this.git.merge(this.gitBase)
       this.gitBase = repository.base
-      conflicts.push(...repository.conflicts)
+      for (const { theirs, ...conflict } of repository.conflicts) {
+        if (theirs === undefined) {
+          conflicts.push(conflict)
+          continue
+        }
+        // The member's value (a commit, a tree, or the branch HEAD named) is kept aside like a file's version.
+        conflictRun ??= nodePath.join(this.conflictDir, String(++this.merges))
+        const kept = abs(conflictRun, conflict.path)
+        await put(kept, Buffer.from(`${theirs}\n`, 'utf8'), false)
+        conflicts.push({ ...conflict, copy: kept })
+      }
     }
     return { applied, merged, conflicts }
   }

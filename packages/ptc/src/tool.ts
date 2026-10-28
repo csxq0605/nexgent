@@ -5,6 +5,7 @@
  * come from the contract; the description is this package's.
  */
 import { NexgentError, RUN_CODE_TOOL, type Sandbox, type Tool, type ToolOutput } from '@nexgent/kernel'
+import { runConfinedProgram } from './confined.js'
 import { projectFunctions } from './functions.js'
 import { PTC_LIMITS, runProgram, type ProgramResult, type RunProgramOptions } from './runtime.js'
 
@@ -66,7 +67,7 @@ export function runCodeTool(sandbox: Sandbox, options: RunCodeToolOptions = {}):
       if (timeoutMs !== undefined && !(Number.isInteger(timeoutMs) && (timeoutMs as number) >= PTC_LIMITS.minTimeoutMs && (timeoutMs as number) <= PTC_LIMITS.maxTimeoutMs)) {
         throw new NexgentError('tool/invalid-input', `"timeoutMs" must be an integer from ${PTC_LIMITS.minTimeoutMs} to ${PTC_LIMITS.maxTimeoutMs}`)
       }
-      const result = await runProgram({
+      const result = await runConfinedProgram(sandbox, context, RUN_CODE_TOOL.name, {
         ...options,
         code: record.code,
         cwd: context.workspace.root,

@@ -50,6 +50,8 @@ export interface AppState {
   readonly sessions: readonly SessionSummary[]
   readonly sessionId?: string | undefined
   readonly sessionMeta?: SessionMeta | undefined
+  /** The command sandbox is being installed (Windows, administrator prompt open). */
+  readonly sandboxInstalling?: boolean
   readonly sessionLoading: boolean
   /** A new conversation is being created: the composer waits for it instead of sending into the previous one. */
   readonly creatingSession: boolean
@@ -696,6 +698,22 @@ export class AppStore {
     this.startRead('userSettings')
     this.set({ userSettings })
     return true
+  }
+
+  /** Install the command sandbox (Windows: one administrator prompt); this conversation's next commands use it. */
+  async installCommandSandbox(): Promise<void> {
+    if (this.state.sandboxInstalling === true) return
+    this.set({ sandboxInstalling: true })
+    try {
+      const result = await this.guard(c => c.call('commandSandbox.install', {}))
+      if (result?.kind === 'installed') {
+        this.set(state => (state.sessionMeta === undefined ? {} : { sessionMeta: { ...state.sessionMeta, commandSandbox: result.status } }))
+      } else if (result?.kind === 'failed') {
+        this.notify(new Error(result.reason))
+      }
+    } finally {
+      this.set({ sandboxInstalling: false })
+    }
   }
 
   /** Rework D3: open the project's data folder (`~/.nexgent/projects/<id>`) in the file manager. */

@@ -11,7 +11,7 @@ import { join } from 'node:path'
 import { memberReplyExcerpt, memberReplyShare, NexgentError, renderWorkdirMerge, PROJECT_ARCHITECTURES_DIR, WORKFLOW_TOOL, type JsonValue, type Tool, type ToolOutput } from '@nexgent/kernel'
 import { saveArchitecture } from './architecture-store.js'
 import type { WorkflowMemberRunner } from './runner.js'
-import { runWorkflow, type RunWorkflowOptions, type WorkflowRunResult } from './runtime.js'
+import { confineFor, runWorkflow, type RunWorkflowOptions, type WorkflowRunResult } from './runtime.js'
 
 /**
  * Characters of the script's result shown to the model. Member replies share
@@ -40,6 +40,8 @@ export interface WorkflowToolOptions {
   readonly ptc?: RunWorkflowOptions['ptc']
   readonly maxConcurrentMembers?: number
   readonly maxMembers?: number
+  /** The project's sandbox (`ctx.sandbox`) when loaded: the script process runs in the session's system sandbox. */
+  readonly sandbox?: () => object | undefined
 }
 
 function excerpt(text: string, max: number): string {
@@ -123,6 +125,7 @@ export function workflowTool(options: WorkflowToolOptions): Tool {
         ...(options.ptc === undefined ? {} : { ptc: options.ptc }),
         ...(options.maxConcurrentMembers === undefined ? {} : { maxConcurrentMembers: options.maxConcurrentMembers }),
         ...(options.maxMembers === undefined ? {} : { maxMembers: options.maxMembers }),
+        ...confineFor(options.sandbox, context, 'workflow'),
       })
       return renderWorkflowResult(result, title, architecture)
     },

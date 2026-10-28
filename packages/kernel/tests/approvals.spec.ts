@@ -441,7 +441,8 @@ describe('cost caps', () => {
     seedRequest(ledger, 0)
     expect((await agent.run('two')).reason).toEqual({ kind: 'cancelled', cause: 'cost-cap' })
     expect(harness.llm.requests).toHaveLength(1)
-    expect(harness.store.of(agent.sessionId, 'error')[0]!.error.details).toEqual({ scope: 'project', metric: 'requests', used: 2, limit: 2 })
+    // Its own first request counts too (this process sent it), with the two from the ledger.
+    expect(harness.store.of(agent.sessionId, 'error')[0]!.error.details).toEqual({ scope: 'project', metric: 'requests', used: 3, limit: 2 })
   })
 
   it('holds perProject across sessions running at the same time', async () => {
@@ -467,6 +468,41 @@ describe('cost caps', () => {
     const results = await Promise.all([a.run('loop'), b.run('loop')])
     expect(harness.llm.requests).toHaveLength(2)
     expect(results.map(result => result.reason)).toEqual([{ kind: 'cancelled', cause: 'cost-cap' }, { kind: 'cancelled', cause: 'cost-cap' }])
+  })
+
+  it('counts a request another session sent while this turn read the ledger exactly once', async () => {
+    // Session two reads the ledger before session one's request, and finishes reading after it went out.
+    const ledger = new MemoryLedger()
+    const original = ledger.read.bind(ledger)
+    let reads = 0
+    let snapshotted: () => void = () => undefined
+    let sent: () => void = () => undefined
+    const secondSnapshot = new Promise<void>(resolve => {
+      snapshotted = resolve
+    })
+    const firstSent = new Promise<void>(resolve => {
+      sent = resolve
+    })
+    ledger.read = async function* (query?: { readonly types?: readonly string[] }) {
+      const seen = []
+      for await (const record of original()) seen.push(record)
+      const mine = query?.types?.includes('cost.warning') === true ? ++reads : 0
+      if (mine === 1) await secondSnapshot
+      if (mine === 2) {
+        snapshotted()
+        await firstSent
+      }
+      yield* seen
+    }
+    harness = await bootHarness({ ledger, script: [async function* () {
+      sent()
+      yield* textReply('a')
+    }, textReply('never sent')] })
+    writeConfig(harness.root, { costCaps: { perProject: { maxRequests: 1 } } })
+    const [a, b] = [await harness.app.agents.create(), await harness.app.agents.create()]
+    const results = await Promise.all([a.run('one'), b.run('two')])
+    expect(harness.llm.requests).toHaveLength(1)
+    expect(results.map(result => result.reason.kind).sort()).toEqual(['cancelled', 'completed'])
   })
 
   it('sends no request and ends the turn with a readable error when the ledger cannot be read', async () => {

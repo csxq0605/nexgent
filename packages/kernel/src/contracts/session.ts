@@ -243,10 +243,21 @@ export interface ApprovalDecisionRecord extends SessionRecordBase {
 /** ADR 0022 decision 1: whether commands run in an OS sandbox. */
 export type CommandSandboxStatus =
   | { readonly kind: 'active'; readonly platform: string }
-  /** No OS sandbox here (Windows, missing bubblewrap...); commands run under the command policy only. */
-  | { readonly kind: 'none'; readonly reason: string }
+  /**
+   * No OS sandbox here (missing bubblewrap, Windows sandbox not installed...);
+   * commands run under the command policy only. `installable`: a one-time
+   * install (Windows: one administrator prompt) sets it up.
+   */
+  | { readonly kind: 'none'; readonly reason: string; readonly installable?: boolean }
   /** The project turned it off (`commands.systemSandbox: 'off'`). */
   | { readonly kind: 'off' }
+
+/** What installing the command sandbox did. */
+export type CommandSandboxInstallResult =
+  | { readonly kind: 'installed'; readonly status: CommandSandboxStatus }
+  /** The user dismissed the administrator prompt. */
+  | { readonly kind: 'cancelled' }
+  | { readonly kind: 'failed'; readonly reason: string }
 
 /**
  * ADR 0022 decision 4: the session's mode changed mid-session (a host switch,
@@ -258,9 +269,17 @@ export interface SessionModeRecord extends SessionRecordBase {
   readonly sandboxMode: SandboxMode
   /** Whether plan mode is on after the change. */
   readonly plan: boolean
-  /** `host` for a switch the user made in the app or CLI; `plan-approved` after `exit_plan`. */
-  readonly reason: 'host' | 'plan-approved'
+  /**
+   * `host` for a switch the user made in the app or CLI; `plan-approved` after
+   * `exit_plan` (or, for a thread that took plan mode from its coordinator,
+   * when the coordinator's plan is approved); `coordinator` when a thread
+   * enters plan mode because its coordinator is in plan mode.
+   */
+  readonly reason: SessionModeReason
 }
+
+/** Why a `session.mode` switch happened (see {@link SessionModeRecord.reason}). */
+export type SessionModeReason = 'host' | 'plan-approved' | 'coordinator'
 
 /** A `session`-scope grant; survives `resume`. Written right after the deciding `approval.decision`. */
 export interface ApprovalGrantRecord extends SessionRecordBase {
@@ -699,6 +718,8 @@ export interface SessionMetadata {
   readonly sandboxMode: SandboxMode
   /** ADR 0022: plan mode on; from `session.start`, then the latest `session.mode`. Absent means false. */
   readonly plan?: boolean
+  /** Plan mode is on because the coordinator's was (the latest `session.mode` turned it on with `reason: "coordinator"`). */
+  readonly planFromCoordinator?: boolean
   /** `session`-scope approval grants from `approval.grant` records, in order. */
   readonly grants: readonly ApprovalGrant[]
   /** Title when set. */

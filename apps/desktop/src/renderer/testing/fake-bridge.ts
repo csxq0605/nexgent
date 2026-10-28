@@ -237,6 +237,7 @@ export class FakeBridge implements NexgentBridge {
       this.userSettings = { ...this.userSettings, learning: { noticeAcknowledgedAt: this.userSettings.learning.noticeAcknowledgedAt ?? '2026-10-16T12:00:00.000Z' } }
       return this.userSettings
     },
+    'commandSandbox.install': () => ({ kind: 'installed', status: { kind: 'active', platform: 'windows' } }),
     'settings.setApiKey': input => (input.value === '' ? { configured: false } : { configured: true, source: 'file' }),
   }
 
