@@ -13,17 +13,20 @@
  *   directories it must read (the project in read-only mode, the folders
  *   of tools on `PATH` under the user's profile, the Node that runs
  *   programs) a read ACE; write- and read-protected paths below them get
- *   a deny ACE for that command (`srt-win exec --deny-*`).
+ *   a deny ACE for that command (`srt-win exec --deny-*`). The shell
+ *   runs at Low integrity (`windows-restrict.ts`) and the write
+ *   directories carry a Low label while this process holds them, so a
+ *   folder that lets Authenticated Users or Users write stays closed.
  *
  * The account and the WFP filter are made once per machine by
  * {@link installWindowsCommandSandbox} (one administrator prompt). Until
  * then the probe reports `none` with `installable: true`; a command whose
  * sandbox cannot be set up does not run (`fatal`).
  *
- * Grants are held by this process (the library keeps them in a per-user
- * database and removes them at `reset()`, or after a crash on the next
- * start): a directory granted for writing stays writable for later
- * sandboxed commands of this process, except read-only ones.
+ * Grants and labels are held by this process and taken back on dispose or
+ * exit (after a crash, on the next start): a directory granted for writing
+ * stays writable for later sandboxed commands of this process, except
+ * read-only ones.
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
