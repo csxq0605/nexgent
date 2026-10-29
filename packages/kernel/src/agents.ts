@@ -9,6 +9,7 @@
  * agent.
  */
 import { ProjectSpendBook } from './cost-caps.js'
+import { ProjectSpendGate } from './project-spend-gate.js'
 import { randomUUID } from 'node:crypto'
 import { Context, Service, type Fiber } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
@@ -206,6 +207,12 @@ export class AgentsService extends Service {
   private readonly live = new Map<string, Agent>()
   /** The requests the project's agents in this process sent (`costCaps.perProject` across sessions running at the same time). */
   private readonly projectBook = new ProjectSpendBook()
+  /** The same cap across instances on the project: the spend lock and reservations in its ledgers directory. */
+  private get spendGate(): ProjectSpendGate {
+    this.gate ??= new ProjectSpendGate(this.home.workspace.layout.ledgers)
+    return this.gate
+  }
+  private gate: ProjectSpendGate | undefined
   private readonly entries = new Map<Agent, AgentEntry>()
   private grantWriter: ProjectGrantWriter | undefined
   private readonly closeListeners = new Set<(sessionId: string) => void>()
@@ -434,6 +441,7 @@ export class AgentsService extends Service {
       projectGrantWriter: () => this.grantWriter,
       tree: args.tree,
       projectBook: this.projectBook,
+      spendGate: this.spendGate,
       attribution,
       ...(member === undefined
         ? {}

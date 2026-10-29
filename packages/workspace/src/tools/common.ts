@@ -18,6 +18,7 @@ import {
   grantMatches,
   NexgentError,
   toErrorInfo,
+  workingCopyRoot,
   type ApprovalGrant,
   type ApprovalRequest,
   type ApprovalRisk,
@@ -80,10 +81,7 @@ export function grantAdmits(grant: ApprovalGrant, tool: string, subject: PolicyS
 }
 
 /** Rework K4 D4: the root of the member's own copy of the project the call works in, when it has one. */
-export function memberCopyRoot(context: Pick<ToolContext, 'workspace'>): string | undefined {
-  const layout = context.workspace.layout as { readonly root?: string } | undefined
-  return layout?.root === undefined || layout.root === context.workspace.root ? undefined : context.workspace.root
-}
+export const memberCopyRoot = workingCopyRoot
 
 /** The sandbox for this call's mode, admitting only this call's session temp dir. */
 export function sandboxFor(deps: ToolDeps, context: ToolContext): LocalSandbox {

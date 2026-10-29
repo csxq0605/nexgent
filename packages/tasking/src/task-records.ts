@@ -56,6 +56,11 @@ import {
 import { isNotFound } from './files-util.js'
 import { walkProject, type WalkedEntry } from './project-walk.js'
 
+/** A project-relative `/` path under `root`. */
+function absoluteIn(root: string, path: string): string {
+  return nodePath.join(root, ...path.split('/'))
+}
+
 /** At most this many test commands the model ran become checks per turn (the latest ones). */
 export const MAX_TEST_COMMANDS = 3
 
@@ -85,17 +90,41 @@ const NO_TESTS_RAN: readonly number[] = [126, 127]
 const PYTEST_NO_TESTS_RAN: readonly number[] = [4, 5]
 const PYTEST_PATTERN = /^(?:uv\s+run\s+)?(?:python3?\s+-m\s+)?pytest\b/
 
+/** Runner options that make a run with no tests exit 0. */
+const PASS_WITH_NO_TESTS = /(?:^|\s)--pass(?:WithNoTests|-with-no-tests)\b/
+
+/**
+ * Whether the exit code of a command may not be the test runner's: the
+ * command goes on after the runner (`;`, `||`, a line break), pipes its
+ * output into another command (`|`, `|&`; the shell tool sets no
+ * `pipefail`, so the last command's code wins) or runs it in the
+ * background (`&`). `&&` keeps the runner's failing code, and redirects
+ * (`2>&1`, `&>`) change no code; quoted text is an argument and is not
+ * looked at.
+ */
+export function exitCodeMasked(command: string): boolean {
+  const bare = command
+    .replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ' ')
+    .replace(/&&/g, ' ')
+    .replace(/\d*>&\d*-?|&>>?/g, ' ')
+  return /[;|&\n]/.test(bare)
+}
+
 /**
  * Whether a shell call counts as a test run for `test-command` checks: the
  * command matches {@link TEST_COMMAND_PATTERN} and its exit code does not
  * say that no test ran. Step 5 (user decision 2026-10-13, ADR 0006
  * decision 10) keeps failing runs: a failing run is a failing check. Exploratory
  * commands (`ls`, `cat`, builds) never match the pattern, whatever their
- * exit code. `exitCode` absent reads as 0 (step-4 callers).
+ * exit code. A run whose exit code may not be the runner's
+ * ({@link exitCodeMasked}: `npm test || true`, `pytest | tail`) or that
+ * passes with no tests (`--passWithNoTests`) says nothing about the tests
+ * and does not count either. `exitCode` absent reads as 0 (step-4 callers).
  */
 export function testCommandRan(command: string, exitCode: number | undefined): boolean {
   const text = command.trim()
   if (!TEST_COMMAND_PATTERN.test(text)) return false
+  if (exitCodeMasked(text) || PASS_WITH_NO_TESTS.test(text)) return false
   const code = exitCode ?? 0
   if (NO_TESTS_RAN.includes(code)) return false
   if (PYTEST_PATTERN.test(text) && PYTEST_NO_TESTS_RAN.includes(code)) return false
@@ -269,7 +298,7 @@ export class LocalTaskRecorder implements TaskRecorder {
     const checkRuns = input.checkRuns ?? []
     for (const spec of specs) {
       const own = spec.id.startsWith(CHECK_COMMAND_ID_PREFIX) ? checkRuns[Number(spec.id.slice(CHECK_COMMAND_ID_PREFIX.length)) - 1] : undefined
-      results.push({ ...(own === undefined ? await this.run(spec, runs) : checkRunResult(own)), target: spec.id })
+      results.push({ ...(own === undefined ? await this.run(spec, runs, input.root ?? this.layout.root) : checkRunResult(own)), target: spec.id })
     }
     const record: TaskChecksRecord = {
       formatVersion: 1,
@@ -317,14 +346,14 @@ export class LocalTaskRecorder implements TaskRecorder {
     return tests.slice(-MAX_TEST_COMMANDS)
   }
 
-  private async run(spec: TaskCheckSpec, runs: readonly TestRun[]): Promise<Omit<TaskCheck, 'target'>> {
+  private async run(spec: TaskCheckSpec, runs: readonly TestRun[], root: string): Promise<Omit<TaskCheck, 'target'>> {
     switch (spec.name) {
       case 'file-exists': {
-        const info = await stat(this.absolute(spec.path)).catch(() => undefined)
+        const info = await stat(absoluteIn(root, spec.path)).catch(() => undefined)
         return info?.isFile() === true ? { name: spec.name, passed: true } : { name: spec.name, passed: false, detail: 'missing' }
       }
       case 'parses': {
-        const problem = await this.parseProblem(spec.path, spec.format)
+        const problem = await this.parseProblem(absoluteIn(root, spec.path), spec.format)
         return problem === undefined ? { name: spec.name, passed: true } : { name: spec.name, passed: false, detail: problem }
       }
       case 'test-command': {
@@ -337,10 +366,10 @@ export class LocalTaskRecorder implements TaskRecorder {
   }
 
   /** Why a file does not parse as `format`, or `undefined` when it does. */
-  private async parseProblem(path: string, format: ParseFormat): Promise<string | undefined> {
+  private async parseProblem(absolute: string, format: ParseFormat): Promise<string | undefined> {
     let bytes: Buffer
     try {
-      bytes = await readFile(this.absolute(path))
+      bytes = await readFile(absolute)
     } catch (error) {
       return isNotFound(error) ? 'missing' : 'unreadable'
     }
@@ -375,10 +404,6 @@ export class LocalTaskRecorder implements TaskRecorder {
   async indexedPaths(): Promise<ReadonlySet<string> | undefined> {
     const index = await this.readIndex()
     return index === undefined ? undefined : new Set(Object.keys(index.files))
-  }
-
-  private absolute(path: string): string {
-    return nodePath.join(this.layout.root, ...path.split('/'))
   }
 
   private async readIndex(): Promise<SnapshotIndex | undefined> {

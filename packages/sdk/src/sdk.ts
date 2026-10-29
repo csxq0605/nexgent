@@ -659,9 +659,8 @@ export class LocalNexgentSdk implements NexgentSdk {
         return entry.agent.steer(text, { source: 'thread' })
       },
       running: sessionId => this.isRunning(project().projectId, sessionId),
-      turnDone: async (sessionId, turn) => {
-        const running = project().sessions.get(sessionId)?.running
-        if (running?.tally.turn === turn) await running.done.catch(() => undefined)
+      turnDone: async sessionId => {
+        await project().sessions.get(sessionId)?.running?.done.catch(() => undefined)
       },
       wake: async (sessionId, text) => {
         const entry = await this.rootSession(project(), sessionId)

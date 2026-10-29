@@ -8,7 +8,7 @@
  */
 import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import { NexgentError, type JsonValue, type Sandbox, type SandboxMode, type ToolContext } from '@nexgent/kernel'
+import { NexgentError, sandboxForCall, type JsonValue, type Sandbox, type ToolContext } from '@nexgent/kernel'
 import type { HostFunction } from './runtime.js'
 
 /** Largest file `readFile` returns. */
@@ -18,25 +18,13 @@ export const MAX_WRITE_BYTES = 10 * 1024 * 1024
 /** Entries `listDir` returns at most. */
 export const MAX_LIST_ENTRIES = 2_000
 
-interface ScopedSandbox extends Sandbox {
-  withMode(mode: SandboxMode): Sandbox
-  forSession(sessionId: string | undefined): Sandbox
-}
-
-/** The sandbox for one call: the session's mode and its own temp directory, as the file tools use it. */
-function sandboxFor(sandbox: Sandbox, context: ToolContext): Sandbox {
-  const scoped = sandbox as Partial<ScopedSandbox>
-  const moded = typeof scoped.withMode === 'function' ? (scoped as ScopedSandbox).withMode(context.sandboxMode) : sandbox
-  const session = moded as Partial<ScopedSandbox>
-  return typeof session.forSession === 'function' ? (session as ScopedSandbox).forSession(context.sessionId) : moded
-}
-
 /** Check one path for the calling session; deny → `sandbox/denied`, ask → the call's approval flow. */
 export async function enforcePath(sandbox: Sandbox, kind: 'read' | 'write', path: string, context: ToolContext): Promise<void> {
   if (kind === 'write' && context.sandboxMode === 'read-only') {
     throw new NexgentError('sandbox/denied', `SANDBOX_DENIED: write ${context.workspace.relative(path)} — the session is read-only`, { details: { mode: context.sandboxMode, path } })
   }
-  const scoped = sandboxFor(sandbox, context)
+  // The session's working directory (a thread's copy) is its project, as for the file tools.
+  const scoped = sandboxForCall(sandbox, context)
   const decision = kind === 'read' ? await scoped.checkRead(path) : await scoped.checkWrite(path)
   if (decision.allowed) return
   if (decision.code !== 'approval-required') {

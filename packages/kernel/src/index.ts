@@ -99,3 +99,4 @@ export type {
   OrganizationSuggestion,
 } from './capability-hooks.js'
 export { EXIT_PLAN_DEFINITION, exitPlanTool } from './plan-mode.js'
+export { sandboxForCall, workingCopyRoot } from './call-sandbox.js'

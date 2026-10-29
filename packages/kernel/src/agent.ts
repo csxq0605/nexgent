@@ -86,6 +86,7 @@ import { validateJsonSchema } from './json-schema.js'
 import { exitPlanTool } from './plan-mode.js'
 import { renderSystemPrompt, type SystemPromptTemplate } from './system-prompt.js'
 import type { TaskTree } from './task-tree.js'
+import type { ProjectSpendGate } from './project-spend-gate.js'
 import { addSpend, capStatus, errorMetric, errorScope, subtractSpend, usageUsd, warningKey, zeroSpend, ProjectSpendBook, type CapStatus, type CostWarning, type Spend } from './cost-caps.js'
 import { abortPromise, deadline, timeoutOf, TimeoutReason } from './util/timeout.js'
 
@@ -355,6 +356,12 @@ export interface AgentInit {
    * same time. Absent: the agent keeps its own.
    */
   readonly projectBook?: ProjectSpendBook
+  /**
+   * The project's spend lock and reservations on disk, so `costCaps.perProject`
+   * holds across Nexgent instances on the same project too (two CLI runs,
+   * the app and a CLI run).
+   */
+  readonly spendGate?: ProjectSpendGate
   /** Step 3: the open members this agent started (cancelled with `parent` when its turn ends). */
   readonly children?: () => readonly Agent[]
   /** A member: its parent's {@link Agent.unreadSteers} (messages the parent got while working and has not read yet). */
@@ -426,6 +433,17 @@ function refusalError(refusal: RefusalInfo | undefined): ErrorInfo {
 function knownTokens(usage: LLMUsage): number {
   return (typeof usage.inputTokens === 'number' ? usage.inputTokens : 0)
     + (typeof usage.outputTokens === 'number' ? usage.outputTokens : 0)
+}
+
+/** Add one ledger record to a spend: a start is a request; an end adds its known tokens and dollars. */
+function addRecordSpend(llm: Pick<LLMProvider, 'estimateUsd'>, spend: Spend, record: { readonly type: string }, usage?: LLMUsage, model?: string, hostEstimated?: boolean): void {
+  if (record.type === 'llm.request.start') spend.requests += 1
+  else if (usage !== undefined && model !== undefined) {
+    spend.tokens += knownTokens(usage)
+    const { usd, estimated } = usageUsd(llm, model, usage, hostEstimated)
+    spend.usd += usd
+    if (estimated) spend.estimated = true
+  }
 }
 
 /**
@@ -702,7 +720,7 @@ export class Agent {
   private lastReason: TurnEndReason | undefined
   private budgetError: ErrorInfo | undefined
   /** `perProject`: the ledger's requests inside the window, by request id, read at turn start, and where the window starts. */
-  private projectUsage: { readonly ledger: ReadonlyMap<string, Spend>; readonly from: number } | undefined
+  private projectUsage: { readonly ledger: ReadonlyMap<string, Spend>; readonly from: number; readonly pending?: ReadonlySet<string> } | undefined
 
   /** The project's requests sent in this process (shared by its agents), else this agent's own. */
   private readonly projectBook: ProjectSpendBook
@@ -1461,6 +1479,8 @@ export class Agent {
         deliverableFiles: tree.deliverableFiles(),
         commands: [...tree.commands],
         ...(checkRuns.runs.length === 0 ? {} : { checkRuns: checkRuns.runs }),
+        // A thread checks the files it presented in its own copy, where it wrote them.
+        ...(this.init.workdir === undefined ? {} : { root: this.workspace.root }),
         signal,
       })
       checks = results
@@ -1505,6 +1525,8 @@ export class Agent {
         deliverableFiles: tree.deliverableFiles(),
         commands: [...tree.commands],
         ...(checkRuns.runs.length === 0 ? {} : { checkRuns: checkRuns.runs }),
+        // A thread checks the files it presented in its own copy, where it wrote them.
+        ...(this.init.workdir === undefined ? {} : { root: this.workspace.root }),
         signal: bounded,
       })
     } catch {
@@ -1560,7 +1582,8 @@ export class Agent {
         callId: `check-command-${index + 1}`,
         turn,
         step: this.turnStep,
-        workspace: this.init.workspace,
+        // Where the model's own commands run: a thread's copy of the project, else the project.
+        workspace: this.workspace,
         sandboxMode: this.sandboxMode,
         signal,
         attribution: this.attribution,
@@ -2087,15 +2110,7 @@ export class Agent {
     const rootSpend = zeroSpend()
     const rootTasks = new Set<string>()
     const memberSpend = new Map<string, Spend>()
-    const add = (spend: Spend, record: { readonly type: string }, usage?: LLMUsage, model?: string, hostEstimated?: boolean): void => {
-      if (record.type === 'llm.request.start') spend.requests += 1
-      else if (usage !== undefined && model !== undefined) {
-        spend.tokens += knownTokens(usage)
-        const { usd, estimated } = usageUsd(this.init.llm, model, usage, hostEstimated)
-        spend.usd += usd
-        if (estimated) spend.estimated = true
-      }
-    }
+    const add = (spend: Spend, record: { readonly type: string }, usage?: LLMUsage, model?: string, hostEstimated?: boolean): void => addRecordSpend(this.init.llm, spend, record, usage, model, hostEstimated)
     try {
       for await (const record of this.init.ledger.read({ ...(conversation === undefined ? { from: new Date(from).toISOString() } : {}), types: ['llm.request.start', 'llm.request.end', 'cost.warning'] })) {
         const inWindow = Date.parse(record.ts) >= from
@@ -2137,6 +2152,52 @@ export class Agent {
     return undefined
   }
 
+  /** The project's ledger requests since `from` (epoch ms), by request id. */
+  private async readProjectLedger(from: number): Promise<Map<string, Spend>> {
+    const ledger = new Map<string, Spend>()
+    for await (const record of this.init.ledger.read({ from: new Date(from).toISOString(), types: ['llm.request.start', 'llm.request.end'] })) {
+      if (Date.parse(record.ts) < from || (record.type !== 'llm.request.start' && record.type !== 'llm.request.end')) continue
+      const spend = ledger.get(record.requestId) ?? zeroSpend()
+      if (record.type === 'llm.request.end') addRecordSpend(this.init.llm, spend, record, record.usage, record.model, record.usageEstimated === true)
+      else addRecordSpend(this.init.llm, spend, record)
+      ledger.set(record.requestId, spend)
+    }
+    return ledger
+  }
+
+  /**
+   * The check right before a request is sent, and its count. Without a
+   * per-project cap (or a spend gate) it is {@link budgetExhausted}, with
+   * nothing awaited before the request is counted. Under a per-project cap
+   * the check and the count are one step on disk for every instance on the
+   * project ({@link ProjectSpendGate}): holding the lock, the ledger is read
+   * again, the other instances' reservations are added, and the request is
+   * reserved when it is under the cap. A failure to check is an error: no
+   * request is sent on an unknown total.
+   */
+  private async reserveRequest(requestId: string): Promise<ErrorInfo | undefined> {
+    const gate = this.init.spendGate
+    const read = this.projectUsage
+    if (gate === undefined || read === undefined) return this.budgetExhausted()
+    try {
+      return await gate.exclusive(async () => {
+        const windowDays = this.init.projectConfig.costCaps.perProject?.windowDays ?? DEFAULT_PROJECT_WINDOW_DAYS
+        const from = Date.now() - windowDays * 86_400_000
+        const ledger = await this.readProjectLedger(from)
+        const pending = await gate.pending()
+        this.projectUsage = { ledger, from, pending }
+        const exhausted = this.budgetExhausted()
+        if (exhausted !== undefined) return exhausted
+        await gate.reserve(requestId)
+        this.projectBook.reserve(requestId)
+        return undefined
+      })
+    } catch (error) {
+      const info = toErrorInfo(error)
+      return { ...info, message: `the per-project cost cap cannot be checked (${info.message}); no model request was sent` }
+    }
+  }
+
   /** Rework D3: what each scope has spent now (`undefined`: the scope has no cap, or its totals were not read). */
   private spendOf(scope: CostCapScope): Spend | undefined {
     const tree = this.init.tree
@@ -2154,6 +2215,8 @@ export class Agent {
         if (read === undefined) return undefined
         let spend = this.projectBook.since(read.from)
         for (const [requestId, logged] of read.ledger) if (!this.projectBook.has(requestId)) spend = addSpend(spend, logged)
+        // Requests other instances reserved that the ledger does not show yet.
+        for (const requestId of read.pending ?? []) if (!this.projectBook.has(requestId) && !read.ledger.has(requestId)) spend = addSpend(spend, { requests: 1, tokens: 0, usd: 0, estimated: false })
         return spend
       }
     }
@@ -2240,15 +2303,17 @@ export class Agent {
       if (!paused) await this.drainSteers(turn)
       paused = false
       if (step === maxSteps && maxSteps >= 4 && this.messages.at(-1)?.role !== 'assistant') await this.injectNote(turn, stepLimitNote(maxSteps))
-      // Checked again with nothing awaited before the request is counted: another session of the project may have spent meanwhile.
-      const spent = this.budgetExhausted()
+      // Checked again right before the request is counted: another session of the project may have spent meanwhile.
+      const requestId = randomUUID()
+      const spent = await this.reserveRequest(requestId)
       if (spent !== undefined) {
+        if (spent.code !== 'budget/exhausted') return { kind: 'error', error: spent }
         this.budgetError = spent
         await this.appendError(spent, false, turn)
         return { kind: 'cancelled', cause: 'cost-cap' }
       }
 
-      let outcome = await this.requestModel(turn, step, signal)
+      let outcome = await this.sendRequest(turn, step, signal, requestId)
       // A transient failure (dropped stream or connection, overload) after part of the reply came: the provider could not
       // resend it, so the step is sent again from the same history; the partial reply is dropped, never kept or acted on.
       for (let resend = 1; resend <= STEP_RESENDS && resendable(outcome) && !signal.aborted; resend += 1) {
@@ -2256,8 +2321,9 @@ export class Agent {
         this.emit({ type: 'request.retry', sessionId: this.sessionId, turn, step, requestId: outcome.requestId, attempt: resend + 1, delayMs, error: outcome.error! })
         if (!(await pause(delayMs, signal))) break
         // A resend is a new request: not past a cap another session reached meanwhile.
-        if (this.budgetExhausted() !== undefined) break
-        outcome = await this.requestModel(turn, step, signal)
+        const resendId = randomUUID()
+        if (await this.reserveRequest(resendId) !== undefined) break
+        outcome = await this.sendRequest(turn, step, signal, resendId)
       }
       tracker.usage = addUsage(tracker.usage, outcome.usage)
       tracker.text = outcome.content
@@ -2355,9 +2421,17 @@ export class Agent {
   // model request
   // -------------------------------------------------------------------------
 
-  private async requestModel(turn: number, step: number, signal: AbortSignal): Promise<StreamOutcome> {
+  /** {@link requestModel}, then the request's reservation is released (its ledger records count from now on). */
+  private async sendRequest(turn: number, step: number, signal: AbortSignal, requestId: string): Promise<StreamOutcome> {
+    try {
+      return await this.requestModel(turn, step, signal, requestId)
+    } finally {
+      await this.init.spendGate?.release(requestId)
+    }
+  }
+
+  private async requestModel(turn: number, step: number, signal: AbortSignal, requestId: string): Promise<StreamOutcome> {
     const { settings, llm } = this.init
-    const requestId = randomUUID()
     const tools = this.init.tools.list()
     const local = new AbortController()
     const whole = deadline(signal, settings.modelTimeoutMs, MODEL_TIMEOUT)

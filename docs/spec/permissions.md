@@ -235,7 +235,7 @@
 ```
 
 - `maxRequests` 计模型请求次数（含失败），`maxTokens` 计 `inputTokens + outputTokens`；用量 `unknown` 的请求只计次数。
-- `perTask` 以一次 `run` / 一次 `resume` 为单位；`perProject` 以账本在 `windowDays` 内的记录累加：每轮开始读一次账本，按请求 id 记；本进程里这个项目所有会话（同时运行的讨论串与对话都算）发出的请求记在共享的账上，发请求前先查上限再登记（两步之间没有 await），账上有的请求不再从账本重复计，所以不论读账本与别的会话发请求谁先谁后，并发的会话合起来都不超过上限。
+- `perTask` 以一次 `run` / 一次 `resume` 为单位；`perProject` 以账本在 `windowDays` 内的记录累加：每轮开始读一次账本，按请求 id 记；本进程里这个项目所有会话（同时运行的讨论串与对话都算）发出的请求记在共享的账上，账上有的请求不再从账本重复计。同一项目上可能同时有几个 Nexgent（两个 `nexgent run`、桌面应用与命令行），所以有 `perProject` 时，每次发请求前先取项目的花费锁（账本目录里独占创建的 `.spend.lock`），持锁重读账本、加上别的实例已登记而账本里还没有开始记录的请求（`reservations/<requestId>`），查上限，没到再登记这次请求，然后放锁；请求结束删掉登记，此后按账本计。查与记是磁盘上的一步，不论几个会话、几个进程怎样交错，合起来都不超过上限。锁或账本读不了时不发请求，本轮以错误结束。
 - 任一上限达到时：下一次模型请求不再发出，当前轮次以 `turn.end { kind: 'cancelled', cause: 'cost-cap' }` 结束；会话先写一条 `error` 记录（`fatal: false`），账本写 `task.outcome`，二者的错误 `code` 都是 `budget/exhausted`，`ErrorInfo.details` 带 `{ scope: 'task' | 'project', metric: 'requests' | 'tokens', used, limit }`；不重试、不自动续跑。
 - `perTask` 按整棵任务树计（根会话与它的全部成员共享同一 `taskId` 与同一份累计），成员花的请求与 token 算进根会话的额度；成员的下一次请求被挡下时，成员以 `budget` 结束，父会话下一次请求同样被挡下。`ErrorInfo.details.scope` 仍为 `task`。见下节。
 - 字段缺省表示不限制。
@@ -250,7 +250,7 @@
 | 深度 | 只有根会话（含讨论串）能启动成员；成员看不到 `delegate`、`workflow`、`organize`、`start_thread`、`message_thread`、`read_thread`、`list_threads`、`update_project_notes`、`capability_draft`、`capability_try`（契约 `MEMBER_DENIED_TOOLS`：协作工具加能力工具，成员不能再启动成员，也不能起草或试用能力组件），kernel 拒绝以子会话为父会话创建子会话 |
 | 沙箱 | 成员的模式取父会话、预设、显式请求三者中最窄的；任何一项宽于父会话时创建失败，错误码 `sandbox/denied`，不悄悄降级（`childSandboxMode`）。顺序：`read-only` < `workspace-write` < `full-access` |
 | 工具范围 | 预设的 `tools`（`allow` / `deny`）用成员作用域上的 `restrict()` 实现，与父会话可见的集合求交；`MEMBER_DENIED_TOOLS` 总是叠加在上面 |
-| 路径与命令 | 与父会话相同的路径策略、命令策略和 `extraReadRoots`。可写的成员在自己的项目副本里工作（`data-formats.md` §子会话与成员“成员的工作副本”）：副本取代项目根成为它的读写根与命令的可写根，项目本身只读（讨论串里的成员从讨论串的副本复制、合回讨论串的副本）；`read-only` 成员和放不下副本的项目照旧共用项目根。成员改项目（合回，或共用项目根时可能改项目的工具调用）都先等根轮快照完成。所有会话都能读 `<系统临时目录>/nexgent-workdirs/`（成员副本与冲突副本） |
+| 路径与命令 | 与父会话相同的路径策略、命令策略和 `extraReadRoots`。可写的成员在自己的项目副本里工作（`data-formats.md` §子会话与成员“成员的工作副本”）：副本取代项目根成为它的读写根与命令的可写根，项目本身只读；自己检查路径的工具（文件工具、`run_code` 的宿主函数、表格与文档工具）用同一个按调用划定的沙箱（`sandboxForCall`：工作目录即副本算作项目、这次调用的模式、只放行本会话的临时目录），所以写自己的副本不会被当成“项目外写入”去问，讨论串也一样（讨论串里的成员从讨论串的副本复制、合回讨论串的副本）；`read-only` 成员和放不下副本的项目照旧共用项目根。成员改项目（合回，或共用项目根时可能改项目的工具调用）都先等根轮快照完成。所有会话都能读 `<系统临时目录>/nexgent-workdirs/`（成员副本与冲突副本） |
 | 审批 | 与主对话同一套规则：主对话会问的，成员也问；成员的请求进同一个审批代理，`ApprovalRequest.sessionId` 为成员会话，`member` 带成员名、形态与根会话 id，宿主据此在根会话的界面里询问并写明是哪个成员；`session` 授权只对授予它的那个会话生效，`project` 授权对所有会话（含成员）生效；项目审批设置放宽时主对话与成员一起生效；成员不单独自动批准，也不单独自动拒绝；没有应答者或非 TTY 时与主对话一样按 `timeout` / `headless` 拒绝 |
 | 费用 | `perTask` 按任务树计（上节）；`BudgetShare` 只能再压低某个成员的份额；`perProject` 照旧按账本 |
 | 取消 | 父会话的轮次被取消或结束时，仍在运行的成员以 `parent` 原因取消，在 `toolAbortGraceMs` 内收尾；成员的子进程与主对话的一样按进程树终止，不得残留 |

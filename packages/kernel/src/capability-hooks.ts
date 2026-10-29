@@ -281,6 +281,12 @@ export interface TaskEndInput {
    * run (`detail` says why).
    */
   readonly checkRuns?: readonly CheckCommandRun[]
+  /**
+   * The directory the session's tools work in, when it is not the project
+   * root (a thread's or member's own copy of the project): the presented
+   * files are checked there, where the session wrote and presented them.
+   */
+  readonly root?: string
   readonly signal?: AbortSignal
 }
 
