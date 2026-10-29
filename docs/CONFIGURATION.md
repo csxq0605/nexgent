@@ -36,6 +36,7 @@ export NEXGENT_API_KEY=<key>
 | `NEXGENT_COMPACTION_THRESHOLD` | 触发上下文压缩的估计输入 token 数，默认 160000 |
 | `NEXGENT_AUTO_TITLE` | 设为 `0` 时，对话在第一轮后不自动起名 |
 | `NEXGENT_DEBUG` | 设为 `1` 时命令行出错打印调用栈 |
+| `NEXGENT_FORCE_ORGANIZATION` | 只用于测量：设为 `solo` 时每个根轮都自己做，设为 `team` 时每个根轮都组队（结束前还没调用 `organize` 时提醒一次）；记为 `chosenBy: "forced"`，不写进组织库 |
 | `NEXGENT_DESKTOP_DIR`、`NEXGENT_ELECTRON` | `nexgent app` 用哪个桌面应用目录和 Electron |
 
 只在开发构建里生效、打包后被忽略的变量（`NEXGENT_DESKTOP_DEV_URL`、`NEXGENT_DESKTOP_RENDERER_DIR`、`NEXGENT_DESKTOP_SDK_MODULE`）见 [apps/desktop/README.md](../apps/desktop/README.md)。

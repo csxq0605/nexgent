@@ -1,0 +1,22 @@
+# SWE-rebench 2026-07 (Harbor ibragim-badertdinov/swe-rebench-07-2026@2026-07): 4 per language, seed 0;
+# the two pydantic tasks (very large images) replaced by teng-lin__notebooklm-py-826 and marimo-team__marimo-9626
+microsoft__typescript-go-4194
+microsoft__waza-247
+apache__dubbo-go-3357
+ludo-technologies__pyscn-500
+kestra-io__kestra-16450
+kestra-io__kestra-16119
+floci-io__floci-1325
+floci-io__floci-1142
+microsoft__apm-1553
+langchain-ai__deepagents-3866
+teng-lin__notebooklm-py-826
+marimo-team__marimo-9626
+fallow-rs__fallow-821
+ivov__lisette-491
+withcoral__coral-1186
+fallow-rs__fallow-762
+tashfeenahmed__freellmapi-289
+fathah__hermes-desktop-249
+stablyai__orca-4331
+vuejs__core-14877

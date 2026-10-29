@@ -138,6 +138,20 @@ function collaborationGuidance(tools: ReadonlySet<string>, workdirs: boolean): s
   return lines
 }
 
+/**
+ * Checking a change before reporting it done, whenever a shell is offered: reproduce a reported
+ * problem first, then run the change and the existing tests that cover it. Measured on SWE-bench
+ * Verified (2026-10-27): without it most runs ended after 2-4 tool calls with nothing run.
+ */
+function checkGuidance(tools: ReadonlySet<string>): string[] {
+  if (!tools.has('bash') && !tools.has('pwsh')) return []
+  return [
+    '- Before you report a change to code (or any other result that can be run) as done, check it yourself. When the task reports a bug or a wrong behavior, first reproduce it with a short script or command and see it fail.',
+    '- After the change, run that reproduction again, try the edge cases the task implies, and run the existing tests that cover the code you changed. Fix what your change breaks. Leave existing tests unchanged unless the task asks you to change them.',
+    '- In your final reply, say what you ran and what you could not check.',
+  ]
+}
+
 /** The member identity block of a child session: the fixed line, then what a member is for. */
 function memberBlock(member: Pick<MemberIdentity, 'name' | 'executionForm'>, tools: ReadonlySet<string>, workdir: boolean): string {
   return `${renderMemberPromptLine(member)}
@@ -171,6 +185,8 @@ export function renderSystemPrompt(input: SystemPromptInput): string {
   ].join('\n'))
   const guidance = fileGuidance(names, input.materials === true)
   if (guidance.length > 0) sections.push(['# Working with files', ...guidance].join('\n'))
+  const checks = checkGuidance(names)
+  if (checks.length > 0) sections.push(['# Checking your work', ...checks].join('\n'))
   const others = collaborationGuidance(names, input.memberWorkdirs === true)
   if (others.length > 0) sections.push(['# Working with others', ...others].join('\n'))
   for (const section of input.sections ?? []) sections.push(`# ${section.title}\n${section.body}`)

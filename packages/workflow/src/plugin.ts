@@ -6,7 +6,7 @@ import { capabilityPresetLookup } from '@nexgent/preset'
 import { validateCapabilityArchitecture, type ArchitectureComponentInput } from './capability-architecture.js'
 import { agentsMemberRunner } from './runner.js'
 import { workflowTool } from './tool.js'
-import { defaultOrganizer, organizeTool, type DefaultOrganizerOptions } from './organize.js'
+import { defaultOrganizer, forcedOrganization, organizeTool, type DefaultOrganizerOptions } from './organize.js'
 
 /** Plugin config: options of the default organizer (tests fix its control draw). */
 export interface WorkflowPluginConfig {
@@ -38,7 +38,9 @@ export const WorkflowPlugin = {
       const usd = model === undefined ? undefined : llm?.estimateUsd?.(model, usage)
       return typeof usd === 'number' ? usd : undefined
     }
-    ctx.provide('organizer', defaultOrganizer({ memory, costOf, ...(config?.organizer ?? {}) }))
+    // Measurement only: NEXGENT_FORCE_ORGANIZATION fixes every root turn to solo or team.
+    const force = forcedOrganization(process.env)
+    ctx.provide('organizer', defaultOrganizer({ memory, costOf, ...(force === undefined ? {} : { force }), ...(config?.organizer ?? {}) }))
     // Step 4: when `ctx.capabilities` is loaded, it checks architecture components with this package's compiler.
     ctx.inject(['capabilities' as never], scope => {
       const service = (scope as unknown as { get(name: string): unknown }).get('capabilities') as

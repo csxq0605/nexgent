@@ -33,9 +33,11 @@ export interface OrganizationDecision {
    * `size`: the task is small, so it is done without members; `control`: a
    * task that could use members is done alone for comparison (1 in 5 by
    * default); `default`: members may help; `memory` (step 3): what worked
-   * on similar tasks decided it (`OrganizationMemory`).
+   * on similar tasks decided it (`OrganizationMemory`); `forced`: the host
+   * fixed it for measurement (`NEXGENT_FORCE_ORGANIZATION`), and the turn is
+   * not recorded in the organization library.
    */
-  readonly chosenBy: 'size' | 'control' | 'default' | 'memory'
+  readonly chosenBy: 'size' | 'control' | 'default' | 'memory' | 'forced'
   /** Step 3: the organization suggested from similar tasks, when there was one. */
   readonly suggested?: OrganizationName
   /** Coordinator: the one change to the organization this team turn tries, or the verdict on the last one. */
@@ -43,7 +45,7 @@ export interface OrganizationDecision {
 }
 
 /** Step 3: what `chosenBy` may be. */
-export const ORGANIZATION_CHOSEN_BY = ['size', 'control', 'default', 'memory'] as const
+export const ORGANIZATION_CHOSEN_BY = ['size', 'control', 'default', 'memory', 'forced'] as const
 
 /** One role of an organization as recorded. */
 export interface OrganizationRole {

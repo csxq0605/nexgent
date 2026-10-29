@@ -4,13 +4,13 @@
  * in parallel where they can; an organization that makes no progress is
  * changed in the same task; the task's outcome records how it was organized.
  */
-import { createApp, REORGANIZE_AFTER_CHECKS_NOTE, type Context, type LLMRequest, type NexgentApp, type OrganizationMemory, type OrganizationRun, type Plugin, type SessionRecord, type TaskOutcomeRecord } from '@nexgent/kernel'
+import { createApp, FORCED_TEAM_NOTE, REORGANIZE_AFTER_CHECKS_NOTE, type Context, type LLMRequest, type NexgentApp, type OrganizationMemory, type OrganizationRun, type Plugin, type SessionRecord, type TaskOutcomeRecord } from '@nexgent/kernel'
 import { SessionPlugin } from '@nexgent/session'
 import { TaskingPlugin } from '@nexgent/tasking'
 import { llmSessionText, routeByMember, scriptedProvider, type ScriptEntry, type ScriptedProvider } from '@nexgent/test-support'
 import { WorkspacePlugin } from '@nexgent/workspace'
 import { afterEach, describe, expect, it } from 'vitest'
-import { defaultOrganizer, isSmallTask, SOLO_SECTION, TEAM_SECTION, THREAD_SIZE_RULE, THREAD_TEAM_SECTION, WorkflowPlugin } from '../src/index.js'
+import { defaultOrganizer, forcedOrganization, isSmallTask, type DefaultOrganizerOptions, SOLO_SECTION, TEAM_SECTION, THREAD_SIZE_RULE, THREAD_TEAM_SECTION, WorkflowPlugin } from '../src/index.js'
 import { ofType, tempDir } from './helpers.js'
 
 const apps: NexgentApp[] = []
@@ -18,7 +18,7 @@ afterEach(async () => {
   while (apps.length > 0) await apps.pop()!.dispose()
 })
 
-async function boot(script: ScriptEntry<LLMRequest>[], routes: Record<string, ScriptEntry<LLMRequest>[]>, draw: number, memory?: OrganizationMemory): Promise<{ app: NexgentApp; llm: ScriptedProvider }> {
+async function boot(script: ScriptEntry<LLMRequest>[], routes: Record<string, ScriptEntry<LLMRequest>[]>, draw: number, memory?: OrganizationMemory, extra: DefaultOrganizerOptions = {}): Promise<{ app: NexgentApp; llm: ScriptedProvider }> {
   const root = await tempDir()
   const llm = scriptedProvider(script, { routeKey: routeByMember(llmSessionText), routes, chunkDelayMs: 5 })
   const app = await createApp({
@@ -31,7 +31,7 @@ async function boot(script: ScriptEntry<LLMRequest>[], routes: Record<string, Sc
   })
   apps.push(app)
   await app.ctx.plugin(TaskingPlugin)
-  await app.ctx.plugin(WorkflowPlugin, { organizer: { random: () => draw, ...(memory === undefined ? {} : { memory: () => memory }) } })
+  await app.ctx.plugin(WorkflowPlugin, { organizer: { random: () => draw, ...(memory === undefined ? {} : { memory: () => memory }), ...extra } })
   return { app, llm }
 }
 
@@ -85,6 +85,40 @@ describe('deciding whether members help', () => {
     const { records } = await app.ctx.session.readAll(lead.sessionId)
     expect(ofType(records, 'turn.start')[0]).toMatchObject({ organization: { decision: 'solo', chosenBy: 'control' } })
     expect(organizationOf(llm.requests[0]!)).toContain(SOLO_SECTION.body)
+    await lead.close()
+  })
+})
+
+describe('measurement: NEXGENT_FORCE_ORGANIZATION', () => {
+  it('reads solo or team and refuses anything else', () => {
+    expect(forcedOrganization({})).toBeUndefined()
+    expect(forcedOrganization({ NEXGENT_FORCE_ORGANIZATION: ' team ' })).toBe('team')
+    expect(forcedOrganization({ NEXGENT_FORCE_ORGANIZATION: 'solo' })).toBe('solo')
+    expect(() => forcedOrganization({ NEXGENT_FORCE_ORGANIZATION: 'both' })).toThrow(/solo or team/)
+  })
+
+  it('forced solo: a larger task is done alone and is not recorded in the library', async () => {
+    const recorded: unknown[] = []
+    const memory = { suggest: async () => { throw new Error('not asked') }, record: async (run: unknown) => void recorded.push(run), noteRework: async () => {}, noteReverts: async () => {} } as unknown as OrganizationMemory
+    const { app, llm } = await boot([{ content: 'Done alone.' }], {}, 0.99, memory, { force: 'solo' })
+    const lead = await app.agents.create()
+    await lead.run(LARGE_TASK)
+    const { records } = await app.ctx.session.readAll(lead.sessionId)
+    expect(ofType(records, 'turn.start')[0]).toMatchObject({ organization: { decision: 'solo', chosenBy: 'forced' } })
+    expect(organizationOf(llm.requests[0]!)).toContain(SOLO_SECTION.body)
+    expect(recorded).toEqual([])
+    await lead.close()
+  })
+
+  it('forced team: even a small task gets the team section, and a turn ending without organize is told once', async () => {
+    const { app, llm } = await boot([{ content: 'Fixed it myself.' }, { content: 'Still alone.' }], {}, 0.01, undefined, { force: 'team' })
+    const lead = await app.agents.create()
+    expect((await lead.run('Fix the typo in the README title')).reason).toEqual({ kind: 'completed' })
+    const { records } = await app.ctx.session.readAll(lead.sessionId)
+    expect(ofType(records, 'turn.start')[0]).toMatchObject({ organization: { decision: 'team', chosenBy: 'forced' } })
+    expect(organizationOf(llm.requests[0]!)).toContain(TEAM_SECTION.body)
+    expect(ofType(records, 'user.message').filter(record => record.content === FORCED_TEAM_NOTE)).toHaveLength(1)
+    expect(llm.requests).toHaveLength(2)
     await lead.close()
   })
 })

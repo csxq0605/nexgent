@@ -614,6 +614,13 @@ function renderPickedUserWords({ picked, dropped }: { readonly picked: readonly 
 export const REORGANIZE_AFTER_CHECKS_NOTE = 'Members did part of this work. If the failure comes from how the work was split or handed over, '
   + 'call `organize` again with a reason and a changed organization (for example add a `test` or `review` role, give one member the other\'s findings, or merge parts that depend on each other); otherwise fix it yourself.'
 
+/**
+ * Measurement (`chosenBy: forced`, team): told once to a turn fixed to use members that is about to end
+ * without calling `organize`, so the team side of a comparison is a team run.
+ */
+export const FORCED_TEAM_NOTE = 'Nexgent fixed this task to use members, and none has worked on it yet. '
+  + 'Before you answer, call `organize` (at the least `lead-checker`: a `test` member, or a `review` member when there is nothing to run, checks your work independently), read the members\' results and then finish the task.'
+
 /** Opens a message the user sent to the main conversation while a member was working ({@link Agent.steer}). */
 export const RELAYED_USER_NOTE_PREFIX = '[Nexgent] The user said this in the main conversation while you were working; follow it where it concerns your work:'
 
@@ -1728,9 +1735,17 @@ export class Agent {
         this.turnActed = false
         reason = unreadable === undefined ? await this.loop(turn, signal, tracker, services.context) : { kind: 'error', error: unreadable }
         let retry = 1
+        let forcedTeamNoted = false
         while (unreadable === undefined && reason.kind === 'completed' && !signal.aborted) {
           // A message sent while the turn was finishing is answered before the turn ends.
           if (this.pendingSteers.length > 0) {
+            reason = await this.loop(turn, signal, tracker, services.context)
+            continue
+          }
+          const organization = this.turnOrganization
+          if (!forcedTeamNoted && organization.decision?.chosenBy === 'forced' && organization.decision.decision === 'team' && organization.organizations === 0) {
+            forcedTeamNoted = true
+            await this.injectNote(turn, FORCED_TEAM_NOTE)
             reason = await this.loop(turn, signal, tracker, services.context)
             continue
           }

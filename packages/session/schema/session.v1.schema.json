@@ -1354,6 +1354,7 @@
                 "control",
                 "default",
                 "memory",
+                "forced",
                 "retry"
               ]
             },
