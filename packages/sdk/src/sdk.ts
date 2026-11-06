@@ -30,6 +30,9 @@ import { constants as fsConstants } from 'node:fs'
 import { mkdir, open, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { basename, extname, join, resolve } from 'node:path'
 import {
+  COLLAB_DIR,
+  NEXGENT_DIR,
+  readProjectConfig,
   addUsage,
   appendGrant,
   isNexgentError,
@@ -719,7 +722,8 @@ export class LocalNexgentSdk implements NexgentSdk {
       },
       isCoordinator: async sessionId => (await this.coordinatorId(project())) === sessionId,
       notesFile: () => join(project().app.ctx.workspace.layout.dataDir, COORDINATOR_NOTES_FILE),
-      boardsDir: () => join(project().app.ctx.workspace.layout.dataDir, 'boards'),
+      collabDir: () => join(project().app.ctx.workspace.root, NEXGENT_DIR, COLLAB_DIR),
+      collaborationMode: async () => (await readProjectConfig(project().app.ctx.workspace.layout.configFile).catch(() => undefined))?.config.collaboration ?? 'central',
     }
   }
 
@@ -1297,9 +1301,9 @@ export class LocalNexgentSdk implements NexgentSdk {
           ...(input.owns === undefined ? {} : { owns: input.owns }),
         })
       },
-      'threads.board': async input => {
+      'threads.collab': async input => {
         if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
-        return this.project(input.projectId).threads.board({ sessionId: input.sessionId })
+        return this.project(input.projectId).threads.log({ sessionId: input.sessionId, ...(input.all === true ? { all: true } : {}) })
       },
       'sessions.open': async input => {
         const project = this.project(input.projectId)

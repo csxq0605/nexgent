@@ -158,6 +158,41 @@ describe('context providers', () => {
     expect(llm.requests[0]!.messages[0]!.content).toContain('# Fine\nyes')
     await agent.close()
   })
+
+  it('asks providers before every request and sends what they return with that request, skipping one that throws', async () => {
+    harness = await bootHarness({ script: [toolCallReply('c1', 'echo', { text: 'x' }), textReply('done')] })
+    const { app, llm, store } = harness
+    app.ctx.tools.register(echo)
+    const asked: number[] = []
+    const providers: ContextProvider[] = [
+      {
+        id: 'log',
+        beginTurn: async () => ({}),
+        // Something arrives only while the turn runs (after its first request).
+        beforeRequest: async input => {
+          asked.push(input.step)
+          expect(input).toMatchObject({ compacted: false, projectRoot: harness!.workspace.root })
+          return input.step === 2 ? ['another agent wrote x'] : undefined
+        },
+      },
+      { id: 'broken', beginTurn: async () => ({}), beforeRequest: async () => { throw new Error('boom') } },
+    ]
+    await app.ctx.plugin(servicePlugin('context', contextService(providers)))
+    const agent = await app.agents.create()
+    expect((await agent.run('hi')).reason).toEqual({ kind: 'completed' })
+    expect(asked).toEqual([1, 2])
+    const injected = store.of(agent.sessionId, 'user.message').filter(record => record.source === 'inject')
+    expect(injected.map(record => record.content)).toEqual([asContext('another agent wrote x')])
+    // Not in the first request; in the second, after the tool result.
+    const text = (index: number) => JSON.stringify(llm.requests[index]!.messages)
+    expect(text(0)).not.toContain('another agent wrote x')
+    expect(text(1)).toContain('another agent wrote x')
+    expect(store.of(agent.sessionId, 'error').map(record => record.error.message)).toEqual([
+      expect.stringContaining('context provider broken before a request: boom'),
+      expect.stringContaining('context provider broken before a request: boom'),
+    ])
+    await agent.close()
+  })
 })
 
 describe('compaction', () => {

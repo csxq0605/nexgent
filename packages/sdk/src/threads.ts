@@ -32,23 +32,27 @@
  *   another thread of the task also brought in.
  * - The task's arrangement (`CollaborationConfig` on the coordinator turn's
  *   decision) is enforced here: `overlap: sequence` refuses a thread whose
- *   `owns` overlaps a running one's; `handoff: manifest` adds to each new
- *   thread's task the files the task's earlier threads brought in.
- * - With collaboration `hybrid` (the project's setting), threads share a
- *   board (`<dataDir>/boards/<coordinator>.jsonl`), message each other (the
- *   message joins the other's running turn, or waits for its next turn: no
- *   turn is started for it) and ask the coordinator mid-turn.
+ *   `owns` overlaps a running one's; `handoff: changed` delivers every
+ *   thread of the task each `merged` entry of the collaboration log.
+ * - The coordinator's threads share a collaboration log in the project
+ *   (`<root>/.nexgent/collab/<coordinator>.jsonl`, `collab.ts`). The host
+ *   writes a `merged` entry whenever a thread's turn brings files into the
+ *   project; with collaboration `hybrid` (the project's setting) threads
+ *   also post notes, claims, handoffs and blockers and leave each other
+ *   messages; the coordinator posts notes. Before each model request of a
+ *   thread, the host delivers what it has not seen yet
+ *   ({@link SdkThreadHost.deliver}), so a long turn hears it too. A thread
+ *   may ask the coordinator mid-turn in either mode.
  */
 import {
   addUsage,
   ASK_COORDINATOR_TOOL,
-  BOARD_ENTRY_KINDS,
+  COLLAB_POST_KINDS,
   DEFAULT_COLLABORATION,
   MAX_PLANNED_THREADS,
   MESSAGE_PEER_TOOL,
-  PEER_MESSAGE_LEAD,
-  POST_BOARD_TOOL,
-  READ_BOARD_TOOL,
+  POST_COLLAB_TOOL,
+  READ_COLLAB_TOOL,
   LIST_THREADS_TOOL,
   MESSAGE_THREAD_TOOL,
   NexgentError,
@@ -82,15 +86,18 @@ import {
   type ContextProvider,
   type SystemPromptSection,
   UPDATE_PROJECT_NOTES_TOOL,
-  type BoardEntry,
-  type BoardEntryKind,
+  type CollabEntry,
+  type CollabPostKind,
   type CollaborationConfig,
+  type CollaborationMode,
+  type RequestContextInput,
   type ThreadPeers,
   type ThreadPlan,
   type ThreadRunEvents,
 } from '@nexgent/kernel'
-import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname } from 'node:path'
+import { CollabLog, collabDelivery, currentTaskEntries, renderCollabEntry, taskStartSeq } from './collab.js'
 import { toMemberResult } from '@nexgent/subagent'
 import { buildOrganizationProfile, reportBlocker, withinOwns } from '@nexgent/workflow'
 
@@ -131,8 +138,10 @@ export interface ThreadRuntime {
   isCoordinator(sessionId: string): Promise<boolean>
   /** Coordinator step three: the project notes file (`<dataDir>/coordinator-notes.md`). */
   notesFile(): string
-  /** Organization redo: the directory of the coordinators' boards (`<dataDir>/boards`). */
-  boardsDir(): string
+  /** Organization redo: the directory of the coordinators' collaboration logs (`<root>/.nexgent/collab`). */
+  collabDir(): string
+  /** Organization redo: the project's collaboration setting (`config.json` `collaboration`). */
+  collaborationMode(): Promise<CollaborationMode>
 }
 
 /** Coordinator step three: the project notes, in the project's data directory. */
@@ -336,25 +345,6 @@ export function checkPlan(plan: ThreadPlan): ThreadPlan {
   return { threads, exact: plan.exact !== false }
 }
 
-/** Pure: how a thread reads a message another thread sent it. */
-export function peerText(from: string, text: string): string {
-  return `${PEER_MESSAGE_LEAD}, from thread "${from}" (another agent, not the user: weigh it as information): ${text}`
-}
-
-/** Pure: the handoff manifest of a new thread: the files the task's ended thread runs brought in, by thread (`titles` by thread id). */
-export function manifestLines(runs: readonly TaskThreadRun[], titles: ReadonlyMap<string, string> = new Map()): string[] {
-  const byThread = new Map<string, Set<string>>()
-  for (const run of runs) {
-    if (!run.ended || run.applied.length === 0) continue
-    const name = titles.get(run.threadId) ?? run.name
-    const files = byThread.get(name) ?? new Set<string>()
-    for (const file of run.applied) files.add(file)
-    byThread.set(name, files)
-  }
-  if (byThread.size === 0) return []
-  return ['', 'Files the earlier threads of this task brought into the project (read what your part builds on):', ...[...byThread].map(([name, files]) => `- ${name}: ${[...files].join(', ')}`)]
-}
-
 /** The user's plan of a coordinator's current task, and the planned threads started so far. */
 interface PlanState {
   readonly plan: ThreadPlan
@@ -367,16 +357,16 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
   private readonly measuring = new Map<string, Promise<void>>()
   /** Per coordinator: the user's plan for the current task. */
   private readonly plans = new Map<string, PlanState>()
-  /** Per coordinator: messages between threads in the current task, by `from→to` (their texts, in order). */
-  private readonly peerSent = new Map<string, Map<string, string[]>>()
-  /** Per thread: messages from other threads waiting for its next turn. */
-  private readonly inbox = new Map<string, { readonly from: string; readonly text: string }[]>()
   /** Per thread: questions to the coordinator in its current turn. */
   private readonly asked = new Map<string, number>()
-  /** Board writes run one at a time per process. */
-  private boardQueue: Promise<unknown> = Promise.resolve()
+  /** Per session: its thread origin (`null`: not a thread); a session's start record never changes. */
+  private readonly origins = new Map<string, ThreadOrigin | null>()
+  /** The project's collaboration logs. */
+  readonly collab: CollabLog
 
-  constructor(private readonly rt: ThreadRuntime) {}
+  constructor(private readonly rt: ThreadRuntime) {
+    this.collab = new CollabLog(() => rt.collabDir())
+  }
 
   /**
    * Organization redo: the user sent the coordinator a new message: a new
@@ -384,7 +374,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
    * previous plan; absent: none). The counters of the previous task end.
    */
   newTask(coordinatorSessionId: string, plan?: ThreadPlan): void {
-    this.peerSent.delete(coordinatorSessionId)
+    void this.collab.markTask(coordinatorSessionId).catch(error => this.rt.report(coordinatorSessionId, error))
     if (plan === undefined) this.plans.delete(coordinatorSessionId)
     else this.plans.set(coordinatorSessionId, { plan: checkPlan(plan), started: new Set() })
   }
@@ -435,11 +425,10 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
     const lines = [input.task.trim()]
     if (item?.task !== undefined && item.task.trim() !== '') lines.push('', `The user's own words for this part: ${item.task.trim()}`)
     if (owns !== undefined) lines.push('', `Your part changes only these paths: ${owns.join(', ')}. Change nothing else; when another file must change, say so in your report.`)
-    if (collaboration.handoff === 'manifest') lines.push(...manifestLines(taskThreadRuns(records), new Map(threads.map(thread => [thread.threadId, thread.title]))))
     if (collaboration.mode === 'hybrid') {
       const others = running.map(thread => `"${thread.title}"${thread.owns === undefined ? '' : ` (${thread.owns.join(', ')})`}`)
-      lines.push('', `You work beside the other threads of this task${others.length === 0 ? '' : ` (running now: ${others.join(', ')})`}. Read the board first (read_board); claim the paths you will change (post_board kind claim), post what others can build on, `
-        + 'message a thread directly when only it needs to know, and ask the coordinator when a decision is outside your part.')
+      lines.push('', `You work beside the other threads of this task${others.length === 0 ? '' : ` (running now: ${others.join(', ')})`}. What they write to the collaboration log for you or about your paths reaches you on its own before each step. `
+        + 'Claim the paths you will change (post_collab kind claim), post what others can build on (note, handoff) or what blocks you, message a thread directly when only it needs to know, and ask the coordinator when a decision is outside your part.')
     }
     const threadId = await this.rt.create({ title, thread: { coordinatorSessionId: input.coordinatorSessionId, title, ...(owns === undefined ? {} : { owns }) } })
     planned?.started.add(titleKey(title))
@@ -480,6 +469,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
     if (end?.type === 'turn.end' && end.reason.kind === 'cancelled') return
     const { status } = threadStatusOf(records, false)
     const merge = this.rt.lastMerge(threadId)
+    await this.noteMerged(coordinatorSessionId, threadId, title, merge)
     const events = await this.runEvents(coordinatorSessionId, threadId, merge)
     const note = threadWakeNote({ title, threadId, status, reply: replyOf(records, turn), ...(merge === undefined ? {} : { merge }), ...(events === undefined ? {} : { events }) })
     await this.rt.wake(coordinatorSessionId, `The user started thread "${title}" themselves; follow it up like your own threads (do not redo its work).\n${note}`)
@@ -495,7 +485,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
         throw new NexgentError('tool/denied', `${running} threads are running (at most ${THREAD_LIMITS.maxRunning} at once): wait for one to finish before giving this thread its next step`)
       }
       const index = (await this.rt.threadIds(input.coordinatorSessionId)).indexOf(input.threadId) + 1
-      await this.runFor(input, input.threadId, threadRunName(info.title, index), info.title, this.withInbox(input.threadId, input.text))
+      await this.runFor(input, input.threadId, threadRunName(info.title, index), info.title, input.text)
     }
     return this.info(input.threadId)
   }
@@ -628,6 +618,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
       if (!closed) await this.rt.append(caller.coordinatorSessionId, { type: 'subagent.end', turn: caller.turn, childSessionId: threadId, childTurn, result })
     }
     const cause = 'result' in settled && settled.result.reason.kind === 'cancelled' ? settled.result.reason.cause : undefined
+    await this.noteMerged(caller.coordinatorSessionId, threadId, title, result.merge)
     if (cause === 'shutdown') return
     if (this.rt.closed()) return
     // A thread the user stopped, or one stopped at the cost cap, stays stopped: the coordinator is not woken to pick it up again.
@@ -668,103 +659,95 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
       if (run.threadId === threadId) continue
       for (const path of run.applied) if (applied.includes(path) && !overlap.some(item => item.path === path)) overlap.push({ path, thread: titles.get(run.threadId) ?? run.name })
     }
+    // Messages in the log for a thread that is not running and has not read them yet.
     const waiting: { from: string; to: string }[] = []
-    for (const [to, messages] of this.inbox) {
-      if (!titles.has(to) || this.rt.running(to)) continue
-      for (const message of messages) if (!waiting.some(item => item.from === message.from && item.to === titles.get(to))) waiting.push({ from: message.from, to: titles.get(to)! })
+    const log = await this.collab.entries(coordinatorSessionId).catch(() => [] as readonly CollabEntry[])
+    for (const entry of currentTaskEntries(log)) {
+      if (entry.kind !== 'message' || entry.to === undefined || !titles.has(entry.to) || this.rt.running(entry.to)) continue
+      const cursor = Math.max((await this.collab.cursor(coordinatorSessionId, entry.to).catch(() => undefined)) ?? 0, taskStartSeq(log))
+      const to = titles.get(entry.to)!
+      if (entry.seq > cursor && !waiting.some(item => item.from === entry.fromTitle && item.to === to)) waiting.push({ from: entry.fromTitle, to })
     }
     if (outside.length === 0 && overlap.length === 0 && waiting.length === 0) return undefined
     return { ...(outside.length === 0 ? {} : { outside }), ...(overlap.length === 0 ? {} : { overlap }), ...(waiting.length === 0 ? {} : { waiting }) }
   }
 
-  /** A thread's next turn text with the messages other threads left for it, which it gets now. */
-  private withInbox(threadId: string, text: string): string {
-    const messages = this.inbox.get(threadId) ?? []
-    this.inbox.delete(threadId)
-    if (messages.length === 0) return text
-    return [...messages.map(message => peerText(message.from, message.text)), '', text].join('\n')
+  // -------------------------------------------------------------------------
+  // organization redo: the collaboration log (`ThreadPeers`) and its delivery
+  // -------------------------------------------------------------------------
+
+  /** A session's thread origin (`undefined`: not a thread), cached. */
+  private async origin(sessionId: string): Promise<ThreadOrigin | undefined> {
+    const known = this.origins.get(sessionId)
+    if (known !== undefined) return known ?? undefined
+    let origin: ThreadOrigin | null = null
+    try {
+      const start = (await this.rt.records(sessionId))[0]
+      if (start?.type === 'session.start' && start.thread !== undefined) origin = start.thread
+    } catch {
+      // not a root session of this project (a member, or none): never a thread
+    }
+    this.origins.set(sessionId, origin)
+    return origin ?? undefined
   }
 
-  // -------------------------------------------------------------------------
-  // organization redo: threads that work together (`ThreadPeers`)
-  // -------------------------------------------------------------------------
+  private append(coordinatorSessionId: string, make: Parameters<CollabLog['append']>[1]): Promise<CollabEntry> {
+    return this.collab.append(coordinatorSessionId, make)
+  }
 
-  /** A thread of the project, or `session/not-found`. */
+  /** The host's `merged` entry for a thread turn that brought files into the project (a held merge brought nothing). */
+  private async noteMerged(coordinatorSessionId: string, threadId: string, title: string, merge: WorkdirMerge | undefined): Promise<void> {
+    if (merge === undefined || merge.held === true) return
+    const conflicts = merge.conflicts.map(conflict => conflict.path)
+    const applied = merge.applied.filter(path => !conflicts.includes(path))
+    if (applied.length === 0 && conflicts.length === 0) return
+    const text = conflicts.length === 0 ? '' : `in conflict, kept as the project has it: ${conflicts.join(', ')}`
+    await this.append(coordinatorSessionId, () => ({ from: threadId, fromTitle: title, kind: 'merged', text, paths: applied })).catch(error => this.rt.report(coordinatorSessionId, error))
+  }
+
+  /** A thread of the project, or `tool/denied`. */
   private async thread(threadId: string): Promise<ThreadInfo> {
     try {
       return await this.info(threadId)
     } catch {
-      throw new NexgentError('tool/denied', 'only threads work together on a board')
+      throw new NexgentError('tool/denied', 'only threads and their coordinator use the collaboration log')
     }
   }
 
-  private boardFile(coordinatorSessionId: string): string {
-    return join(this.rt.boardsDir(), `${coordinatorSessionId}.jsonl`)
-  }
-
-  private async readBoard(coordinatorSessionId: string): Promise<BoardEntry[]> {
-    let text: string
-    try {
-      text = await readFile(this.boardFile(coordinatorSessionId), 'utf8')
-    } catch {
-      return []
-    }
-    const out: BoardEntry[] = []
-    for (const line of text.split('\n')) {
-      if (line.trim() === '') continue
-      try {
-        out.push(JSON.parse(line) as BoardEntry)
-      } catch {
-        // a torn last line
-      }
-    }
-    return out
-  }
-
-  async post(input: { readonly threadId: string; readonly kind: BoardEntryKind; readonly text: string; readonly paths?: readonly string[] }): Promise<BoardEntry> {
-    const info = await this.thread(input.threadId)
-    if (!(BOARD_ENTRY_KINDS as readonly string[]).includes(input.kind)) throw new NexgentError('tool/invalid-input', `"kind" must be one of ${BOARD_ENTRY_KINDS.join(', ')}`)
+  async post(input: { readonly sessionId: string; readonly kind: CollabPostKind; readonly text: string; readonly paths?: readonly string[] }): Promise<CollabEntry> {
+    if (!(COLLAB_POST_KINDS as readonly string[]).includes(input.kind)) throw new NexgentError('tool/invalid-input', `"kind" must be one of ${COLLAB_POST_KINDS.join(', ')}`)
     const text = input.text.trim()
     if (text === '' || text.length > THREAD_LIMITS.peerChars) throw new NexgentError('tool/invalid-input', `"text" must be 1 to ${THREAD_LIMITS.peerChars} characters`)
     const paths = cleanOwns(input.paths)
+    if (await this.rt.isCoordinator(input.sessionId)) {
+      if (input.kind !== 'note') throw new NexgentError('tool/denied', 'the coordinator posts notes (kind note) for its threads; claims, handoffs and blockers are the threads\'')
+      return this.append(input.sessionId, () => ({ from: input.sessionId, fromTitle: 'coordinator', kind: 'note', text, ...(paths === undefined ? {} : { paths }) }))
+    }
+    const info = await this.thread(input.sessionId)
     if (input.kind === 'claim' && paths === undefined) throw new NexgentError('tool/invalid-input', 'a claim names the paths you will change ("paths")')
-    const write = this.boardQueue.then(async () => {
-      const entries = await this.readBoard(info.coordinatorSessionId)
+    return this.append(info.coordinatorSessionId, async entries => {
       if (input.kind === 'claim') {
-        // A claim stands while its thread works (running, or waiting for an answer).
-        for (const entry of entries) {
-          if (entry.kind !== 'claim' || entry.threadId === input.threadId) continue
-          const other = await this.info(entry.threadId).catch(() => undefined)
+        // A claim of the current task stands while its thread works (running, or waiting for an answer).
+        for (const entry of currentTaskEntries(entries)) {
+          if (entry.kind !== 'claim' || entry.from === input.sessionId) continue
+          const other = await this.info(entry.from).catch(() => undefined)
           if (other === undefined || (other.status !== 'running' && other.status !== 'waiting')) continue
           if (ownsOverlap(entry.paths, paths)) {
-            throw new NexgentError('tool/denied', `"${entry.thread}" has claimed ${entry.paths?.join(', ') ?? 'these paths'} and is still working on them: take other paths, or message_peer it to agree who changes what`)
+            throw new NexgentError('tool/denied', `"${entry.fromTitle}" has claimed ${entry.paths?.join(', ') ?? 'these paths'} and is still working on them: take other paths, or message_peer it to agree who changes what`)
           }
         }
       }
-      const entry: BoardEntry = {
-        seq: (entries.at(-1)?.seq ?? 0) + 1,
-        at: new Date().toISOString(),
-        threadId: input.threadId,
-        thread: info.title,
-        kind: input.kind,
-        text,
-        ...(paths === undefined ? {} : { paths }),
-      }
-      const file = this.boardFile(info.coordinatorSessionId)
-      await mkdir(dirname(file), { recursive: true })
-      await appendFile(file, `${JSON.stringify(entry)}\n`, 'utf8')
-      return entry
+      return { from: input.sessionId, fromTitle: info.title, kind: input.kind, text, ...(paths === undefined ? {} : { paths }) }
     })
-    this.boardQueue = write.catch(() => undefined)
-    return write
   }
 
-  async board(input: { readonly sessionId: string }): Promise<readonly BoardEntry[]> {
-    const info = await this.info(input.sessionId).catch(() => undefined)
-    return (await this.readBoard(info?.coordinatorSessionId ?? input.sessionId)).slice(-THREAD_LIMITS.boardShown)
+  async log(input: { readonly sessionId: string; readonly all?: boolean }): Promise<readonly CollabEntry[]> {
+    const origin = await this.origin(input.sessionId)
+    const entries = await this.collab.entries(origin?.coordinatorSessionId ?? input.sessionId)
+    return (input.all === true ? entries : currentTaskEntries(entries)).slice(-THREAD_LIMITS.collabShown)
   }
 
-  async messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string }): Promise<{ readonly delivered: 'now' | 'next-turn'; readonly title: string }> {
+  async messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string }): Promise<{ readonly title: string; readonly running: boolean }> {
     const from = await this.thread(input.threadId)
     const text = input.text.trim()
     if (text === '' || text.length > THREAD_LIMITS.peerChars) throw new NexgentError('tool/invalid-input', `"text" must be 1 to ${THREAD_LIMITS.peerChars} characters`)
@@ -773,16 +756,14 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
     const to = others.find(thread => thread.threadId === wanted) ?? others.find(thread => titleKey(thread.title) === titleKey(wanted))
     if (to === undefined) throw new NexgentError('tool/invalid-input', `no other thread "${wanted}"${others.length === 0 ? '' : ` (threads: ${others.map(thread => `"${thread.title}"`).join(', ')})`}`)
     if (to.status === 'stopped' || to.status === 'failed') throw new NexgentError('tool/denied', `"${to.title}" has ${to.status}: tell the coordinator instead (ask_coordinator)`)
-    const sent = this.peerSent.get(from.coordinatorSessionId) ?? new Map<string, string[]>()
-    const key = `${from.threadId}>${to.threadId}`
-    const texts = sent.get(key) ?? []
-    if (texts.includes(text)) throw new NexgentError('tool/denied', `you already sent "${to.title}" this message`)
-    if (texts.length >= THREAD_LIMITS.maxPeerMessages) throw new NexgentError('tool/denied', `you sent "${to.title}" ${texts.length} messages in this task (at most ${THREAD_LIMITS.maxPeerMessages}): post on the board, or ask the coordinator`)
-    sent.set(key, [...texts, text])
-    this.peerSent.set(from.coordinatorSessionId, sent)
-    if (this.rt.running(to.threadId) && (await this.rt.steer(to.threadId, peerText(from.title, text)))) return { delivered: 'now', title: to.title }
-    this.inbox.set(to.threadId, [...(this.inbox.get(to.threadId) ?? []), { from: from.title, text }])
-    return { delivered: 'next-turn', title: to.title }
+    await this.append(from.coordinatorSessionId, entries => {
+      // Within the current task: the same text once, and at most maxPeerMessages to one thread.
+      const sent = currentTaskEntries(entries).filter(entry => entry.kind === 'message' && entry.from === from.threadId && entry.to === to.threadId)
+      if (sent.some(entry => entry.text === text)) throw new NexgentError('tool/denied', `you already sent "${to.title}" this message`)
+      if (sent.length >= THREAD_LIMITS.maxPeerMessages) throw new NexgentError('tool/denied', `you sent "${to.title}" ${sent.length} messages in this task (at most ${THREAD_LIMITS.maxPeerMessages}): post a note to the log, or ask the coordinator`)
+      return { from: from.threadId, fromTitle: from.title, kind: 'message', text, to: to.threadId, toTitle: to.title }
+    })
+    return { title: to.title, running: this.rt.running(to.threadId) }
   }
 
   async ask(input: { readonly threadId: string; readonly text: string }): Promise<void> {
@@ -792,7 +773,43 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
     const asked = this.asked.get(input.threadId) ?? 0
     if (asked >= THREAD_LIMITS.maxAsks) throw new NexgentError('tool/denied', `you asked the coordinator ${asked} times in this turn (at most ${THREAD_LIMITS.maxAsks}): put the rest in your report`)
     this.asked.set(input.threadId, asked + 1)
+    await this.append(from.coordinatorSessionId, () => ({ from: from.threadId, fromTitle: from.title, kind: 'ask', text }))
     await this.rt.wake(from.coordinatorSessionId, `Thread "${from.title}" (${from.threadId}) asks you while it keeps working: ${text}\nAnswer it with message_thread (it joins the thread's running turn).`)
+  }
+
+  /**
+   * What a thread gets from its coordinator's log before its next model
+   * request ({@link collabDelivery}), and its cursor moves to the log's end.
+   * Nothing for a session that is not a thread, or when nothing is new.
+   */
+  async deliver(input: Pick<RequestContextInput, 'sessionId' | 'compacted'>): Promise<readonly string[] | undefined> {
+    const origin = await this.origin(input.sessionId)
+    if (origin === undefined) return undefined
+    const coordinatorSessionId = origin.coordinatorSessionId
+    const entries = await this.collab.entries(coordinatorSessionId)
+    // Delivery starts at the current task at the earliest (what earlier tasks wrote is read_collab's).
+    const cursor = Math.max((await this.collab.cursor(coordinatorSessionId, input.sessionId)) ?? 0, taskStartSeq(entries))
+    const last = entries.at(-1)?.seq ?? 0
+    if (last <= cursor && !input.compacted) return undefined
+    const records = await this.rt.records(coordinatorSessionId).catch(() => [] as readonly SessionRecord[])
+    const collaboration = { ...(taskCollaboration(records) ?? DEFAULT_COLLABORATION), mode: await this.rt.collaborationMode() }
+    const working = new Map<string, boolean>()
+    if (input.compacted) {
+      for (const id of new Set(entries.map(entry => entry.from))) {
+        const status = (await this.info(id).catch(() => undefined))?.status
+        working.set(id, status === 'running' || status === 'waiting')
+      }
+    }
+    const text = collabDelivery({
+      entries,
+      reader: { sessionId: input.sessionId, ...(origin.owns === undefined ? {} : { owns: origin.owns }) },
+      cursor,
+      collaboration,
+      compacted: input.compacted,
+      working: id => working.get(id) === true,
+    })
+    if (last > cursor) await this.collab.setCursor(coordinatorSessionId, input.sessionId, last)
+    return text === undefined ? undefined : [text]
   }
 
   /**
@@ -1000,43 +1017,46 @@ export function threadTools(lookup: () => ThreadHost | undefined): Tool[] {
   return [start, message, read, list]
 }
 
-export const POST_BOARD_DESCRIPTION = 'Post on the board the threads of this task share: a fact the others can build on, a claim on the paths you will change (refused when a working thread has claimed them), '
-  + 'a handoff (what you produced and where, for the thread that builds on it), or a blocker. The coordinator and the user see the board.'
+export const POST_COLLAB_DESCRIPTION = 'Post to the collaboration log this task\'s threads share: a note the others can build on, a claim on the paths you will change (refused when a working thread has claimed them), '
+  + 'a handoff (what you produced and where, for the thread that builds on it), or a blocker. Each thread gets the entries for it or about its paths before its next step; the coordinator and the user see the log. '
+  + 'The coordinator posts notes, which reach every thread.'
 
-export const READ_BOARD_DESCRIPTION = 'The latest entries of the board this task\'s threads share (facts, claims, handoffs, blockers), with who posted them.'
+export const READ_COLLAB_DESCRIPTION = 'The collaboration log of this task (with all, of earlier tasks too): notes, claims, handoffs, blockers, messages, and which files each thread\'s turn merged into the project.'
 
-export const MESSAGE_PEER_DESCRIPTION = 'Send another thread of this task a short message it needs from you (an interface you agreed, a file you changed that it uses, a question about its part). '
-  + 'It joins that thread\'s running turn, or waits for its next turn. Prefer the board for anything every thread should know.'
+export const MESSAGE_PEER_DESCRIPTION = 'Leave another thread of this task a short message it needs from you (an interface you agreed, a file you changed that it uses, a question about its part). '
+  + 'It reaches that thread before its next step, or when its next turn starts. Post a note instead for anything every thread should know.'
 
 export const ASK_COORDINATOR_DESCRIPTION = 'Ask the coordinator something now, without ending your turn (a decision outside your part, a conflict with another thread). It answers with a message that joins your turn; keep working meanwhile.'
 
-/** Organization redo: the tools threads work together with (only threads of a `hybrid` project see them; the coordinator sees `read_board`). */
+/** Organization redo: the collaboration tools (which a session sees is decided when it opens: `PEER_TOOL_NAMES`). */
 export function peerTools(lookup: () => (ThreadPeers & ThreadHost) | undefined): Tool[] {
   const peers = (context: ToolContext): ThreadPeers => {
-    if (context.member !== undefined) throw new NexgentError('tool/denied', 'members do not use the board; report to the thread that started you')
+    if (context.member !== undefined) throw new NexgentError('tool/denied', 'members do not use the collaboration log; report to the thread that started you')
     const found = lookup()
     if (found === undefined) throw new NexgentError('tool/failed', 'this host runs no threads')
     return found
   }
   const post: Tool = {
-    definition: definition(POST_BOARD_TOOL, POST_BOARD_DESCRIPTION),
+    definition: definition(POST_COLLAB_TOOL, POST_COLLAB_DESCRIPTION),
     handler: async (raw, context): Promise<ToolOutput> => {
       const args = (raw ?? {}) as Record<string, unknown>
       const entry = await peers(context).post({
-        threadId: context.sessionId,
-        kind: text(args.kind, 'kind') as BoardEntryKind,
+        sessionId: context.sessionId,
+        kind: text(args.kind, 'kind') as CollabPostKind,
         text: text(args.text, 'text'),
         ...(args.paths === undefined ? {} : { paths: pathList(args.paths, 'paths') }),
       })
-      return { content: `Posted on the board (#${entry.seq}, ${entry.kind}).`, meta: { seq: entry.seq } }
+      return { content: `Posted to the collaboration log (#${entry.seq}, ${entry.kind}).`, meta: { seq: entry.seq } }
     },
   }
   const read: Tool = {
-    definition: definition(READ_BOARD_TOOL, READ_BOARD_DESCRIPTION),
-    handler: async (_raw, context): Promise<ToolOutput> => {
-      const entries = await peers(context).board({ sessionId: context.sessionId })
-      if (entries.length === 0) return { content: 'The board is empty.' }
-      return { content: entries.map(entry => `#${entry.seq} ${entry.thread} (${entry.kind})${entry.paths === undefined ? '' : ` [${entry.paths.join(', ')}]`}: ${entry.text}`).join('\n') }
+    definition: definition(READ_COLLAB_TOOL, READ_COLLAB_DESCRIPTION),
+    handler: async (raw, context): Promise<ToolOutput> => {
+      const args = (raw ?? {}) as Record<string, unknown>
+      if (args.all !== undefined && typeof args.all !== 'boolean') throw new NexgentError('tool/invalid-input', '"all" must be a boolean')
+      const entries = await peers(context).log({ sessionId: context.sessionId, ...(args.all === true ? { all: true } : {}) })
+      if (entries.length === 0) return { content: 'The collaboration log of this task is empty.' }
+      return { content: entries.map(entry => renderCollabEntry(entry, context.sessionId)).join('\n') }
     },
   }
   const message: Tool = {
@@ -1044,7 +1064,7 @@ export function peerTools(lookup: () => (ThreadPeers & ThreadHost) | undefined):
     handler: async (raw, context): Promise<ToolOutput> => {
       const args = (raw ?? {}) as Record<string, unknown>
       const sent = await peers(context).messagePeer({ threadId: context.sessionId, to: text(args.to, 'to'), text: text(args.text, 'text') })
-      return { content: sent.delivered === 'now' ? `Sent to "${sent.title}"; it reads it in its running turn.` : `Left for "${sent.title}", which is not running; it gets it when its next turn starts.` }
+      return { content: sent.running ? `Left for "${sent.title}"; it reads it before its next step.` : `Left for "${sent.title}", which is not running; it reads it when its next turn starts.` }
     },
   }
   const ask: Tool = {
@@ -1056,6 +1076,17 @@ export function peerTools(lookup: () => (ThreadPeers & ThreadHost) | undefined):
     },
   }
   return [post, read, message, ask]
+}
+
+/** Organization redo: before each model request of a thread, what its coordinator's collaboration log has for it. */
+export function collabProvider(host: SdkThreadHost): ContextProvider {
+  return {
+    id: 'collab',
+    async beginTurn() {
+      return {}
+    },
+    beforeRequest: input => host.deliver(input),
+  }
 }
 
 /**
@@ -1125,6 +1156,7 @@ export function threadsPlugin(threads: SdkThreadHost) {
       })
       ctx.inject(['context'], scope => {
         scope.effect(() => scope.context.register(coordinatorProvider(threads)), 'context.register(coordinator)')
+        scope.effect(() => scope.context.register(collabProvider(threads)), 'context.register(collab)')
       })
     },
   }

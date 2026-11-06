@@ -162,12 +162,12 @@ export function collaborationLines(collaboration: CollaborationConfig | undefine
   if (collaboration.overlap === 'sequence') {
     lines.push('- Give every thread `owns` (the files or directories its part changes). Nexgent starts no thread whose `owns` overlaps a running thread\'s: start it after that thread ends.')
   }
-  if (collaboration.handoff === 'manifest') {
-    lines.push('- Nexgent adds to every thread you start the project files the task\'s earlier threads brought in, and by which thread; you need not list them.')
+  if (collaboration.handoff === 'changed') {
+    lines.push('- Nexgent tells every thread of the task, as soon as it happens, which files each other thread brought into the project; you need not list them in briefs.')
   }
   if (collaboration.mode === 'hybrid') {
-    lines.push('- The threads also work together without you: they share a board (facts, claims on files, handoffs, blockers), message each other and ask you mid-turn. '
-      + 'You still split the task, hand out the parts, follow up, and have the whole checked; read the board with `read_board`.')
+    lines.push('- The threads also work together without you through the collaboration log: claims on files, notes, handoffs, blockers and messages to one thread, each delivered to the threads it concerns before their next step; they ask you mid-turn. '
+      + 'You still split the task, hand out the parts, follow up, and have the whole checked; read the log with `read_collab`, and post a note (`post_collab`) for what every thread must know.')
   }
   return lines
 }

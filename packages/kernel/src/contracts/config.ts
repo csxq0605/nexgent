@@ -161,10 +161,12 @@ export interface ProjectConfig {
 /**
  * How a coordinator's threads work together. `central`: the coordinator
  * hands each thread its part and passes everything between them (a thread
- * talks only to the coordinator). `hybrid`: the coordinator still hands out
- * the first parts and checks the whole, and threads may also coordinate
- * among themselves: a shared board of facts, claims and handoffs, messages
- * to another thread, and asking the coordinator in the middle of a turn.
+ * talks only to the coordinator, and may ask it mid-turn). `hybrid`: the
+ * coordinator still hands out the parts and checks the whole, and threads
+ * also coordinate among themselves through the collaboration log in the
+ * project (`.nexgent/collab/`): notes, claims on paths, handoffs, blockers
+ * and messages to one thread, delivered to each thread before its every
+ * model request.
  */
 export type CollaborationMode = 'central' | 'hybrid'
 

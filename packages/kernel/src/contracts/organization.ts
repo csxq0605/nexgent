@@ -384,7 +384,7 @@ export interface CollaborationEvents {
   readonly outside: number
   /** Messages threads sent each other (`message_peer`). */
   readonly messages: number
-  /** Board claims and thread messages the host refused (taken paths, limits). */
+  /** Claims and thread messages the host refused (taken paths, limits). */
   readonly refused: number
 }
 
@@ -398,19 +398,23 @@ export const NO_COLLABORATION_EVENTS: CollaborationEvents = Object.freeze({ over
 /**
  * How the threads of one coordinator task worked together, as the host
  * applied it. `mode` is the project's setting (`config.json`
- * `collaboration`, chosen by the user). The other two are what organization
- * optimization tries, one at a time, and the host enforces:
+ * `collaboration`, chosen by the user): with `central` a thread hears only
+ * from the coordinator; with `hybrid` threads also write to and read the
+ * collaboration log. The other two are what organization optimization
+ * tries, one at a time, and the host enforces:
  *
- * - `handoff`: `summary`: a thread gets only what the coordinator writes in
- *   its brief; `manifest`: the host adds to every thread it starts the
- *   project files the task's earlier threads brought in, and by whom.
+ * - `handoff`: `brief`: a thread gets what the coordinator writes in its
+ *   brief (and, with `hybrid`, the log's `merged` entries about its own
+ *   paths); `changed`: the host delivers to every thread of the task each
+ *   `merged` entry of the task (which thread brought which files into the
+ *   project), whatever its paths, as soon as it is written.
  * - `overlap`: `parallel`: threads whose files overlap may run at the same
  *   time; `sequence`: the host refuses to start a thread whose `owns`
  *   overlaps a running thread's, and asks for `owns` while others run.
  */
 export interface CollaborationConfig {
   readonly mode: 'central' | 'hybrid'
-  readonly handoff: 'summary' | 'manifest'
+  readonly handoff: 'brief' | 'changed'
   readonly overlap: 'parallel' | 'sequence'
 }
 
@@ -418,7 +422,7 @@ export interface CollaborationConfig {
 export type CollaborationVariable = 'handoff' | 'overlap'
 
 /** The default arrangement (how threads worked before optimization changed anything). */
-export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 'central', handoff: 'summary', overlap: 'parallel' })
+export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 'central', handoff: 'brief', overlap: 'parallel' })
 
 /**
  * Each variable's other value and the events it is meant to remove: a
@@ -427,7 +431,7 @@ export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 
  */
 export const COLLABORATION_TRIALS: readonly { readonly variable: CollaborationVariable; readonly value: string; readonly target: readonly CollaborationEventName[] }[] = Object.freeze([
   { variable: 'overlap', value: 'sequence', target: ['overlap', 'conflicts'] },
-  { variable: 'handoff', value: 'manifest', target: ['missing'] },
+  { variable: 'handoff', value: 'changed', target: ['missing'] },
 ])
 
 /**

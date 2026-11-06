@@ -1539,8 +1539,8 @@
                 },
                 "handoff": {
                   "enum": [
-                    "summary",
-                    "manifest"
+                    "brief",
+                    "changed"
                   ]
                 },
                 "overlap": {

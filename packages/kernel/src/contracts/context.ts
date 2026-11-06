@@ -52,11 +52,36 @@ export interface ContextContribution {
   readonly inject?: readonly string[]
 }
 
-/** A source of per-turn context. A provider that throws is skipped for that turn and an `error` record (non-fatal) is written. */
+/** What the loop tells providers right before each model request of a turn. */
+export interface RequestContextInput {
+  readonly sessionId: string
+  readonly turn: number
+  /** The step about to run. */
+  readonly step: number
+  /** Absolute project root. */
+  readonly projectRoot: string
+  /** The history was compacted since this session's previous request: what was delivered before may be gone from it. */
+  readonly compacted: boolean
+  readonly signal: AbortSignal
+}
+
+/**
+ * A source of per-turn context. A provider that throws is skipped for that
+ * turn (or that request) and an `error` record (non-fatal) is written.
+ */
 export interface ContextProvider {
   /** Unique id, e.g. `workspace-instructions`, `materials`, `goal`, `skills`. */
   readonly id: string
   beginTurn(input: TurnContextInput): Promise<ContextContribution>
+  /**
+   * Called right before every model request (after the messages sent
+   * meanwhile are added), so a turn that runs for a long time still gets
+   * what arrived while it ran. The texts returned are stored as
+   * `user.message { source: 'inject' }` records (fenced as context) and go
+   * out with that request; nothing is added when it returns none. Not
+   * called for the continuation of a reply cut at the output limit.
+   */
+  beforeRequest?(input: RequestContextInput): Promise<readonly string[] | undefined>
 }
 
 /** What the loop hands to the compactor before every model call. */

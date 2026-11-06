@@ -785,6 +785,8 @@ export class Agent {
   private turnActed = false
   /** The last model step of the running turn ({@link loop} goes on from it after a check retry). */
   private turnStep = 0
+  /** A compaction happened since the last {@link requestContext}. */
+  private compactedSinceRequest = false
   private stats = {
     requestCount: 0,
     toolCallCount: 0,
@@ -2007,6 +2009,7 @@ export class Agent {
       })
       this.messages.splice(0, this.messages.length, { role: 'user', content: renderCompactionSummary(summary) }, ...tail)
       this.lastUsage = undefined
+      this.compactedSinceRequest = true
       return true
     } catch (error) {
       const info = toErrorInfo(error)
@@ -2300,7 +2303,11 @@ export class Agent {
         if (signal.aborted) return { kind: 'cancelled', cause: causeOf(signal) }
       }
       // Messages the user sent meanwhile go out with this request (a paused reply's continuation goes out unchanged).
-      if (!paused) await this.drainSteers(turn)
+      if (!paused) {
+        await this.drainSteers(turn)
+        // What other agents wrote meanwhile (the threads' collaboration log): a long turn gets it too, not only the next one.
+        if (context !== undefined) await this.requestContext(context, turn, step, signal)
+      }
       paused = false
       if (step === maxSteps && maxSteps >= 4 && this.messages.at(-1)?.role !== 'assistant') await this.injectNote(turn, stepLimitNote(maxSteps))
       // Checked again right before the request is counted: another session of the project may have spent meanwhile.
@@ -2775,6 +2782,28 @@ export class Agent {
     } catch (error) {
       const info = toErrorInfo(error)
       await this.appendError({ ...info, message: `materials of a message sent mid-turn: ${info.message}` }, false, turn)
+    }
+  }
+
+  /**
+   * Ask the context providers that take part in every request
+   * ({@link ContextProvider.beforeRequest}) and add what they return, fenced
+   * as context, as `user.message { source: 'inject' }` records. A provider
+   * that fails is skipped for this request (a non-fatal `error`).
+   */
+  private async requestContext(context: ContextService, turn: number, step: number, signal: AbortSignal): Promise<void> {
+    const compacted = this.compactedSinceRequest
+    this.compactedSinceRequest = false
+    for (const provider of context.providers) {
+      if (provider.beforeRequest === undefined) continue
+      try {
+        const texts = await provider.beforeRequest({ sessionId: this.sessionId, turn, step, projectRoot: this.init.workspace.root, compacted, signal })
+        for (const text of texts ?? []) if (text.trim() !== '') await this.injectNote(turn, asContext(text))
+      } catch (error) {
+        if (signal.aborted) return
+        const info = toErrorInfo(error)
+        await this.appendError({ ...info, message: `context provider ${provider.id} before a request: ${info.message}` }, false, turn)
+      }
     }
   }
 

@@ -21,7 +21,7 @@ const VALID: Record<SdkMethodName, Record<string, unknown>> = {
   'sessions.coordinator': p,
   'threads.list': s,
   'threads.start': { ...s, title: '文档', task: '补齐文档', owns: ['docs'] },
-  'threads.board': s,
+  'threads.collab': { ...s, all: true },
   'sessions.open': s,
   'sessions.close': s,
   'sessions.export': { ...s, outDir: ABS },

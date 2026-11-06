@@ -111,7 +111,7 @@ describe('step-3 contracts: helpers', () => {
     expect(MEMBER_DENIED_TOOLS).toEqual([
       'delegate', 'workflow', 'organize',
       'start_thread', 'message_thread', 'read_thread', 'list_threads', 'update_project_notes',
-      'post_board', 'read_board', 'message_peer', 'ask_coordinator',
+      'post_collab', 'read_collab', 'message_peer', 'ask_coordinator',
       'capability_draft', 'capability_try',
     ])
     // every collaboration tool except run_code and every capability tool is hidden from members

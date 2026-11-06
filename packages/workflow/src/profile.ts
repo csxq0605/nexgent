@@ -210,7 +210,7 @@ export function collaborationEvents(runs: readonly CollaborationRun[], children:
     for (const call of calls.values()) if (call.name === 'message_peer') messages += 1
     for (const record of records) {
       if (record.type !== 'tool.result' || record.turn !== run.childTurn || !record.isError) continue
-      if ((record.name === 'post_board' || record.name === 'message_peer') && record.error?.code === 'tool/denied') refused += 1
+      if ((record.name === 'post_collab' || record.name === 'message_peer') && record.error?.code === 'tool/denied') refused += 1
       if (record.name !== 'read_file' || !/ENOENT|no such file|does not exist|not found/i.test(record.content)) continue
       const path = calls.get(record.toolCallId)?.args.path
       if (typeof path === 'string' && [...others].some(file => samePath(path, file))) missing += 1

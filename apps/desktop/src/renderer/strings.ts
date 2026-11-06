@@ -371,7 +371,7 @@ export function learnedNote(note: OrganizationChangeNote): { readonly title: str
 /** Organization redo: what a collaboration trial changes, in words. */
 function trialWhat(trial: CollaborationTrialNote): string {
   if (trial.variable === 'overlap' && trial.value === 'sequence') return '改同一批文件的讨论串先后进行'
-  if (trial.variable === 'handoff' && trial.value === 'manifest') return '新讨论串拿到前面讨论串带进来的文件清单'
+  if (trial.variable === 'handoff' && trial.value === 'changed') return '每个讨论串随时知道别的讨论串合入了哪些文件'
   return `${trial.variable} = ${trial.value}`
 }
 
@@ -740,7 +740,7 @@ export const L = {
   effort: '思考深度',
   effortHelp: '想得越深越慢、越贵。',
   collaboration: '讨论串协作',
-  collaborationHelp: '集中分派：讨论串只向总对话汇报。互相配合：讨论串共用一块看板，可以互相发消息、随时问总对话。',
+  collaborationHelp: '集中分派：讨论串只和总对话来往。互相配合：讨论串在项目里共用一份协作记录，认领文件、留言、交接，相关的条目会自动送到正在干活的讨论串。',
   collaborationCentral: '集中分派',
   collaborationHybrid: '互相配合',
   sandbox: '文件权限',

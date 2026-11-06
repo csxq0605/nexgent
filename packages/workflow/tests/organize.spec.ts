@@ -281,7 +281,7 @@ describe('two layers: the coordinator splits into threads, a thread organizes me
       async suggest(input: unknown) {
         suggested.push(input)
         return { classId: 'c', key: [], runs: 2, decision: 'team', control: false, organization: { name: 'lead-checker', roles: [{ name: 'checker', kind: 'test', after: ['coordinator'] }] },
-          collaboration: { mode: 'hybrid', handoff: 'manifest', overlap: 'sequence' }, trial: 'trial-1', trialNote: { status: 'trying', variable: 'overlap', value: 'sequence' } }
+          collaboration: { mode: 'hybrid', handoff: 'changed', overlap: 'sequence' }, trial: 'trial-1', trialNote: { status: 'trying', variable: 'overlap', value: 'sequence' } }
       },
       async record(run: unknown) { recorded.push(run) },
       async noteRework() {},
@@ -296,18 +296,18 @@ describe('two layers: the coordinator splits into threads, a thread organizes me
     const organizer = defaultOrganizer({ memory: () => memory, random: () => 0.99 })
     const decided = await organizer.decide({ sessionId: 'c', turn: 1, text, source: 'user', materialIds: [], coordinator: true, collaboration: 'hybrid' })
     expect(suggested[0]).toMatchObject({ level: 'coordinator', collaboration: 'hybrid' })
-    expect(decided!.decision).toMatchObject({ collaboration: { mode: 'hybrid', handoff: 'manifest', overlap: 'sequence' }, trial: { status: 'trying', variable: 'overlap' } })
+    expect(decided!.decision).toMatchObject({ collaboration: { mode: 'hybrid', handoff: 'changed', overlap: 'sequence' }, trial: { status: 'trying', variable: 'overlap' } })
     expect(decided!.section.body).toContain('start_thread')
     expect(decided!.section.body).toContain('Give every thread `owns`')
-    expect(decided!.section.body).toContain('earlier threads brought in')
-    expect(decided!.section.body).toContain('read_board')
+    expect(decided!.section.body).toContain('which files each other thread brought into the project')
+    expect(decided!.section.body).toContain('read_collab')
     expect(decided!.section.body).not.toContain('lead-checker')
     await organizer.noteTurnEnd!(end('c'))
     expect(recorded[0]).toMatchObject({ level: 'coordinator', classId: 'c', collaboration: { overlap: 'sequence' }, trial: 'trial-1' })
     // Without a library the coordinator's threads still work the way the project chose.
     const alone = await defaultOrganizer({ random: () => 0.99 }).decide({ sessionId: 'c', turn: 1, text, source: 'user', materialIds: [], coordinator: true, collaboration: 'hybrid' })
-    expect(alone!.decision).toMatchObject({ decision: 'team', collaboration: { mode: 'hybrid', handoff: 'summary', overlap: 'parallel' } })
-    expect(alone!.section.body).toContain('read_board')
+    expect(alone!.decision).toMatchObject({ decision: 'team', collaboration: { mode: 'hybrid', handoff: 'brief', overlap: 'parallel' } })
+    expect(alone!.section.body).toContain('read_collab')
   })
 
   it('a thread\'s turn is a run of its own at the members\' level', async () => {

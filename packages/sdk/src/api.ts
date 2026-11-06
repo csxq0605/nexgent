@@ -75,7 +75,7 @@ import type {
   CollaborationTrialNote,
   MemberDenial,
   ThreadInfo,
-  BoardEntry,
+  CollabEntry,
   CollaborationMode,
   ThreadOrigin,
 } from '@nexgent/kernel'
@@ -656,8 +656,8 @@ export interface SdkMethods {
    * conversation is woken to follow it up.
    */
   'threads.start': (input: { readonly projectId: string; readonly sessionId: string; readonly title: string; readonly task: string; readonly materialIds?: readonly string[]; readonly owns?: readonly string[] }) => Promise<ThreadInfo>
-  /** Organization redo: the latest entries of the board a conversation's threads share (collaboration `hybrid`). */
-  'threads.board': (input: { readonly projectId: string; readonly sessionId: string }) => Promise<readonly BoardEntry[]>
+  /** Organization redo: the latest entries of the collaboration log a coordinator's threads share (the current task's; with `all`, every task's). */
+  'threads.collab': (input: { readonly projectId: string; readonly sessionId: string; readonly all?: boolean }) => Promise<readonly CollabEntry[]>
   /** Takes the session lock (resuming and closing an interrupted turn when needed) and returns the view. */
   'sessions.open': (input: { readonly projectId: string; readonly sessionId: string }) => Promise<SessionView>
   /** Releases the lock; a running turn is cancelled first (cause `shutdown`). */
@@ -777,7 +777,7 @@ export const SDK_METHOD_NAMES = [
   'sessions.coordinator',
   'threads.list',
   'threads.start',
-  'threads.board',
+  'threads.collab',
   'sessions.open',
   'sessions.close',
   'sessions.export',

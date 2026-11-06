@@ -258,8 +258,8 @@ describe('collaboration trials', () => {
 
   it('keeps a trial after enough clean runs that applied it, and reverts it at once when the events come back or the result is worse', () => {
     const trial = newTrial([trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) })], [], undefined, 'h')!
-    expect(trial).toMatchObject({ variable: 'handoff', value: 'manifest', need: 2 })
-    const under = (over: Partial<TrialRun> = {}) => trun({ trial: 'h', collaboration: { mode: 'central', handoff: 'manifest', overlap: 'parallel' }, ...over })
+    expect(trial).toMatchObject({ variable: 'handoff', value: 'changed', need: 2 })
+    const under = (over: Partial<TrialRun> = {}) => trun({ trial: 'h', collaboration: { mode: 'central', handoff: 'changed', overlap: 'parallel' }, ...over })
     expect(judgeTrial(trial, [under()])).toBeUndefined()
     expect(judgeTrial(trial, [under(), under()])).toBe('kept')
     expect(judgeTrial(trial, [under(), under({ events: events({ missing: 1 }) })])).toBe('reverted')
@@ -273,14 +273,14 @@ describe('collaboration trials', () => {
 
   it('gives a kept value as the default and the trial going on on top of it', () => {
     const overlap = { id: 'o', shape: 'coordinator', variable: 'overlap' as const, value: 'sequence', target: ['overlap' as const], baseline: { runs: 3, hits: 3 }, need: 2, baselineUsd: 1, runId: 'x' }
-    const handoff = { ...overlap, id: 'h', variable: 'handoff' as const, value: 'manifest', target: ['missing' as const] }
+    const handoff = { ...overlap, id: 'h', variable: 'handoff' as const, value: 'changed', target: ['missing' as const] }
     const states: TrialState[] = [{ trial: overlap, seq: 1, verdict: { verdict: 'kept', seq: 5 } }, { trial: handoff, seq: 6 }]
-    expect(keptCollaboration(states, 'hybrid')).toEqual({ mode: 'hybrid', handoff: 'summary', overlap: 'sequence' })
-    expect(collaborationFor(states)).toMatchObject({ collaboration: { mode: 'central', handoff: 'manifest', overlap: 'sequence' }, trial: { id: 'h' } })
+    expect(keptCollaboration(states, 'hybrid')).toEqual({ mode: 'hybrid', handoff: 'brief', overlap: 'sequence' })
+    expect(collaborationFor(states)).toMatchObject({ collaboration: { mode: 'central', handoff: 'changed', overlap: 'sequence' }, trial: { id: 'h' } })
     expect(trialNote(states, [])).toEqual({ status: 'kept', variable: 'overlap', value: 'sequence' })
-    expect(trialNote(states, [trun({ seq: 7 })])).toEqual({ status: 'trying', variable: 'handoff', value: 'manifest' })
+    expect(trialNote(states, [trun({ seq: 7 })])).toEqual({ status: 'trying', variable: 'handoff', value: 'changed' })
     const done: TrialState[] = [{ trial: handoff, seq: 6, verdict: { verdict: 'reverted', seq: 9 } }]
-    expect(trialNote(done, [trun({ seq: 8 })])).toEqual({ status: 'reverted', variable: 'handoff', value: 'manifest' })
+    expect(trialNote(done, [trun({ seq: 8 })])).toEqual({ status: 'reverted', variable: 'handoff', value: 'changed' })
     expect(trialNote(done, [trun({ seq: 10 })])).toBeUndefined()
     // A reverted variable cools down before it is tried again.
     const hit = Array.from({ length: 4 }, (_, index) => trun({ seq: 10 + index, events: events({ missing: 1 }) }))
@@ -297,16 +297,16 @@ describe('collaboration trials', () => {
       const profile = (conflicts: number): OrganizationProfile => ({ usd: 1, ms: 10, tokens: 3, parts: [{ ...thread('coordinator'), kind: 'coordinator' }, thread('a'), thread('b')], events: events({ conflicts }) })
       // Three coordinator runs split among two threads, each with a conflict, start a trial.
       for (let turn = 1; turn <= 3; turn += 1) {
-        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'summary', overlap: 'parallel' } })
+        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'brief', overlap: 'parallel' } })
         await library.noteProfile({ sessionId: 'coord', turn, profile: profile(1) })
       }
       const [trial] = await library.trials()
       expect(trial?.trial).toMatchObject({ variable: 'overlap', value: 'sequence', need: 2 })
       const next = await organizer.decide({ sessionId: 'coord', turn: 4, text: TASK, source: 'user', materialIds: [], coordinator: true, collaboration: 'central' })
-      expect(next?.decision).toMatchObject({ decision: 'team', collaboration: { overlap: 'sequence', handoff: 'summary', mode: 'central' }, trial: { status: 'trying', variable: 'overlap' } })
+      expect(next?.decision).toMatchObject({ decision: 'team', collaboration: { overlap: 'sequence', handoff: 'brief', mode: 'central' }, trial: { status: 'trying', variable: 'overlap' } })
       expect(next?.section.body).toContain('owns')
       for (let turn = 4; turn <= 5; turn += 1) {
-        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'summary', overlap: 'sequence' }, trial: trial!.trial.id })
+        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'brief', overlap: 'sequence' }, trial: trial!.trial.id })
         await library.noteProfile({ sessionId: 'coord', turn, profile: profile(0) })
       }
       expect((await library.trials())[0]?.verdict?.verdict).toBe('kept')

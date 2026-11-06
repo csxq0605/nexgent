@@ -261,7 +261,7 @@
 
 **项目的总对话（协调者）只派活。** 总对话自己不干活。它的作用域上用 `limitEffects(COORDINATOR_TOOL_EFFECTS)`（`['read', 'network']`）只留效果全在这两类里的工具（读文件、搜索、网页、讨论串工具、`update_project_notes`、`present`），再遮掉 `organize`、`delegate`、`workflow`（`COORDINATOR_DENIED_TOOLS`）：每一块活都交给讨论串，讨论串自己派成员。`write_file`、`str_replace`、`bash`、`run_code` 等写或执行的工具既不出现在它的请求里，调用也报 `tool/not-found`。这个限制只作用于总对话自己：讨论串（各自是根会话，在自己的项目副本里工作）照常拿到写、执行和派成员的工具，它们的成员再按上表收窄。
 
-**讨论串之间的工具只在互相配合模式下有。** 项目配置 `collaboration` 是 `hybrid` 时，讨论串有 `post_board`、`read_board`、`message_peer`、`ask_coordinator`（`PEER_TOOL_NAMES`），总对话只有 `read_board`；`central`（默认）时谁都没有；其他对话与成员任何时候都没有。这些工具只写项目数据目录里的看板文件、或把一条消息交给同一个总对话下的讨论串或总对话本身，不碰项目文件。`collaboration` 是受保护字段，模型不能改，只由用户在设置里改。宿主还按这次任务的协作方式拒绝 `start_thread`：`overlap: sequence` 时，与在跑的讨论串路径重叠或没写 `owns` 的讨论串不能同时开；你点名了讨论串（`exactThreads`）时，计划以外的标题不能开。
+**讨论串之间的工具。** 讨论串总有 `ask_coordinator`；项目配置 `collaboration` 是 `hybrid` 时还有 `post_collab`、`read_collab`、`message_peer`（`PEER_TOOL_NAMES`）。总对话有 `post_collab`（只能写 `note`）与 `read_collab`；其他对话与成员任何时候都没有。这些工具只追加项目 `.nexgent/collab/` 里的协作记录、或叫醒同一个总对话，不碰项目文件；`.nexgent/` 仍受保护，模型的文件工具与命令写不了协作记录。`collaboration` 是受保护字段，模型不能改，只由用户在设置里改。宿主还按这次任务的协作方式拒绝 `start_thread`：`overlap: sequence` 时，与在跑的讨论串路径重叠或没写 `owns` 的讨论串不能同时开；你点名了讨论串（`exactThreads`）时，计划以外的标题不能开。
 
 ## 网页获取（`web_fetch`）
 

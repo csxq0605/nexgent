@@ -44,7 +44,7 @@ const COLLABORATION_CONFIG: JsonObject = {
   type: 'object',
   additionalProperties: false,
   required: ['mode', 'handoff', 'overlap'],
-  properties: { mode: { enum: ['central', 'hybrid'] }, handoff: { enum: ['summary', 'manifest'] }, overlap: { enum: ['parallel', 'sequence'] } },
+  properties: { mode: { enum: ['central', 'hybrid'] }, handoff: { enum: ['brief', 'changed'] }, overlap: { enum: ['parallel', 'sequence'] } },
 }
 
 /** Organization redo: the line about a collaboration trial (`CollaborationTrialNote`). */

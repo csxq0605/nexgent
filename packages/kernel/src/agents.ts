@@ -339,10 +339,12 @@ export class AgentsService extends Service {
     const tools = ctx.tools as ToolRegistryService
     // Coordinator step two: a thread does not start threads or give them work.
     if (thread !== undefined) tools.restrict({ deny: [...THREAD_TOOL_NAMES] })
-    // Organization redo: threads work together through the host only when the project's collaboration is hybrid (the user's choice);
-    // the coordinator then reads their board; no other conversation has a board.
-    if (collaboration !== 'hybrid' || (thread === undefined && !coordinator)) tools.restrict({ deny: [...PEER_TOOL_NAMES] })
-    else if (thread === undefined) tools.restrict({ deny: PEER_TOOL_NAMES.filter(name => name !== 'read_board') })
+    // Organization redo: a thread always may ask its coordinator; it writes to and reads the collaboration log only when the
+    // project's collaboration is hybrid (the user's choice). The coordinator posts notes to its threads and reads the log.
+    if (thread !== undefined) {
+      if (collaboration !== 'hybrid') tools.restrict({ deny: PEER_TOOL_NAMES.filter(name => name !== 'ask_coordinator') })
+    } else if (coordinator) tools.restrict({ deny: ['message_peer', 'ask_coordinator'] })
+    else tools.restrict({ deny: [...PEER_TOOL_NAMES] })
     // Coordinator step three: only the coordinator conversation keeps the project notes.
     if (!coordinator || thread !== undefined) tools.restrict({ deny: [...COORDINATOR_TOOL_NAMES] })
     // The coordinator only assigns, follows and relays (user, 2026-10-20): no tool that writes or executes; its members and threads keep theirs.
