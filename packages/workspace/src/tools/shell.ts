@@ -15,6 +15,7 @@
  */
 import { join } from 'node:path'
 import { rm, stat } from 'node:fs/promises'
+import { setTimeout as sleep } from 'node:timers/promises'
 import { NexgentError, type ProcessResult, type ProcessRunner, type ToolContext } from '@nexgent/kernel'
 import { commandSegments, isReadOnlyCommand } from '../command-policy.js'
 import { capText, MODEL_OUTPUT_CHARS, OMITTED_MARKER_PATTERN } from '../output.js'
@@ -39,6 +40,16 @@ import {
   type ToolDeps,
   type WorkspaceTool,
 } from './common.js'
+
+/**
+ * A foreground command still running after this long is moved to the
+ * background (its output stays readable with `shell_output`), so a message
+ * the user sends or a collaboration entry reaches the model with its next request.
+ */
+export const FOREGROUND_YIELD_MS = 20_000
+
+/** Most of a foreground command's output kept for the hand-over to the background (the tail). */
+const YIELD_BUFFER_CHARS = 4_000_000
 
 /** Which shell a tool drives. */
 export interface ShellFlavor {
@@ -108,6 +119,8 @@ export interface ShellToolDeps extends ToolDeps {
   readonly os?: ShellSandboxDeps
   /** Registry of background processes; default one per `deps` object ({@link backgroundShellsFor}). */
   readonly background?: BackgroundShells
+  /** How long a foreground command may run before it is moved to the background; default {@link FOREGROUND_YIELD_MS}. */
+  readonly foregroundYieldMs?: number
 }
 
 const registries = new WeakMap<object, BackgroundShells>()
@@ -154,7 +167,8 @@ export function formatProcessResult(result: ProcessResult, timeoutMs: number): s
 }
 
 const OUTPUT_SENTENCE = `Output is capped to about ${MODEL_OUTPUT_CHARS} characters (head and tail kept; the complete output is saved to a file whose path is shown).`
-const BACKGROUND_SENTENCE = 'Set run_in_background for long-running processes (servers, watchers): it returns an id at once; read new output with shell_output and stop it with shell_kill.'
+const BACKGROUND_SENTENCE = 'Set run_in_background for long-running processes (servers, watchers): it returns an id at once; read new output with shell_output and stop it with shell_kill. '
+  + `A command still running after ${FOREGROUND_YIELD_MS / 1000} seconds is moved to the background the same way and the call returns its id.`
 const SANDBOX_SENTENCE = 'Commands run in a system sandbox (writes only to the project and temp dirs); set sandbox:false to rerun outside it when something legitimately needs more, which asks the user. '
   + 'Put scratch files under a fixed path in "$TMPDIR" (e.g. "$TMPDIR/check"): a bare `mktemp` may pick a directory the sandbox cannot write, and deleting a path held in a variable asks the user while "$TMPDIR/..." does not.'
 
@@ -330,16 +344,65 @@ export function shellTool(flavor: ShellFlavor, deps: ShellToolDeps): WorkspaceTo
       }
 
       const files = { stdout: join(temp, `shell-${tag}.stdout.log`), stderr: join(temp, `shell-${tag}.stderr.log`) }
+      let killNow: (() => void) | undefined
       const spec: LocalProcessSpec = {
         command, args: argv, cwd, env: processEnv, timeoutMs, signal: context.signal, outputFiles: files,
+        onStart: handle => { killNow = handle.killNow },
       }
-      let result: ProcessResult
+      // The command runs under its own abort signal, so that it can outlive this call when it is moved to the background.
+      const own = new AbortController()
+      const forwardAbort = (): void => own.abort()
+      if (context.signal.aborted) own.abort()
+      else context.signal.addEventListener('abort', forwardAbort, { once: true })
+      const early = { stdout: '', stderr: '' }
+      let late: ((stream: 'stdout' | 'stderr', text: string) => void) | undefined
+      const running = deps.processes.run({
+        ...spec,
+        signal: own.signal,
+        onOutput: (stream, text) => {
+          if (late !== undefined) late(stream, text)
+          else early[stream] = (early[stream] + text).slice(-YIELD_BUFFER_CHARS)
+        },
+      })
+      const yieldMs = deps.foregroundYieldMs ?? FOREGROUND_YIELD_MS
+      const timer = new AbortController()
+      let result: ProcessResult | undefined
       try {
-        result = await deps.processes.run(spec)
+        result = await Promise.race([running, sleep(yieldMs, undefined, { signal: timer.signal }).then(() => undefined, () => undefined)])
       } catch (error) {
+        timer.abort()
+        context.signal.removeEventListener('abort', forwardAbort)
         if (sandboxed) os?.sandbox.release(commandId)
         throw error
       }
+      timer.abort()
+      if (result === undefined) {
+        // Still running: it goes on as a background process; cancelling the turn (Stop) still ends it, until it exits by itself.
+        const logPath = join(temp, `shell-${tag}-${Date.now().toString(36)}.log`)
+        const adopted = backgroundShellsFor(deps).adopt({
+          sessionId: context.sessionId, label: script, logPath, startedAt: Date.now() - yieldMs,
+          initial: early, finished: running, abort: () => own.abort(),
+          killNow: () => killNow?.(),
+          onExit: () => {
+            context.signal.removeEventListener('abort', forwardAbort)
+            if (sandboxed) os?.sandbox.release(commandId)
+            void Promise.all([rm(files.stdout, { force: true }), rm(files.stderr, { force: true })])
+          },
+        })
+        late = adopted.push
+        const soFar = capStreams(early.stdout, name === 'pwsh' ? stripProgressRecords(early.stderr) : early.stderr)
+        const shown = [soFar.stdout.replace(/\n$/, ''), soFar.stderr === '' ? '' : `[stderr]\n${soFar.stderr.replace(/\n$/, '')}`].filter(part => part !== '').join('\n')
+        const id = adopted.status.id
+        return {
+          content: deps.redactor.redact(
+            `${shown === '' ? '' : `${shown}\n`}[still running after ${Math.round(yieldMs / 1000)}s: moved to the background as ${id}${sandboxed ? ' (system sandbox)' : ''}. See its progress with shell_output {"id":"${id}"}; stop it with shell_kill {"id":"${id}"}. `
+            + `Its deadline (${timeoutMs} ms) still applies.]\nFull output: ${logPath}`,
+          ),
+          isError: false,
+          meta: { background: true, movedToBackground: true, id, sandboxed, logPath },
+        }
+      }
+      context.signal.removeEventListener('abort', forwardAbort)
       // PowerShell's progress records are noise to the model (the sandbox account shows them on every command).
       const capped = capStreams(result.stdout, name === 'pwsh' ? stripProgressRecords(result.stderr) : result.stderr)
       const stderr = sandboxed && os !== undefined ? os.sandbox.annotate(commandId, capped.stderr, result.exitCode) : capped.stderr

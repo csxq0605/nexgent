@@ -151,7 +151,29 @@ export interface ProjectConfig {
    * the task's checks. Absent or empty: none. Changing it always needs approval.
    */
   readonly checkCommands?: readonly string[]
+  /**
+   * How the coordinator's threads work together ({@link CollaborationMode}).
+   * Absent: `central`. Changing it always needs approval.
+   */
+  readonly collaboration?: CollaborationMode
+  /** A5: the coordinator's threads. `maxRunning`: how many run at once (1 to `THREAD_LIMITS.maxRunningLimit`; absent: `THREAD_LIMITS.maxRunning`); more wait in a queue. */
+  readonly threads?: { readonly maxRunning?: number }
 }
+
+/**
+ * How a coordinator's threads work together. `central`: the coordinator
+ * hands each thread its part and passes everything between them (a thread
+ * talks only to the coordinator, and may ask it mid-turn). `hybrid`: the
+ * coordinator still hands out the parts and checks the whole, and threads
+ * also coordinate among themselves through the collaboration log in the
+ * project (`.nexgent/collab/`): notes, claims on paths, handoffs, blockers
+ * and messages to one thread, delivered to each thread before its every
+ * model request.
+ */
+export type CollaborationMode = 'central' | 'hybrid'
+
+/** Every {@link CollaborationMode}. */
+export const COLLABORATION_MODES: readonly CollaborationMode[] = ['central', 'hybrid']
 
 /** Default of {@link ProjectConfig.checkRetries}. */
 export const DEFAULT_CHECK_RETRIES = 2
@@ -179,9 +201,9 @@ export function checkCommandsProblem(value: unknown): string | undefined {
  * permissions or budgets.
  */
 export const GUARDED_PROJECT_CONFIG_FIELDS = [
-  'approvals', 'costCaps', 'sandboxMode', 'learning', 'maxStepsPerTurn', 'checkRetries', 'checkCommands',
+  'approvals', 'costCaps', 'sandboxMode', 'learning', 'maxStepsPerTurn', 'checkRetries', 'checkCommands', 'collaboration',
   // ADR 0022: directories outside the project and the command sandbox are the user's to widen.
-  'extraReadRoots', 'extraWriteRoots', 'commands',
+  'extraReadRoots', 'extraWriteRoots', 'commands', 'threads',
 ] as const
 
 /** The defaults applied over a missing or partial config file. */
@@ -224,6 +246,8 @@ export function resolveProjectConfig(input: ProjectConfigInput = {}): ProjectCon
     ...(input.maxStepsPerTurn === undefined ? {} : { maxStepsPerTurn: input.maxStepsPerTurn }),
     ...(input.checkRetries === undefined ? {} : { checkRetries: input.checkRetries }),
     ...(input.checkCommands === undefined ? {} : { checkCommands: [...input.checkCommands] }),
+    ...(input.collaboration === undefined ? {} : { collaboration: input.collaboration }),
+    ...(input.threads === undefined ? {} : { threads: { ...input.threads } }),
   }
 }
 

@@ -9,6 +9,7 @@ import {
   isSandboxWithin,
   MEMBER_DENIED_TOOLS,
   THREAD_TOOL_NAMES,
+  PEER_TOOL_NAMES,
   COORDINATOR_TOOL_NAMES,
   ORGANIZE_TOOL,
   MEMBER_NAME_PATTERN,
@@ -110,10 +111,11 @@ describe('step-3 contracts: helpers', () => {
     expect(MEMBER_DENIED_TOOLS).toEqual([
       'delegate', 'workflow', 'organize',
       'start_thread', 'message_thread', 'read_thread', 'list_threads', 'update_project_notes',
+      'post_collab', 'read_collab', 'message_peer', 'ask_coordinator', 'read_merged', 'stop_thread',
       'capability_draft', 'capability_try',
     ])
     // every collaboration tool except run_code and every capability tool is hidden from members
-    expect([...STEP3_TOOLS, ...STEP4_TOOLS].map(tool => tool.name).filter(name => name !== 'run_code').concat([ORGANIZE_TOOL.name, ...THREAD_TOOL_NAMES, ...COORDINATOR_TOOL_NAMES]).sort()).toEqual([...MEMBER_DENIED_TOOLS].sort())
+    expect([...STEP3_TOOLS, ...STEP4_TOOLS].map(tool => tool.name).filter(name => name !== 'run_code').concat([ORGANIZE_TOOL.name, ...THREAD_TOOL_NAMES, ...COORDINATOR_TOOL_NAMES, ...PEER_TOOL_NAMES]).sort()).toEqual([...MEMBER_DENIED_TOOLS].sort())
     expect(STEP3_TOOLS.filter(tool => tool.selfSandboxed === true).map(tool => tool.name)).toEqual(['run_code'])
     expect(COLLABORATION_LIMITS).toMatchObject({ maxConcurrentMembers: 4, maxMembersPerTask: 16 })
     expect(MEMBER_NAME_PATTERN.test('analyst-2')).toBe(true)

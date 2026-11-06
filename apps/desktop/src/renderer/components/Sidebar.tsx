@@ -4,6 +4,7 @@ import { useAppState, useAppStore } from '../hooks.js'
 import { T, formatTime, sessionGroup, sessionTitle } from '../strings.js'
 import { useUi, useView } from '../ui.js'
 import { Icon } from './Icon.js'
+import { NewThreadDialog } from './NewThreadDialog.js'
 import { State } from './State.js'
 
 const GROUPS = [
@@ -19,6 +20,7 @@ export function Sidebar(): JSX.Element {
   const ui = useUi()
   const { view } = useView()
   const [switching, setSwitching] = useState(false)
+  const [newThread, setNewThread] = useState(false)
   const switcher = useRef<HTMLDivElement>(null)
   // The project menu closes on Escape, on a click anywhere outside it, and when the view changes.
   useEffect(() => {
@@ -106,6 +108,7 @@ export function Sidebar(): JSX.Element {
     if (active && state.pendingApprovals.length > 0) return <State tone="warn">{T.needsApproval}</State>
     // Coordinator step three: a thread in the background waits for the user to allow something.
     if (!active && state.threads.some(t => t.threadId === session.sessionId && t.needsApproval === true)) return <State tone="warn">{T.needsApproval}</State>
+    if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'queued')) return <State tone="idle">{T.threadQueued}</State>
     if (session.running) return <State tone="run">{T.running}</State>
     if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'waiting')) return <State tone="warn">{T.threadWaiting}</State>
     if (session.interrupted) return <State tone="idle">{T.interrupted}</State>
@@ -174,6 +177,13 @@ export function Sidebar(): JSX.Element {
         <Icon name="plus" />
         {T.newConversation}
       </button>
+      {coordinator !== undefined && (
+        <button type="button" className="nav-item" onClick={() => setNewThread(true)} data-testid="new-thread">
+          <Icon name="branch" />
+          {T.newThread}
+        </button>
+      )}
+      {newThread && <NewThreadDialog onClose={() => setNewThread(false)} />}
       <nav className="session-list" aria-label={T.conversations}>
         {state.sessions.length === 0 && <p className="muted small pad">{T.noConversations}</p>}
         {coordinator !== undefined && <div role="group" aria-label={T.coordinatorConversation}>{withThreads(coordinator)}</div>}

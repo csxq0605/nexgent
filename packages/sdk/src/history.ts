@@ -9,8 +9,10 @@ import {
   addUsage,
   type ApprovalDecision,
   type ApprovalRequest,
+  type CollabEntry,
   type LLMUsage,
   type OrganizationChangeNote,
+  type CollaborationTrialNote,
   type SessionRecord,
   type SessionState,
   type SubagentEndRecord,
@@ -155,9 +157,22 @@ function checkFailureOf(line: string): CheckFailureView {
   return { check: 'other', target: line }
 }
 
-/** Project records onto history items, in record order. */
-export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
+/**
+ * Project records onto history items, in record order. `collab`: entries of
+ * the collaboration log that concern the session, placed by time (`at`) among
+ * the records' items as `collab` items; `turn` is the turn running at that
+ * time (absent between turns).
+ */
+export function historyItems(records: readonly SessionRecord[], collab: readonly CollabEntry[] = []): HistoryItem[] {
   const items: HistoryItem[] = []
+  const pendingCollab = [...collab].sort((a, b) => a.at.localeCompare(b.at) || a.seq - b.seq)
+  let openTurn: number | undefined
+  const flushCollab = (until: string | undefined): void => {
+    while (pendingCollab.length > 0 && (until === undefined || pendingCollab[0]!.at <= until)) {
+      const entry = pendingCollab.shift()!
+      items.push({ kind: 'collab', ...(openTurn === undefined ? {} : { turn: openTurn }), entry })
+    }
+  }
   const calls = new Map<string, ToolCall>()
   const approvals = new Map<string, MutableApproval>()
   // Collaboration items show their latest state at the place they started.
@@ -165,10 +180,14 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
   const workflows = new Map<string, { index: number; state: WorkflowState }>()
   // A turn's organization change shows after the message that started the turn.
   const changes = new Map<number, OrganizationChangeNote>()
+  const trials = new Map<number, CollaborationTrialNote>()
   for (const record of records) {
+    flushCollab(record.ts)
+    if (record.type === 'turn.start') openTurn = record.turn
     switch (record.type) {
       case 'turn.start':
         if (record.organization?.change !== undefined) changes.set(record.turn, record.organization.change)
+        if (record.organization?.trial !== undefined) trials.set(record.turn, record.organization.trial)
         break
       case 'user.message':
         if (record.source === 'inject') {
@@ -180,6 +199,10 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
         if (changes.has(record.turn)) {
           items.push({ kind: 'change', turn: record.turn, change: changes.get(record.turn)! })
           changes.delete(record.turn)
+        }
+        if (trials.has(record.turn)) {
+          items.push({ kind: 'trial', turn: record.turn, trial: trials.get(record.turn)! })
+          trials.delete(record.turn)
         }
         break
       case 'assistant.message':
@@ -287,6 +310,7 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
         break
       case 'turn.end':
         items.push({ kind: 'turn.end', turn: record.turn, reason: record.reason })
+        openTurn = undefined
         break
       case 'error':
         items.push({ kind: 'error', ...(record.turn === undefined ? {} : { turn: record.turn }), error: record.error })
@@ -295,6 +319,7 @@ export function historyItems(records: readonly SessionRecord[]): HistoryItem[] {
         break
     }
   }
+  flushCollab(undefined)
   return items
 }
 

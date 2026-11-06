@@ -19,7 +19,7 @@ English | [中文](README_zh.md)
 
 **Improvement should happen inside the work you are already doing, not in an offline lab.**
 
-You open a project folder and say what you want in plain words. A coordinator splits the work and hands each part to a thread, a background conversation that works in its own copy of the project and organizes its own members when its part is large. You can keep talking while it works. After each task it measures how the work was organized, changes the costliest part, and keeps the change only if the next similar tasks get better.
+You open a project folder and say what you want in plain words. A coordinator splits the work and hands each part to a thread, a background conversation that works in its own copy of the project and organizes its own members when its part is large. You can keep talking while it works. You can also name the threads you want, or start one yourself. How threads work together is tried one change at a time against the collaboration problems Nexgent records, and a change stays only when those problems stop.
 
 > **One project. A team that learns.**
 
@@ -31,10 +31,10 @@ You open a project folder and say what you want in plain words. A coordinator sp
    You can interrupt at any time; the next model request takes your message, and running members and members that start next get it too. Compaction keeps every word you said verbatim, so rules set at the start survive a long task. Project rules you state ("from now on…") are given on every task.
 
 2. **The agent organizes the work**  
-   Each project has one coordinator conversation. It does not edit files or run commands: it splits the task, hands every part to a thread, follows up, passes your corrections on and sums up. A thread works in the background in its own copy of the project; a small part it does and checks itself, a large one it splits into 1–6 members (plan, explore, implement, test, review) with one `organize` tool. Finished work merges back into the project, and the coordinator gets a whole-project check done when several threads merged. It keeps project notes (goals, standing rules, decisions, pitfalls) and briefs each thread with its goal, inputs and limits.
+   Each project has one coordinator conversation. It does not edit files or run commands: it splits the task, hands every part to a thread, follows up, passes your corrections on and sums up. When you name the threads, it starts exactly those and passes your words to each. A thread works in the background in its own copy of the project; a small part it does and checks itself, a large one it splits into 1–6 members (plan, explore, implement, test, review) with one `organize` tool. Finished work merges back into the project; when several threads merged files, a whole-project check runs once they have all ended. It keeps project notes (goals, standing rules, decisions, pitfalls) and briefs each thread with its goal, inputs and limits.
 
-3. **It improves its own organization, quietly**  
-   After every team task it measures each part (cost, time, failures, waiting, work thrown away), changes the hottest one, and keeps or reverts the change by the same numbers on the next similar tasks. Outcomes count, not self-praise: deterministic checks, your corrections and rework, an external reviewer and cost. A share of tasks always runs as a control. You see one line about what changed and one sentence about the effect; there are no settings for it.
+3. **It improves how threads work together, quietly**  
+   When a task's threads have all ended, the host counts the collaboration problems between them: files two threads both changed, merge conflicts, files a handoff missed, files outside a thread's part. When a problem keeps coming back, it tries one collaboration variable at a time (threads that change the same files run one after another; every thread is told at once which files the others brought in; a message wakes an idle thread; a thread that did none of the work does the final whole-project check), enforced by the host, and keeps it only after the problem stays away for several tasks in a row; a worse result, 1.5× the cost or twice the time reverts it. You see one line about what is being tried; there are no settings for it. Threads share a collaboration log kept in the project (`.nexgent/collab/`, never committed); new entries that concern a thread reach it before its next step, even in the middle of a long turn. Every message between threads is passed to the coordinator and shown in both threads' windows. Whether threads also write claims and handoffs to the log themselves is your choice in the settings.
 
 4. **Generic, never task-specific**  
    No rule, prompt or default exists to make one kind of task pass. Example tasks are only used to measure.
@@ -71,7 +71,7 @@ Desktop app (Electron + React)        CLI
                           │
                           ▼
    Session store (JSONL, ledger, snapshots)   Outcome memory
-                          (organization library and reflection, practice handbook)
+                          (organization library and collaboration trials, practice handbook)
                           │
                           └──── feeds the next turn
 ```
@@ -91,7 +91,7 @@ Desktop app (Electron + React)        CLI
 | `packages/context/` | Context, material references, compaction |
 | `packages/tasking/` | Materials, deliverables, feedback, goals |
 | `packages/subagent/`, `workflow/`, `ptc/` | Delegation, `organize`, workflows and the organization profile, code execution |
-| `packages/capabilities/`, `evolve/` | Practice handbook, project rules, organization library and coordinator reflection, outcome review, capability versions |
+| `packages/capabilities/`, `evolve/` | Practice handbook, project rules, organization library and collaboration trials, outcome review, capability versions |
 | `packages/sdk/` | In-process API shared by the desktop app and the CLI |
 | `packages/skill/`, `preset/`, `tool-spreadsheet/`, `web/` | Skills, presets, spreadsheet and web tools |
 | `packages/test-support/`, `scripts/` | Scripted model, acceptance and measurement scripts |
@@ -107,17 +107,23 @@ Desktop app (Electron + React)        CLI
 - **A coordinator per project** — pinned on top as the default entry; it splits work, follows threads and sums up
 - **Threads** — background conversations with a card each (running / done / waiting for you / waiting for approval); open one to watch it or talk to it; finished ones fold away
 - **Teams inside a thread** — only when its part is large; roles, parallel members, reorganize when stuck
-- **Improves its own organization** — one line under your message says what it changed this time and why; the Capabilities page says how much cheaper and faster similar tasks got
+- **You name the threads** — list them with your message (the button beside the composer) or with `--thread` on the command line, or start one from the sidebar or with `nexgent thread start`; the coordinator follows up on yours
+- **Running limit and stop** — threads beyond the number allowed to run at once (3 by default, `threads.maxRunning` in the project's `config.json`) wait in a queue; a running or queued thread can be stopped from its card or its own window
+- **Threads that work together** — a collaboration log in the project: which files each thread merged (with lines added and removed), messages between threads and (optionally) claims and handoffs, delivered before each step and shown as one line in both threads' windows and the coordinator's; a thread can read a file as the project has it now; questions to the coordinator mid-turn
+- **Improves how threads work together** — tries one change at a time against recorded collaboration problems, enforced by the host; one line under your message says what is being tried and how it ended
 - **Remembers good organizations** — per task class, compared against control runs
 - **Project rules and practices** — rules on every task, asks when a rule conflicts with existing tests or code; practices kept or retired by randomized give/withhold
 - **Checks itself** — tests, your check commands, deliverables that must open; fixes within the same turn
-- **Stop, rewind, resume** — and approvals, sandboxing and cost caps
+- **Stop, rewind, resume** — every conversation, each thread included, has a stop button; stopping a thread stops the members it started; plus approvals, sandboxing and cost caps
 
-<p align="center"><img src="assets/screenshots/coordinator.png" width="760" alt="The coordinator conversation with three threads"></p>
-<p align="center"><sub>The coordinator split one request into three threads: one done, one running, one waiting for an answer. The grey line under the request is this time's change to the organization.</sub></p>
+<p align="center"><img src="assets/screenshots/coordinator.png" width="760" alt="The coordinator conversation with its threads"></p>
+<p align="center"><sub>The coordinator split one request into four threads: one done, one running, one waiting for an answer, one queued. What the threads said to each other and what they merged shows as one line each.</sub></p>
 
 <p align="center"><img src="assets/screenshots/thread.png" width="760" alt="Inside a thread: two members"></p>
-<p align="center"><sub>Inside a thread: its part was large enough for two members, a builder and then a tester. The interface is in Chinese; the data in both pictures is an example.</sub></p>
+<p align="center"><sub>Inside a thread: two members, a builder and then a tester; the messages it exchanged with another thread; the stop button stops it and its members.</sub></p>
+
+<p align="center"><img src="assets/screenshots/plan.png" width="760" alt="Naming the threads for a message"></p>
+<p align="center"><sub>Naming the threads you want: one title and one sentence per row; with “only these”, the coordinator starts exactly these. The interface is in Chinese; the data in the pictures is an example.</sub></p>
 
 ---
 

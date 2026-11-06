@@ -187,16 +187,26 @@ function MemberConversation(): JSX.Element {
 }
 
 /** Coordinator step two: in a thread, the way back to the conversation that started it. */
-function ThreadOf({ coordinatorSessionId }: { readonly coordinatorSessionId: string }): JSX.Element {
+function ThreadOf({ coordinatorSessionId, threadId }: { readonly coordinatorSessionId: string; readonly threadId: string }): JSX.Element {
   const state = useAppState()
   const store = useAppStore()
   const owner = state.sessions.find(s => s.sessionId === coordinatorSessionId)
+  const info = state.threads.find(t => t.threadId === threadId)
   const name = owner === undefined || owner.coordinator === true ? T.coordinatorConversation : sessionTitle(owner, undefined)
   return (
-    <button type="button" className="ghost thread-of small" onClick={() => void store.openSession(coordinatorSessionId)} data-testid="thread-back" title={T.threadOf(name)}>
-      <Icon name="back" />
-      {T.threadOf(name)}
-    </button>
+    <>
+      <button type="button" className="ghost thread-of small" onClick={() => void store.openSession(coordinatorSessionId)} data-testid="thread-back" title={T.threadOf(name)}>
+        <Icon name="back" />
+        {T.threadOf(name)}
+      </button>
+      {info?.isolated === false && <span className="faint small" title={T.threadSharedHelp} data-testid="thread-shared">{T.threadShared}</span>}
+      {/* A running thread stops from the composer; a queued one has no turn yet, so it stops here. */}
+      {info?.status === 'queued' && (
+        <button type="button" className="ghost small thread-stop" title={T.threadStopHelp} onClick={() => void store.stopThread(threadId)} data-testid="thread-stop-top">
+          {`${T.threadQueued} · ${T.threadStop}`}
+        </button>
+      )}
+    </>
   )
 }
 
@@ -230,7 +240,7 @@ function MainConversation(): JSX.Element {
   return (
     <section className="conversation" data-testid="conversation">
       <header className="topbar">
-        {session?.thread !== undefined && <ThreadOf coordinatorSessionId={session.thread.coordinatorSessionId} />}
+        {session?.thread !== undefined && <ThreadOf coordinatorSessionId={session.thread.coordinatorSessionId} threadId={session.sessionId} />}
         <Title
           key={state.sessionId}
           sessionId={state.sessionId}

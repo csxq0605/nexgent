@@ -72,8 +72,12 @@ import type {
   OrganizationRole,
   OrganizationClassSummary,
   OrganizationChangeNote,
+  CollaborationTrialNote,
   MemberDenial,
   ThreadInfo,
+  CollabEntry,
+  ThreadPlan,
+  CollaborationMode,
   ThreadOrigin,
 } from '@nexgent/kernel'
 
@@ -218,6 +222,17 @@ export type HistoryItem =
   | { readonly kind: 'organization'; readonly turn: number; readonly organization: OrganizationView }
   /** The one change to how the work is organized the turn tried, and why (from `turn.start.organization.change`). */
   | { readonly kind: 'change'; readonly turn: number; readonly change: OrganizationChangeNote }
+  /** Organization redo: the collaboration trial the coordinator task ran, or the verdict on the last one (from `turn.start.organization.trial`). */
+  | { readonly kind: 'trial'; readonly turn: number; readonly trial: CollaborationTrialNote }
+  /**
+   * Organization redo: an entry of the coordinator's collaboration log that
+   * concerns this conversation, placed by time (`at`): in a thread, what it
+   * wrote and what was written to it (messages, notes for all, merges of
+   * its files); in the coordinator, everything its threads wrote. Read from
+   * the log, not from the session's records. `turn`: the turn running when
+   * it was written (absent between turns).
+   */
+  | { readonly kind: 'collab'; readonly turn?: number; readonly entry: CollabEntry }
   | { readonly kind: 'turn.end'; readonly turn: number; readonly reason: TurnEndReason; readonly cost?: TurnCost }
   | { readonly kind: 'error'; readonly turn?: number; readonly error: ErrorInfo }
   /** Redesign 3.2: the turn's checks failed and the model was sent back to fix them. */
@@ -284,6 +299,15 @@ export interface SendMessageInput {
   readonly text: string
   /** Materials to reference in this message (`@` mentions and materials added since the last turn). */
   readonly materialIds?: readonly string[]
+  /**
+   * Organization redo: the threads the user wants for this task (coordinator
+   * or any top-level conversation, not a thread). They are added to the
+   * message as the user wrote them; with {@link exactThreads} (the default)
+   * the conversation starts only these, each with the user's words.
+   */
+  readonly threads?: readonly { readonly title: string; readonly task?: string }[]
+  /** With {@link threads}: start exactly these and no others (default `true`). */
+  readonly exactThreads?: boolean
 }
 
 /** What `turns.send` and `feedback.submit` return at once; the turn runs on and reports through events. */
@@ -326,7 +350,7 @@ interface AppEventBase {
 /** Everything the SDK pushes to a subscriber (desktop: over the `nexgent:event` channel). */
 export type SdkEvent =
   /** `change`: the one change to how the work is organized this turn tries, and why (or the last one's verdict). */
-  | EventBase & { readonly type: 'turn.start'; readonly turn: number; readonly source: Exclude<UserMessageSource, 'inject'>; readonly change?: OrganizationChangeNote }
+  | EventBase & { readonly type: 'turn.start'; readonly turn: number; readonly source: Exclude<UserMessageSource, 'inject'>; readonly change?: OrganizationChangeNote; readonly trial?: CollaborationTrialNote }
   | EventBase & { readonly type: 'text.delta'; readonly turn: number; readonly step: number; readonly text: string }
   | EventBase & { readonly type: 'reasoning.delta'; readonly turn: number; readonly step: number; readonly text: string }
   /** The step's reply broke off on a transient failure and is being asked for again: drop what streamed for it. */
@@ -353,6 +377,13 @@ export type SdkEvent =
    * ended turn woke it with; in a thread, the coordinator's task or message.
    */
   | EventBase & { readonly type: 'thread.message'; readonly turn: number; readonly text: string }
+  /**
+   * Organization redo: an entry was written to the coordinator's collaboration
+   * log. Emitted on the coordinator conversation and on each thread it
+   * concerns (the writer, the addressee), so an open window shows it at once
+   * (the same entry appears in `sessions.view` as a `collab` history item).
+   */
+  | EventBase & { readonly type: 'collab'; readonly entry: CollabEntry }
   /** Rework D2: the conversation got a title (`sessions.rename`, or the one named after its first turn). */
   | EventBase & { readonly type: 'session.title'; readonly title: string }
   /** Step 3, emitted on the parent session: a member run started / settled. */
@@ -512,6 +543,10 @@ export interface ProjectSettings {
   readonly checkRetries: number
   /** Redesign 3.2: the project's own check commands, run when a turn changed something (empty: none). */
   readonly checkCommands: readonly string[]
+  /** Organization redo: how the coordinator's threads work together (default `central`). */
+  readonly collaboration: CollaborationMode
+  /** A5: how many of a coordinator's threads run at once (1 to `THREAD_LIMITS.maxRunningLimit`); more wait in a queue. Always present from `settings.get`. */
+  readonly threads?: { readonly maxRunning: number }
 }
 
 /**
@@ -633,6 +668,19 @@ export interface SdkMethods {
   'sessions.coordinator': (input: { readonly projectId: string }) => Promise<SessionSummary>
   /** Coordinator step two: the threads a conversation started, oldest first, with their status. */
   'threads.list': (input: { readonly projectId: string; readonly sessionId: string }) => Promise<readonly ThreadInfo[]>
+  /**
+   * Organization redo: the user starts a thread of a conversation (the
+   * coordinator, or any top-level one) themselves: its first turn is
+   * `task`, the user's message, running in the background; when it ends the
+   * conversation is woken to follow it up.
+   */
+  'threads.start': (input: { readonly projectId: string; readonly sessionId: string; readonly title: string; readonly task: string; readonly materialIds?: readonly string[]; readonly owns?: readonly string[] }) => Promise<ThreadInfo>
+  /** Organization redo: the latest entries of the collaboration log a coordinator's threads share (the current task's; with `all`, every task's). */
+  'threads.collab': (input: { readonly projectId: string; readonly sessionId: string; readonly all?: boolean }) => Promise<readonly CollabEntry[]>
+  /** D9: stop a thread's running (or queued) turn; it stays stopped and does not wake the coordinator. `sessionId` is the coordinator (or the conversation that started it). */
+  'threads.stop': (input: { readonly projectId: string; readonly sessionId: string; readonly threadId: string; readonly reason?: string }) => Promise<ThreadInfo>
+  /** The threads the user named for the coordinator's current task, with whether they are the only ones (`exact`); `null` when none. */
+  'threads.plan': (input: { readonly projectId: string; readonly sessionId: string }) => Promise<ThreadPlan | null>
   /** Takes the session lock (resuming and closing an interrupted turn when needed) and returns the view. */
   'sessions.open': (input: { readonly projectId: string; readonly sessionId: string }) => Promise<SessionView>
   /** Releases the lock; a running turn is cancelled first (cause `shutdown`). */
@@ -751,6 +799,10 @@ export const SDK_METHOD_NAMES = [
   'sessions.create',
   'sessions.coordinator',
   'threads.list',
+  'threads.start',
+  'threads.collab',
+  'threads.stop',
+  'threads.plan',
   'sessions.open',
   'sessions.close',
   'sessions.export',

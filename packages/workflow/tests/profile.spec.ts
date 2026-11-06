@@ -5,7 +5,7 @@
  */
 import type { SessionRecord } from '@nexgent/kernel'
 import { describe, expect, it } from 'vitest'
-import { buildOrganizationProfile, unionMs } from '../src/index.js'
+import { buildOrganizationProfile, collaborationEvents, collaborationLines, renderEventCounts, unionMs } from '../src/index.js'
 
 const T0 = Date.parse('2026-10-20T10:00:00.000Z')
 let seq = 0
@@ -59,5 +59,35 @@ describe('organization profile', () => {
 
   it('counts overlapping waits once', () => {
     expect(unionMs([[0, 10], [5, 15], [20, 25]])).toBe(20)
+  })
+})
+
+describe('collaboration events', () => {
+  const call = (id: string, name: string, args: Record<string, unknown>) => ({ id, name, arguments: JSON.stringify(args) })
+  const msg = (turn: number, calls: ReturnType<typeof call>[]) => rec(1, { type: 'assistant.message', turn, toolCalls: calls })
+  const fail = (turn: number, name: string, collab: string) => rec(2, { type: 'tool.result', turn, toolCallId: 'x', name, isError: true, content: 'no', error: { name: 'NexgentError', code: 'tool/denied', message: 'no', details: { collab } } })
+  const run = (name: string, start: number, end: number, files: string[]) => ({ name, childSessionId: name, childTurn: 1, files, conflicts: 0, start, end })
+
+  it('counts a shared file as overlap only when the parts ran at the same time', () => {
+    expect(collaborationEvents([run('a', 0, 10, ['x.ts']), run('b', 5, 20, ['x.ts'])], undefined).overlap).toBe(1)
+    expect(collaborationEvents([run('a', 0, 10, ['x.ts']), run('b', 10, 20, ['x.ts'])], undefined).overlap).toBe(0)
+  })
+
+  it('counts rereads, regroups, capped, cycles and refused by details.collab', () => {
+    const children = new Map<string, SessionRecord[]>([['a', [
+      msg(1, [call('1', 'read_file', { path: 'a.ts' })]),
+      msg(1, [call('2', 'read_file', { path: 'a.ts' }), call('3', 'read_file', { path: 'b.ts' }), call('4', 'write_file', { path: 'b.ts' }), call('5', 'read_file', { path: 'b.ts' })]),
+      rec(3, { type: 'organization', turn: 1 }), rec(4, { type: 'organization', turn: 1 }),
+      fail(1, 'post_collab', 'claim'), fail(1, 'message_peer', 'sequence'), fail(1, 'message_peer', 'hops'), fail(1, 'ask_coordinator', 'limit'), fail(1, 'message_peer', 'wakes'), fail(1, 'post_collab', 'cycle'),
+    ]]])
+    expect(collaborationEvents([run('a', 0, 10, [])], children)).toMatchObject({ reread: 1, regroups: 1, refused: 2, capped: 3, cycles: 1 })
+  })
+
+  it('renders the non-zero events and the host-enforced lines', () => {
+    expect(renderEventCounts({ overlap: 1, conflicts: 0, missing: 0, outside: 0, messages: 2, refused: 0 })).toBe('events: overlap 1, messages 2')
+    expect(renderEventCounts(undefined)).toBe('')
+    const base = { mode: 'central', handoff: 'brief', overlap: 'parallel' } as const
+    expect(collaborationLines({ ...base, wake: 'named', check: 'separate' }).join(' ')).toMatch(/wakes it.*did none of the work/)
+    expect(collaborationLines({ ...base, check: 'merged' }).join(' ')).toMatch(/merged last/)
   })
 })

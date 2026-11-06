@@ -77,7 +77,11 @@ export interface UserMessageRecord extends SessionRecordBase {
    * opens with (step 2: it follows that turn's `feedback` record); `'thread'`
    * for a message between a coordinator and its thread (in the coordinator,
    * the note a thread's ended turn wakes it with; in the thread, the
-   * coordinator's task or message). Not the user's words.
+   * coordinator's task or message). Not the user's words. `'relay'` (D1):
+   * in a thread, the user's own words the host passed on with the
+   * coordinator's task or message (the words the user named the thread's
+   * part with, or wrote to the coordinator in the task), kept word for word
+   * when the history is compacted.
    */
   readonly source: UserMessageSource
   /** Ids of the materials the user attached to this message (step 2, optional); the reference text itself is an `inject` message. */
@@ -85,7 +89,7 @@ export interface UserMessageRecord extends SessionRecordBase {
 }
 
 /** Who produced a {@link UserMessageRecord}. */
-export type UserMessageSource = 'user' | 'inject' | 'feedback' | 'thread'
+export type UserMessageSource = 'user' | 'inject' | 'feedback' | 'thread' | 'relay'
 
 /** The assistant's reply for one step: text plus tool calls plus the request's accounting. */
 export interface AssistantMessageRecord extends SessionRecordBase {

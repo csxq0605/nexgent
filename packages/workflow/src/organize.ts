@@ -43,6 +43,10 @@ import {
   type OrganizationMemory,
   type OrganizationSuggestion,
   type SessionRecord,
+  COLLABORATION_EVENT_NAMES,
+  type CollaborationConfig,
+  type CollaborationEvents,
+  DEFAULT_COLLABORATION,
 } from '@nexgent/kernel'
 import { prepareArchitecture } from './architecture.js'
 import { buildOrganizationProfile, threadRunCount, type ProfileInput } from './profile.js'
@@ -150,19 +154,46 @@ export interface DefaultOrganizerOptions {
   readonly costOf?: ProfileInput['costOf']
 }
 
-/** Pure: the coordinator's lines about changes to the organization (the one tried now, the ones kept). */
-export function changeLines(advice: Pick<OrganizationSuggestion, 'change' | 'kept'> = {}): string[] {
+/** Pure: the non-zero collaboration events as one line, `events: overlap 1, conflicts 2` (empty when there are none). */
+export function renderEventCounts(events: CollaborationEvents | undefined): string {
+  if (events === undefined) return ''
+  const parts = COLLABORATION_EVENT_NAMES.filter(name => (events[name] ?? 0) > 0).map(name => `${name} ${events[name]}`)
+  return parts.length === 0 ? '' : `events: ${parts.join(', ')}`
+}
+
+/**
+ * Organization redo: the coordinator's lines about how its threads work
+ * together, for what the host enforces (generic: no example task).
+ */
+export function collaborationLines(collaboration: CollaborationConfig | undefined): string[] {
+  if (collaboration === undefined) return []
   const lines: string[] = []
-  if (advice.change !== undefined) lines.push(`- Measured on the last similar task, one change to the organization for this task: ${advice.change.instruction}`)
-  for (const kept of advice.kept ?? []) if (kept.id !== advice.change?.id) lines.push(`- Kept from earlier similar tasks: ${kept.instruction}`)
+  if (collaboration.overlap === 'sequence') {
+    lines.push('- Give every thread `owns` (the files or directories its part changes). Nexgent starts no thread whose `owns` overlaps a running thread\'s: start it after that thread ends.')
+  }
+  if (collaboration.handoff === 'changed') {
+    lines.push('- Nexgent tells every thread of the task, as soon as it happens, which files each other thread brought into the project; you need not list them in briefs.')
+  }
+  if (collaboration.wake === 'named') {
+    lines.push('- A message from one thread to an idle thread wakes it: it starts its next turn (a limited number of times per task).')
+  }
+  if (collaboration.check === 'separate') {
+    lines.push('- When the threads have ended, Nexgent starts a thread that did none of the work to check the whole project; you need not start it.')
+  } else if (collaboration.check === 'merged') {
+    lines.push('- When two or more threads merged files, Nexgent has the thread that merged last check the whole project, so you need not start that check; with fewer, verify the result yourself.')
+  }
+  if (collaboration.mode === 'hybrid') {
+    lines.push('- The threads also work together without you through the collaboration log: claims on files, notes, handoffs, blockers and messages to one thread, each delivered to the threads it concerns before their next step; they ask you mid-turn. '
+      + 'You still split the task, hand out the parts, follow up, and have the whole checked; read the log with `read_collab`, and post a note (`post_collab`) for what every thread must know.')
+  }
   return lines
 }
 
-/** Pure: the team section with the organization to start from (and the coordinator's changes). */
-export function teamSection(organization: OrganizationSuggestion['organization'], advice: Pick<OrganizationSuggestion, 'change' | 'kept'> = {}, coordinator = false, thread = false): SystemPromptSection {
-  const changes = changeLines(advice)
+/** Pure: the team section with the organization to start from (and, for the coordinator, how its threads work together). */
+export function teamSection(organization: OrganizationSuggestion['organization'], collaboration: CollaborationConfig | undefined = undefined, coordinator = false, thread = false): SystemPromptSection {
+  const changes = coordinator ? collaborationLines(collaboration) : []
   const base = coordinator ? COORDINATOR_TEAM_SECTION : thread ? THREAD_TEAM_SECTION : TEAM_SECTION
-  // The coordinator's organization is its split into threads, carried by the change lines; member organizations are the threads' own.
+  // The coordinator's organization is its split into threads; member organizations are the threads' own.
   if (organization === undefined || coordinator) return changes.length === 0 ? base : { ...base, body: `${base.body}\n${changes.join('\n')}` }
   const roles = organization.roles === undefined || organization.roles.length === 0
     ? ''
@@ -172,7 +203,7 @@ export function teamSection(organization: OrganizationSuggestion['organization']
     : organization.roles === undefined
       ? `- Use \`${organization.name}\` for this task: Nexgent compares organizations across similar tasks, so do not swap it for a smaller one because the task looks easy.`
       : `- On similar tasks \`${organization.name}\`${roles} went well. Start from it and give each role this task's part.`
-  return { ...base, body: [`${base.body}\n${lead} Use another organization only when this task clearly needs it.`, ...changes].join('\n') }
+  return { ...base, body: `${base.body}\n${lead} Use another organization only when this task clearly needs it.` }
 }
 
 /**
@@ -236,19 +267,24 @@ export function defaultOrganizer(options: DefaultOrganizerOptions = {}): TurnOrg
       if (isSmallTask(input.text, input.materialIds)) return { decision: { decision: 'solo', chosenBy: 'size' }, section: solo }
       // A thread's turn is classed and recorded as its own (member-level) run; the coordinator's turns as coordinator-level runs.
       const level = input.coordinator === true ? { level: 'coordinator' as const } : {}
-      const suggestion = memory !== undefined && input.source === 'user' ? await memory.suggest({ text: input.text, random, ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }), ...level }).catch(() => undefined) : undefined
+      const mode = input.coordinator === true ? { collaboration: input.collaboration ?? 'central' as const } : {}
+      const suggestion = memory !== undefined && input.source === 'user' ? await memory.suggest({ text: input.text, random, ...(input.projectRoot === undefined ? {} : { projectRoot: input.projectRoot }), ...level, ...mode }).catch(() => undefined) : undefined
       if (suggestion !== undefined) {
         pending.set(input.sessionId, { turn: input.turn, suggestion, coordinator: input.coordinator === true })
         const decision: OrganizationDecision = {
           decision: suggestion.decision,
           chosenBy: suggestion.control ? 'control' : suggestion.runs > 0 ? 'memory' : 'default',
           ...(suggestion.organization === undefined ? {} : { suggested: suggestion.organization.name }),
-          ...(suggestion.decision === 'team' && suggestion.note !== undefined ? { change: suggestion.note } : {}),
+          ...(suggestion.decision === 'team' && suggestion.collaboration !== undefined ? { collaboration: suggestion.collaboration } : {}),
+          ...(suggestion.decision === 'team' && suggestion.trialNote !== undefined ? { trial: suggestion.trialNote } : {}),
         }
-        return { decision, section: decision.decision === 'solo' ? solo : teamSection(suggestion.organization, suggestion, input.coordinator === true, input.thread === true) }
+        return { decision, section: decision.decision === 'solo' ? solo : teamSection(suggestion.organization, suggestion.collaboration, input.coordinator === true, input.thread === true) }
       }
-      const decision: OrganizationDecision = random() < rate ? { decision: 'solo', chosenBy: 'control' } : { decision: 'team', chosenBy: 'default' }
-      return { decision, section: decision.decision === 'solo' ? solo : input.coordinator === true ? COORDINATOR_TEAM_SECTION : input.thread === true ? THREAD_TEAM_SECTION : TEAM_SECTION }
+      const fallback: OrganizationDecision = random() < rate ? { decision: 'solo', chosenBy: 'control' } : { decision: 'team', chosenBy: 'default' }
+      // Without a library the coordinator's threads still work the way the project chose.
+      const collaboration = input.coordinator === true && fallback.decision === 'team' ? { ...DEFAULT_COLLABORATION, mode: input.collaboration ?? 'central' } : undefined
+      const decision: OrganizationDecision = collaboration === undefined ? fallback : { ...fallback, collaboration }
+      return { decision, section: decision.decision === 'solo' ? solo : input.coordinator === true ? teamSection(undefined, collaboration, true) : input.thread === true ? THREAD_TEAM_SECTION : TEAM_SECTION }
     },
     async noteTurnEnd(input: TurnOrganizationEnd) {
       const entry = pending.get(input.sessionId)
@@ -265,7 +301,9 @@ export function defaultOrganizer(options: DefaultOrganizerOptions = {}): TurnOrg
       const traits = turnTraits(input)
       const measured = await turnProfile(input, deleted, options.costOf).catch(() => undefined)
       const profile = measured?.profile
-      const change = input.use.decision === 'team' ? entry.suggestion.change?.id : undefined
+      const team = input.use.decision === 'team'
+      const collaboration = team && entry.coordinator ? entry.suggestion.collaboration : undefined
+      const trial = collaboration === undefined ? undefined : entry.suggestion.trial
       await memory.record({
         classId: entry.suggestion.classId,
         key: entry.suggestion.key,
@@ -285,7 +323,8 @@ export function defaultOrganizer(options: DefaultOrganizerOptions = {}): TurnOrg
         ...(outputs.length === 0 ? {} : { outputs }),
         ...(deleted.length === 0 ? {} : { deleted }),
         ...(profile === undefined ? {} : { profile }),
-        ...(change === undefined ? {} : { change }),
+        ...(collaboration === undefined ? {} : { collaboration }),
+        ...(trial === undefined ? {} : { trial }),
         ...(measured?.waiting === true ? { waiting: true as const } : {}),
       })
     },

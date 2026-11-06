@@ -3,7 +3,7 @@ import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
 import { useAppState } from '../hooks.js'
 import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
-import { T, changeNoteText, learnedNote, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
+import { T, collabLineText, changeNoteText, learnedNote, trialNoteText, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
@@ -350,6 +350,18 @@ function EntryView({
           {entry.userWords === undefined ? T.compacted : T.compactedKept(entry.userWords.turns.length, entry.userWords.dropped)}
         </div>
       )
+    case 'collab': {
+      if (entry.entry.kind === 'task') return null
+      const line = collabLineText(entry.entry)
+      return (
+        <div className="collab-line small" data-testid="collab-line" data-kind={entry.entry.kind} title={entry.entry.text}>
+          <span className="collab-who">{line.who}</span>
+          <span className="collab-body ellipsis">{line.body}</span>
+        </div>
+      )
+    }
+    case 'trial':
+      return <div className="turn-change small muted" data-testid="turn-trial">{trialNoteText(entry.trial)}</div>
     case 'change':
     {
       const learned = learnedNote(entry.change)

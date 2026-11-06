@@ -309,37 +309,6 @@ describe('threads under the coordinator\'s limits', () => {
     expect(threadRecords.filter(record => record.type === 'session.mode').map(record => [record.plan, record.reason])).toEqual([[true, 'host']])
     expect(threadRecords.find(record => record.type === 'tool.result' && record.name === 'write_file')).toMatchObject({ isError: true, error: { code: 'sandbox/denied' } })
   })
-
-  it('does not start an idle thread\'s next turn through message_thread while the most threads are running', async () => {
-    const ids = ['t1', 't2', 't3', 't4']
-    const running = new Set(ids.slice(0, 3))
-    const records = (id: string): SessionRecord[] => [
-      { type: 'session.start', seq: 1, ts: '2026-10-26T00:00:00.000Z', sessionId: id, version: 1, projectRoot: '/p', model: 'm', sandboxMode: 'workspace-write', thread: { coordinatorSessionId: 'c', title: id } },
-      { type: 'turn.start', seq: 2, ts: '2026-10-26T00:00:00.000Z', sessionId: id, turn: 1 },
-      { type: 'turn.end', seq: 3, ts: '2026-10-26T00:00:00.000Z', sessionId: id, turn: 1, reason: { kind: 'completed' } },
-    ] as SessionRecord[]
-    let started = 0
-    const host = new SdkThreadHost({
-      threadIds: async () => ids,
-      records: async (id: string) => records(id),
-      running: (id: string) => running.has(id),
-      needsApproval: () => false,
-      steer: async () => false,
-      startTurn: async (id: string) => {
-        started += 1
-        running.add(id)
-        return { turn: 2, done: new Promise(() => undefined) }
-      },
-      append: async () => undefined,
-      report: () => undefined,
-    } as unknown as ThreadRuntime)
-    await expect(host.message({ coordinatorSessionId: 'c', turn: 1, threadId: 't4', text: 'Continue the work.' })).rejects.toMatchObject({ code: 'tool/denied' })
-    expect(started).toBe(0)
-    // Once a thread ends, the idle one gets its next turn.
-    running.delete('t3')
-    await host.message({ coordinatorSessionId: 'c', turn: 1, threadId: 't4', text: 'Continue the work.' })
-    expect(started).toBe(1)
-  })
 })
 
 describe('a thread works, is checked and is measured in its own copy of the project', () => {

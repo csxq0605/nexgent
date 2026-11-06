@@ -71,6 +71,7 @@ export const SETTINGS: ProjectSettings = {
   apiKey: { configured: false },
   dataDir: '/home/me/.nexgent/projects/p1',
   checkRetries: 2,
+  collaboration: 'central',
   checkCommands: [],
 }
 
@@ -96,6 +97,8 @@ export class FakeBridge implements NexgentBridge {
   sessions: SessionSummary[] = [SESSION]
   /** Coordinator step two: what `threads.list` answers. */
   threads: ThreadInfo[] = []
+  /** What `threads.plan` answers. */
+  plan: { threads: { title: string; task?: string }[]; exact: boolean } | null = null
   settings: ProjectSettings = SETTINGS
   /** API 7: what `userSettings.get` answers (`update` changes it like the SDK would). */
   userSettings: UserSettings = { learning: {} }
@@ -131,6 +134,17 @@ export class FakeBridge implements NexgentBridge {
       return { ...first, coordinator: true }
     },
     'threads.list': input => this.threads.filter(thread => thread.coordinatorSessionId === input.sessionId),
+    'threads.start': input => {
+      const thread = { threadId: 't9', title: input.title, coordinatorSessionId: input.sessionId, status: 'running' as const, turns: 1, createdAt: SESSION.createdAt, updatedAt: SESSION.updatedAt, origin: 'user' as const }
+      this.sessions = [...this.sessions, { ...SESSION, sessionId: 't9', title: input.title, thread: { coordinatorSessionId: input.sessionId, title: input.title, origin: 'user' } }]
+      this.threads = [...this.threads, thread]
+      return thread
+    },
+    'threads.stop': input => {
+      this.threads = this.threads.map(t => (t.threadId === input.threadId ? { ...t, status: 'stopped' as const } : t))
+      return this.threads.find(t => t.threadId === input.threadId)!
+    },
+    'threads.plan': () => this.plan,
     'sessions.rename': input => {
       const summary = { ...(this.sessions.find(s => s.sessionId === input.sessionId) ?? SESSION), title: input.title }
       this.sessions = this.sessions.map(s => (s.sessionId === input.sessionId ? summary : s))

@@ -143,6 +143,59 @@ describe.skipIf(!posix)('background shell', () => {
     expect((await tool('shell_output').handler({ id }, ctx)).content).not.toContain('two')
   })
 
+  it('moves a foreground command that outlives the yield time to the background', async () => {
+    const { tool, workspace, deps } = await setup()
+    disposers.push(() => backgroundShellsFor(deps).disposeAll())
+    const bash = createWorkspaceTools({ ...deps, background: backgroundShellsFor(deps), foregroundYieldMs: 300 }).find(t => t.definition.name === 'bash')!
+    const ctx = toolContext(workspace)
+    const moved = await bash.handler({ command: 'echo early; sleep 0.9; echo late; exit 3' }, ctx)
+    expect(moved.isError).toBe(false)
+    expect(moved.content).toContain('moved to the background')
+    expect(moved.content).toContain('early')
+    const id = /(bg-\d+)/.exec(moved.content)?.[1]
+    expect(moved.meta).toMatchObject({ background: true, movedToBackground: true, id })
+    let rest = ''
+    for (let i = 0; i < 80 && !rest.includes('exited'); i++) {
+      await new Promise(r => setTimeout(r, 50))
+      rest += (await tool('shell_output').handler({ id }, ctx)).content
+    }
+    expect(rest).toContain('late')
+    expect(rest).toContain('exited with code 3')
+    // A command that ends in time is answered as before.
+    const quick = await bash.handler({ command: 'echo fast' }, ctx)
+    expect(quick.content).toContain('fast')
+    expect(quick.content).toContain('[exit code: 0]')
+  })
+
+  it('shell_kill ends a command that was moved to the background', async () => {
+    const { tool, workspace, deps } = await setup()
+    disposers.push(() => backgroundShellsFor(deps).disposeAll())
+    const bash = createWorkspaceTools({ ...deps, background: backgroundShellsFor(deps), foregroundYieldMs: 200 }).find(t => t.definition.name === 'bash')!
+    const ctx = toolContext(workspace)
+    const moved = await bash.handler({ command: 'sleep 600' }, ctx)
+    const id = /(bg-\d+)/.exec(moved.content)?.[1]
+    expect(id).toBeDefined()
+    const killed = await tool('shell_kill').handler({ id }, ctx)
+    expect(killed.content).toContain('killed')
+  })
+
+  it('cancelling the call ends a command that was moved to the background', async () => {
+    const { tool, workspace, deps } = await setup()
+    disposers.push(() => backgroundShellsFor(deps).disposeAll())
+    const bash = createWorkspaceTools({ ...deps, background: backgroundShellsFor(deps), foregroundYieldMs: 200 }).find(t => t.definition.name === 'bash')!
+    const stop = new AbortController()
+    const ctx = toolContext(workspace, 'workspace-write', { signal: stop.signal })
+    const moved = await bash.handler({ command: 'sleep 600' }, ctx)
+    const id = /(bg-\d+)/.exec(moved.content)?.[1]
+    stop.abort()
+    let out = ''
+    for (let i = 0; i < 80 && !out.includes('exited') && !out.includes('killed'); i++) {
+      await new Promise(r => setTimeout(r, 50))
+      out = (await tool('shell_output').handler({ id }, toolContext(workspace))).content
+    }
+    expect(out).toMatch(/exited|killed/)
+  })
+
   it('shell_kill ends the whole tree', async () => {
     const { tool, workspace, deps } = await setup()
     disposers.push(() => backgroundShellsFor(deps).disposeAll())

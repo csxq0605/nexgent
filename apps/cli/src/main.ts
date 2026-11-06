@@ -14,6 +14,7 @@ import { createApprovalResponder, type AnswerSource } from './approval.js'
 import { commandUsage, parseCliArgs, RESUME_DEFAULT_TASK, usage, type Invocation } from './args.js'
 import { requireApiKey, type CredentialProbe } from './credentials.js'
 import { CliError, EXIT, type ExitCode } from './exit-codes.js'
+import { runThread } from './threads.js'
 import { initProjectLayout } from './layout.js'
 import { TaskTally } from './outcome.js'
 import { createRenderer, type Renderer, type TextSink } from './render.js'
@@ -130,6 +131,8 @@ export async function main(argv: readonly string[], io: CliIo = processIo(), dep
       case 'export':
         renderer = createRenderer(invocation.json ? 'json' : 'text', io.stdout, io.stderr)
         return await runExport(invocation, io)
+      case 'thread':
+        return await runThread(invocation, io, deps)
       case 'run':
       case 'resume':
         renderer = createRenderer(invocation.json ? 'json' : 'text', io.stdout, io.stderr)
@@ -169,6 +172,7 @@ async function runTask(
     ...(invocation.command === 'resume' ? { resumeSessionId: invocation.sessionId } : {}),
     ...(invocation.command === 'run' && invocation.model !== undefined ? { model: invocation.model } : {}),
     ...(invocation.command === 'run' && invocation.plan === true ? { plan: true } : {}),
+    ...(invocation.command === 'run' && invocation.threads !== undefined ? { threads: invocation.threads, ...(invocation.exactThreads === undefined ? {} : { exactThreads: invocation.exactThreads }) } : {}),
     ...(invocation.sandbox === undefined ? {} : { sandboxMode: invocation.sandbox }),
   })
 
@@ -235,7 +239,7 @@ async function runExport(invocation: Extract<Invocation, { command: 'export' }>,
     throw new NexgentError('session/not-found', `session ${invocation.sessionId} not found in ${layout.root}`)
   }
   const outDir = path.resolve(io.cwd, invocation.out ?? `nexgent-export-${invocation.sessionId}`)
-  const sdk = createSdk({ appVersion: packageVersion(), env: io.env })
+  const sdk = createSdk({ appVersion: packageVersion(), env: io.env, resumeThreads: false })
   try {
     const { projectId } = await sdk.call('projects.open', { root: layout.root })
     const result = await sdk.call('sessions.export', { projectId, sessionId: invocation.sessionId, outDir })

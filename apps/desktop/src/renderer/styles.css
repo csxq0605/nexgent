@@ -3374,3 +3374,84 @@ details[open] > summary .fold-mark.closed {
   border-radius: 50%;
   background: currentColor;
 }
+
+.new-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Organization redo: a collaboration entry is one quiet line. */
+.collab-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--muted);
+  padding: 2px 10px;
+  border-left: 2px solid var(--line);
+  min-width: 0;
+}
+
+.collab-line .collab-who {
+  flex: none;
+  color: var(--fg);
+  font-weight: 500;
+}
+
+.collab-line .collab-body {
+  min-width: 0;
+}
+
+.collab-line[data-kind='blocker'] {
+  border-left-color: var(--coral);
+}
+
+.collab-line[data-kind='merged'] {
+  border-left-color: var(--accent);
+}
+
+.plan-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  width: min(480px, 92vw);
+  background: var(--raise);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.plan-row {
+  display: flex;
+  gap: 6px;
+}
+
+.plan-row input:first-child {
+  flex: 0 0 34%;
+}
+
+.plan-row input:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+}
+
+.plan-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.plan-anchor {
+  position: relative;
+  display: inline-flex;
+}
+
+.thread-stop {
+  margin-left: auto;
+}

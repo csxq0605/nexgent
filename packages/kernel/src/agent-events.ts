@@ -8,7 +8,7 @@ import type { ErrorInfo } from './contracts/errors.js'
 import type { FinishReason, LLMUsage, RefusalInfo, ToolCall, ToolResult } from './contracts/llm.js'
 import type { SessionRecord, TurnEndReason } from './contracts/session.js'
 import type { CostWarning } from './cost-caps.js'
-import type { OrganizationChangeNote } from './contracts/organization.js'
+import type { CollaborationTrialNote, OrganizationChangeNote } from './contracts/organization.js'
 
 interface Base {
   /** Session (= agent) the event belongs to. */
@@ -17,8 +17,8 @@ interface Base {
 
 /** Every event an {@link Agent} emits. */
 export type AgentEvent =
-  /** `change`: the one change to the organization this turn's decision carries (its `turn.start.organization.change`). */
-  | Base & { readonly type: 'turn.start'; readonly turn: number; readonly change?: OrganizationChangeNote }
+  /** `change`: the one change to the organization this turn's decision carries (older records); `trial`: the collaboration trial this coordinator task runs, or the verdict on the last one. */
+  | Base & { readonly type: 'turn.start'; readonly turn: number; readonly change?: OrganizationChangeNote; readonly trial?: CollaborationTrialNote }
   | Base & { readonly type: 'request.start'; readonly turn: number; readonly step: number; readonly requestId: string; readonly model: string }
   /** The provider retries the step's request after a retryable failure (ADR 0021); nothing of the failed attempt was kept. */
   | Base & { readonly type: 'request.retry'; readonly turn: number; readonly step: number; readonly requestId: string; readonly attempt: number; readonly delayMs: number; readonly error: ErrorInfo }

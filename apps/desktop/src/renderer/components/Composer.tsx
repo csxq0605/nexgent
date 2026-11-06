@@ -1,8 +1,9 @@
-import { useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
-import type { MaterialMetadata } from '@nexgent/kernel'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
+import type { MaterialMetadata, ThreadPlan } from '@nexgent/kernel'
 import { useAppState, useAppStore } from '../hooks.js'
 import { T, modelText } from '../strings.js'
 import { Icon } from './Icon.js'
+import { ThreadPlanButton } from './ThreadPlanButton.js'
 
 /** The `@query` being typed right before the caret, if any. */
 export function mentionAt(text: string, caret: number): { readonly start: number; readonly query: string } | undefined {
@@ -24,6 +25,7 @@ export function Composer(): JSX.Element {
   const [text, setText] = useState('')
   const [caret, setCaret] = useState(0)
   const [highlight, setHighlight] = useState(0)
+  const [plan, setPlan] = useState<ThreadPlan>({ threads: [], exact: true })
   const [picked, setPicked] = useState<ReadonlyMap<string, string>>(new Map())
   const ref = useRef<HTMLTextAreaElement>(null)
   // Caret to restore after a mention is inserted: set right after that render commits,
@@ -44,6 +46,9 @@ export function Composer(): JSX.Element {
     return state.materials.filter(m => m.status === 'active' && m.originalName.toLowerCase().includes(q)).slice(0, 8)
   }, [mention, state.materials])
 
+  const isThread = state.sessions.find(s => s.sessionId === state.sessionId)?.thread !== undefined
+  useEffect(() => setPlan({ threads: [], exact: true }), [state.sessionId])
+
   const disabled = state.sessionId === undefined || state.creatingSession
   const fresh = state.freshMaterialIds.map(id => state.materials.find(m => m.id === id)).filter((m): m is MaterialMetadata => m !== undefined)
 
@@ -62,11 +67,12 @@ export function Composer(): JSX.Element {
   const send = async (): Promise<void> => {
     if (text.trim() === '') return
     const ids = mentionedIds(text, picked)
-    const sent = await store.send(text, ids)
+    const sent = await store.send(text, ids, isThread ? undefined : plan)
     if (sent) {
       setText('')
       setCaret(0)
       setPicked(new Map())
+      setPlan({ threads: [], exact: plan.exact })
     }
   }
 
@@ -163,6 +169,7 @@ export function Composer(): JSX.Element {
           <button type="button" className="chip-button" onMouseDown={event => event.preventDefault()} onClick={insertMention} disabled={disabled} data-testid="mention-button">
             {T.mentionChip}
           </button>
+          {!isThread && <ThreadPlanButton key={state.sessionId ?? ""} plan={plan} onChange={setPlan} disabled={disabled} />}
           {model !== undefined && <span className="faint small model-chip">{modelText(model)}</span>}
           {state.timeline.length === 0 && state.sessionMeta !== undefined && !state.running ? (
             // Rework D3: a conversation can start in plan mode until its first message.

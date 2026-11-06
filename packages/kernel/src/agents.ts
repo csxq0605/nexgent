@@ -32,7 +32,8 @@ import { NexgentError } from './contracts/errors.js'
 import { EFFORT_LEVELS, type Effort, type ThinkingMode } from './contracts/llm.js'
 import type { CommandSandboxStatus, SessionLock } from './contracts/session.js'
 import type { SandboxMode } from './contracts/workspace.js'
-import { COORDINATOR_DENIED_TOOLS, COORDINATOR_TOOL_EFFECTS, COORDINATOR_TOOL_NAMES, THREAD_TOOL_NAMES, type ThreadOrigin } from './contracts/threads.js'
+import { COORDINATOR_DENIED_TOOLS, COORDINATOR_TOOL_EFFECTS, COORDINATOR_TOOL_NAMES, PEER_TOOL_NAMES, THREAD_TOOL_NAMES, type ThreadOrigin } from './contracts/threads.js'
+import type { CollaborationMode } from './contracts/config.js'
 import { SANDBOX_MODES } from './contracts/workspace.js'
 import { Agent, DEFAULT_MAX_OUTPUT_CONTINUATIONS, DEFAULT_MAX_STEPS, type AgentInit, type AgentSettings, type ProjectGrantWriter } from './agent.js'
 import { readProjectSettings, type LoadedProjectConfig } from './project-config.js'
@@ -326,6 +327,8 @@ export class AgentsService extends Service {
     const tools = ctx.tools as ToolRegistryService
     if (typeof tools.inherit === 'function') tools.inherit(parent)
     tools.restrict({ deny: [...MEMBER_DENIED_TOOLS] })
+    // Members have no collaboration tool, whatever their thread has (`read_merged` is not in MEMBER_DENIED_TOOLS).
+    tools.restrict({ deny: [...PEER_TOOL_NAMES] })
     if (preset?.tools !== undefined) tools.restrict(preset.tools)
   }
 
@@ -334,10 +337,16 @@ export class AgentsService extends Service {
    * only the coordinator conversation keeps the coordinator tools (which
    * assign, never write or execute). Effects of the agent's fiber.
    */
-  private scopeRoot(ctx: Context, thread?: ThreadOrigin, coordinator = false): void {
+  private scopeRoot(ctx: Context, thread?: ThreadOrigin, coordinator = false, collaboration: CollaborationMode = 'central'): void {
     const tools = ctx.tools as ToolRegistryService
-    // Coordinator step two: a thread does not start or talk to threads.
+    // Coordinator step two: a thread does not start threads or give them work.
     if (thread !== undefined) tools.restrict({ deny: [...THREAD_TOOL_NAMES] })
+    // A thread always has `message_peer`, `ask_coordinator`, `read_collab` and `read_merged`; `post_collab` only when the project's
+    // collaboration is hybrid (the user's choice). The coordinator has `post_collab` and `read_collab` (and `stop_thread`); any other root session has none.
+    if (thread !== undefined) {
+      if (collaboration !== 'hybrid') tools.restrict({ deny: ['post_collab'] })
+    } else if (coordinator) tools.restrict({ deny: ['message_peer', 'ask_coordinator', 'read_merged'] })
+    else tools.restrict({ deny: [...PEER_TOOL_NAMES] })
     // Coordinator step three: only the coordinator conversation keeps the project notes.
     if (!coordinator || thread !== undefined) tools.restrict({ deny: [...COORDINATOR_TOOL_NAMES] })
     // The coordinator only assigns, follows and relays (user, 2026-10-20): no tool that writes or executes; its members and threads keep theirs.
@@ -397,6 +406,7 @@ export class AgentsService extends Service {
     member?: { identity: MemberIdentity; parent: AgentEntry; budget: BudgetShare | undefined }
     capabilities?: CapabilityLoad
     workdir?: MemberWorkdir
+    isolated?: false
     thread?: ThreadOrigin
   }): Agent {
     const { member } = args
@@ -454,6 +464,7 @@ export class AgentsService extends Service {
       children: () => [...children],
       ...(args.capabilities === undefined ? {} : { capabilityVersion: args.capabilities.version, attached: args.capabilities.attached }),
       ...(args.workdir === undefined ? {} : { workdir: args.workdir }),
+      ...(args.isolated === false ? { isolated: false } : {}),
       ...(args.thread === undefined ? {} : { thread: args.thread }),
       onClose: closed => {
         if (this.live.get(closed.sessionId) === closed) this.live.delete(closed.sessionId)
@@ -588,7 +599,7 @@ export class AgentsService extends Service {
       const scope = await this.scope(sessionId)
       let capabilities: CapabilityLoad | undefined
       try {
-        this.scopeRoot(scope.ctx, thread, options.coordinator === true)
+        this.scopeRoot(scope.ctx, thread, options.coordinator === true, loaded.config.collaboration)
         capabilities = host === undefined || version === undefined
           ? undefined
           : await this.loadCapabilities(host, { sessionId, scope: scope.ctx, version, resumed: false })
@@ -597,6 +608,7 @@ export class AgentsService extends Service {
         throw error
       }
       const workdir = thread === undefined ? undefined : await this.openWorkdir(sessionId, sandboxMode)
+      const isolated = thread === undefined || this.isolatedWorkdir(workdir, sandboxMode)
       return this.build({
         sessionId,
         lock,
@@ -616,6 +628,7 @@ export class AgentsService extends Service {
         settings: this.settings(undefined, loaded.config),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(workdir === undefined ? {} : { workdir }),
+        ...(isolated ? {} : { isolated: false }),
         ...(thread === undefined ? {} : { thread }),
       })
     } catch (error) {
@@ -638,6 +651,11 @@ export class AgentsService extends Service {
     } catch {
       return undefined
     }
+  }
+
+  /** A thread is isolated when it has its own copy; a read-only one writes nothing, and without a copy service nothing is kept apart. */
+  private isolatedWorkdir(workdir: MemberWorkdir | undefined, sandboxMode: SandboxMode): boolean {
+    return workdir !== undefined || sandboxMode === 'read-only' || this.home.get('workdirs') === undefined
   }
 
   private async createChild(options: CreateAgentOptions, child: ChildAgentOptions): Promise<Agent> {
@@ -770,7 +788,7 @@ export class AgentsService extends Service {
       let capabilities: CapabilityLoad | undefined
       try {
         if (parent !== undefined) this.scopeMember(scope.ctx, parent.scope, preset)
-        else this.scopeRoot(scope.ctx, state.metadata.thread, options.coordinator === true)
+        else this.scopeRoot(scope.ctx, state.metadata.thread, options.coordinator === true, loaded?.config.collaboration)
         if (host !== undefined && switched !== undefined) {
           const loadedCaps = await this.loadCapabilities(host, {
             sessionId,
@@ -812,6 +830,7 @@ export class AgentsService extends Service {
         ...(parent === undefined || member === undefined ? {} : { member: { identity: member, parent, budget: options.child?.budget } }),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(workdir === undefined ? {} : { workdir }),
+        ...(state.metadata.thread === undefined || this.isolatedWorkdir(workdir, sandboxMode) ? {} : { isolated: false }),
         ...(state.metadata.thread === undefined ? {} : { thread: state.metadata.thread }),
       })
       // A reopened member works in this tree too: its form counts in the root's `formsUsed`.
@@ -837,5 +856,11 @@ export class AgentsService extends Service {
 function assertThread(thread: ThreadOrigin): ThreadOrigin {
   if (typeof thread.coordinatorSessionId !== 'string' || thread.coordinatorSessionId === '') throw new NexgentError('tool/invalid-input', 'thread.coordinatorSessionId must be a session id')
   if (typeof thread.title !== 'string' || thread.title.trim() === '') throw new NexgentError('tool/invalid-input', 'thread.title must be a non-empty string')
-  return { coordinatorSessionId: thread.coordinatorSessionId, title: thread.title.trim() }
+  const owns = thread.owns?.map(path => path.trim()).filter(path => path !== '')
+  return {
+    coordinatorSessionId: thread.coordinatorSessionId,
+    title: thread.title.trim(),
+    ...(thread.origin === 'user' ? { origin: 'user' as const } : {}),
+    ...(owns === undefined || owns.length === 0 ? {} : { owns }),
+  }
 }

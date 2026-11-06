@@ -3,7 +3,7 @@
  * wording stays consistent. Components import from here instead of writing
  * literals.
  */
-import type { ApprovalRequest, CredentialInfo, ErrorInfo, FileChange, GoalStatus, LLMUsage, MemberExecutionForm, OrganizationChangeNote, OrganizationName, OrganizationRoleKind, OrganizationPartKind, TurnEndReason } from '@nexgent/kernel'
+import type { ApprovalRequest, CollaborationTrialNote, CredentialInfo, ErrorInfo, FileChange, GoalStatus, LLMUsage, MemberExecutionForm, OrganizationChangeNote, OrganizationName, OrganizationRoleKind, OrganizationPartKind, TurnEndReason } from '@nexgent/kernel'
 
 export const T = {
   appName: 'Nexgent',
@@ -128,11 +128,32 @@ export const T = {
   openThread: '进入讨论串',
   threadRunning: '进行中',
   threadDone: '做完了',
+  newThread: '新建讨论串',
+  threadTitle: '标题',
+  threadTask: '要它做什么',
+  threadStart: '开始',
   threadsDone: (n: number) => `已完成的讨论串（${n}）`,
   threadWaiting: '等你回复',
   threadStopped: '停了',
   threadFailed: '没做成',
   threadAsk: (text: string) => `在问：${text}`,
+  threadQueued: '排队中',
+  threadQueuedHelp: '同时运行的讨论串已满，排在后面，轮到时自动开始',
+  threadStop: '停止',
+  threadStopHelp: '停掉这个讨论串当前的一轮；停下后不会叫醒协调者',
+  threadShared: '共用项目',
+  threadSharedHelp: '没能为它建独立副本，它直接改项目里的文件，可能与其他讨论串互相覆盖',
+  planThreads: '指定讨论串',
+  planThreadsHelp: '为这条消息指定要开的讨论串：每行一个标题，可写一句话说明它做什么',
+  planRowTitle: '标题',
+  planTask: '一句话（可选）',
+  planAdd: '添加一行',
+  planRemove: '去掉这一行',
+  planExact: '只开这些',
+  planExactHelp: '打开：协调者只开这里写的讨论串；关闭：这些只是建议，协调者可以另开',
+  planClear: '清空',
+  collabCoordinator: '协调者',
+  collabKind: { message: '', ask: '问', note: '记', blocker: '卡住', handoff: '交接', claim: '认领', merged: '合入', release: '释放', stopped: '停止', task: '' } as Readonly<Record<string, string>>,
   threadApproval: '等你批准',
   threadApprovalHint: '有一步操作要你批准，进入讨论串处理',
   fromCoordinator: '协调者交代',
@@ -364,6 +385,27 @@ export function learnedNote(note: OrganizationChangeNote): { readonly title: str
 }
 
 /** Coordinator: the team card's one line on how this organization differs from the last similar task, and why. */
+/** Organization redo: what a collaboration trial changes, in words. */
+function trialWhat(trial: CollaborationTrialNote): string {
+  if (trial.variable === 'overlap' && trial.value === 'sequence') return '改同一批文件的讨论串先后进行'
+  if (trial.variable === 'handoff' && trial.value === 'changed') return '每个讨论串随时知道别的讨论串合入了哪些文件'
+  return `${trial.variable} = ${trial.value}`
+}
+
+/** Organization redo: the line on the collaboration trial a coordinator task runs, or the verdict on the last one. */
+export function trialNoteText(trial: CollaborationTrialNote): string {
+  switch (trial.status) {
+    case 'trying':
+      return `这次试一种协作方式：${trialWhat(trial)}`
+    case 'kept':
+      return `以后都这样协作：${trialWhat(trial)}`
+    case 'reverted':
+      return `试过没变好，已改回：${trialWhat(trial)}`
+    case 'inconclusive':
+      return `没试出结果，先不这样：${trialWhat(trial)}`
+  }
+}
+
 export function changeNoteText(note: OrganizationChangeNote): string {
   const now = changeNowText
   if (note.status === 'trying') return now(note.action, note.target)
@@ -620,11 +662,7 @@ export const L = {
   orgTeamBetter: (kind: string, organization: string, points: number, cost: string) => `${kind}任务用“${organization}”分工，比单独做的顺利率高 ${points}%${cost}。`,
   orgSoloBetter: (kind: string, points: number, cost: string) => `${kind}任务单独做更好，顺利率比组队高 ${points}%${cost}。`,
   orgComparing: (kind: string, runs: number) => `${kind}任务还在比较组队和单独做（已做 ${runs} 次）。`,
-  orgSince: (cost: number, time: number, held: boolean) => {
-    const part = (value: number, less: string, more: string) => (value === 0 ? '' : `${value < 0 ? less : more} ${Math.abs(value)}%`)
-    const parts = [part(cost, '花费少', '花费多'), part(time, '快', '慢')].filter(text => text !== '')
-    return `组织调整后，比一开始${parts.length === 0 ? '花费和耗时差不多' : parts.join('、')}，${held ? '质量没变' : '质量有所下降'}。`
-  },
+
   orgCost: (percent: number) => (percent === 0 ? '，花费差不多' : `，花费${percent > 0 ? '多' : '少'} ${Math.abs(percent)}%`),
   effect: (points: number) => (points === 0 ? '用上经验的任务和没用上的结果差不多。' : `用上经验的任务，结果${points > 0 ? '好' : '差'} ${Math.abs(points)} 分（满分 100）。`),
   noneActive: '还没有正式用上的经验',
@@ -718,6 +756,10 @@ export const L = {
   thinkingHelp: '复杂任务更稳，但更慢、更贵。',
   effort: '思考深度',
   effortHelp: '想得越深越慢、越贵。',
+  collaboration: '讨论串协作',
+  collaborationHelp: '集中分派：讨论串只和总对话来往。互相配合：讨论串在项目里共用一份协作记录，认领文件、留言、交接，相关的条目会自动送到正在干活的讨论串。',
+  collaborationCentral: '集中分派',
+  collaborationHybrid: '互相配合',
   sandbox: '文件权限',
   sandboxHelp: '只读时 Nexgent 只能看；可写时只能改这个项目里的文件。',
   perTask: '每个任务',
@@ -779,4 +821,28 @@ export function agoText(iso: string, now: number = Date.now()): string {
 export function dayText(iso: string): string {
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? iso : `${date.getMonth() + 1} 月 ${date.getDate()} 日`
+}
+
+/** One collaboration entry as one line: who it is from and to, and what it says (a merge: the files with their lines). */
+export function collabLineText(entry: {
+  readonly kind: string
+  readonly fromTitle: string
+  readonly toTitle?: string
+  readonly text: string
+  readonly paths?: readonly string[]
+  readonly stat?: readonly { readonly path: string; readonly added: number; readonly removed: number }[]
+}): { readonly who: string; readonly body: string } {
+  const name = (title: string): string => (title === 'coordinator' ? T.collabCoordinator : title)
+  const from = name(entry.fromTitle)
+  const label = T.collabKind[entry.kind] ?? ''
+  if (entry.kind === 'merged') {
+    const files = entry.stat !== undefined && entry.stat.length > 0 ? entry.stat.map(f => `${f.path} +${f.added} \u2212${f.removed}`) : (entry.paths ?? [])
+    return { who: `${from} ${label}`, body: files.join('，') }
+  }
+  if (entry.kind === 'release' || entry.kind === 'stopped' || entry.kind === 'claim') {
+    const detail = entry.paths !== undefined && entry.paths.length > 0 ? entry.paths.join('，') : entry.text
+    return { who: `${from} ${label}`, body: detail }
+  }
+  const to = entry.toTitle !== undefined ? ` \u2192 ${name(entry.toTitle)}` : entry.kind === 'ask' ? ` \u2192 ${T.collabCoordinator}` : ''
+  return { who: `${from}${to}${label === '' || entry.kind === 'message' ? '' : ` ${label}`}`, body: entry.text }
 }

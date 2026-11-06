@@ -12,6 +12,7 @@ import {
   assertLearningConfig,
   checkCostCaps,
   checkCommandsProblem,
+  COLLABORATION_MODES,
   MAX_CHECK_RETRIES,
   EFFORT_LEVELS,
   NexgentError,
@@ -79,7 +80,7 @@ export const SYSTEM_SANDBOX_SETTINGS: readonly SystemSandboxSetting[] = ['auto',
 
 const TOP_LEVEL_KEYS = new Set([
   'version', 'model', 'endpoint', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'approvals', 'extraReadRoots', 'extraWriteRoots', 'commands', 'learning',
-  'maxStepsPerTurn', 'checkRetries', 'checkCommands',
+  'maxStepsPerTurn', 'checkRetries', 'checkCommands', 'collaboration',
 ])
 
 function invalid(message: string, field?: string): NexgentError {
@@ -134,6 +135,9 @@ export function validateProjectConfig(input: unknown): ProjectConfigFile {
   if (raw.checkCommands !== undefined) {
     const problem = checkCommandsProblem(raw.checkCommands)
     if (problem !== undefined) throw invalid(problem, 'checkCommands')
+  }
+  if (raw.collaboration !== undefined && !(COLLABORATION_MODES as readonly unknown[]).includes(raw.collaboration)) {
+    throw invalid(`collaboration must be one of ${COLLABORATION_MODES.join(', ')}`, 'collaboration')
   }
   if (raw.costCaps !== undefined) {
     checkCostCaps(raw.costCaps, (field, message) => {

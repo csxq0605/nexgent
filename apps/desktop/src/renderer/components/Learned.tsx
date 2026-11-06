@@ -128,11 +128,9 @@ export function organizationLead(classes: LearningStatus['organizations']): stri
   const kind = '同类'
   const cost = top.costChange === undefined ? '' : L.orgCost(Math.round(top.costChange * 100))
   const gap = Math.round(Math.abs((top.teamGood ?? 0) - (top.soloGood ?? 0)) * 100)
-  // Coordinator: what changing the organization on similar tasks did, against the first of them.
-  const since = top.sinceStart === undefined ? '' : L.orgSince(Math.round(top.sinceStart.costChange * 100), Math.round(top.sinceStart.timeChange * 100), top.sinceStart.qualityHeld)
-  if (top.verdict === 'team-better') return L.orgTeamBetter(kind, organizationText(top.organization ?? 'custom'), gap, cost) + since
+  if (top.verdict === 'team-better') return L.orgTeamBetter(kind, organizationText(top.organization ?? 'custom'), gap, cost)
   if (top.verdict === 'solo-better') return L.orgSoloBetter(kind, gap, top.costChange === undefined ? '' : L.orgCost(Math.round((1 / (1 + top.costChange) - 1) * 100)))
-  return L.orgComparing(kind, top.soloRuns + top.teamRuns) + since
+  return L.orgComparing(kind, top.soloRuns + top.teamRuns)
 }
 
 /** Outcome gap over every entry with both arms, weighted by how often it was given. */

@@ -465,6 +465,18 @@
         },
         "title": {
           "$ref": "#/$defs/nonEmptyString"
+        },
+        "origin": {
+          "enum": [
+            "user",
+            "plan"
+          ]
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
         }
       }
     },
@@ -1169,7 +1181,8 @@
             "user",
             "inject",
             "feedback",
-            "thread"
+            "thread",
+            "relay"
           ]
         },
         "materials": {
@@ -1510,6 +1523,78 @@
                       "minimum": 0
                     }
                   }
+                }
+              }
+            },
+            "collaboration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "handoff",
+                "overlap"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "central",
+                    "hybrid"
+                  ]
+                },
+                "handoff": {
+                  "enum": [
+                    "brief",
+                    "changed"
+                  ]
+                },
+                "overlap": {
+                  "enum": [
+                    "parallel",
+                    "sequence"
+                  ]
+                },
+                "wake": {
+                  "enum": [
+                    "coordinator",
+                    "named"
+                  ]
+                },
+                "check": {
+                  "enum": [
+                    "merged",
+                    "separate"
+                  ]
+                }
+              }
+            },
+            "trial": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "variable",
+                "value"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "trying",
+                    "kept",
+                    "reverted",
+                    "inconclusive"
+                  ]
+                },
+                "variable": {
+                  "enum": [
+                    "handoff",
+                    "overlap",
+                    "wake",
+                    "check"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1
                 }
               }
             }

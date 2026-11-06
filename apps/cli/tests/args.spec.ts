@@ -99,3 +99,31 @@ describe('parseCliArgs', () => {
     expect(commandUsage('app')).toContain('NEXGENT_DESKTOP_DIR')
   })
 })
+
+describe('threads on the command line', () => {
+  it('parses repeatable --thread with and without a sentence, and the exact switches', () => {
+    expect(parseCliArgs(['run', '--project', 'p', '--task', 't', '--thread', 'API: change the endpoint', '--thread', '文档：补文档', '--thread', 'Tests'])).toMatchObject({
+      threads: [{ title: 'API', task: 'change the endpoint' }, { title: '文档', task: '补文档' }, { title: 'Tests' }],
+      exactThreads: true,
+    })
+    expect(parseCliArgs(['run', '--project', 'p', '--task', 't', '--thread', 'A', '--no-exact-threads'])).toMatchObject({ exactThreads: false })
+    expect(parseCliArgs(['run', '--project', 'p', '--task', 't'])).not.toHaveProperty('threads')
+  })
+
+  it('refuses switches without --thread, both switches, and --plan with --thread', () => {
+    usageError(['run', '--project', 'p', '--task', 't', '--exact-threads'])
+    usageError(['run', '--project', 'p', '--task', 't', '--thread', 'A', '--exact-threads', '--no-exact-threads'])
+    usageError(['run', '--project', 'p', '--task', 't', '--thread', 'A', '--plan'])
+    usageError(['run', '--project', 'p', '--task', 't', '--thread', ': only a sentence'])
+  })
+
+  it('parses thread start, list and stop', () => {
+    expect(parseCliArgs(['thread', 'start', '--project', 'p', '--title', 'API', '--task', 'go'])).toEqual({ command: 'thread', action: 'start', project: 'p', title: 'API', task: 'go', json: false })
+    expect(parseCliArgs(['thread', 'list', '--project', 'p', '--json'])).toEqual({ command: 'thread', action: 'list', project: 'p', json: true })
+    expect(parseCliArgs(['thread', 'stop', 't1', '--project', 'p', '--reason', 'no'])).toEqual({ command: 'thread', action: 'stop', project: 'p', threadId: 't1', reason: 'no', json: false })
+    usageError(['thread', '--project', 'p'])
+    usageError(['thread', 'start', '--project', 'p', '--title', 'API'])
+    usageError(['thread', 'list', '--project', 'p', '--title', 'x'])
+    usageError(['thread', 'stop', '--project', 'p'])
+  })
+})
