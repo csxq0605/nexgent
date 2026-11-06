@@ -160,7 +160,7 @@
 
 `read-only` 下“始终审批”表里的写 / 执行类调用同样直接拒绝。`selfSandboxed` 是 `ToolDefinition` 的契约字段（`contracts/tools.ts`），只有确实对每次读写调用做沙箱与路径检查的宿主包才能声明；策略层按字段判断，不按工具名豁免。
 
-"始终审批"表（任何模式都问）：`sudo` 类提权、删除项目目录本身、写入 `.nexgent/config.json` 的下列字段（契约 `GUARDED_PROJECT_CONFIG_FIELDS`）：`approvals`、`costCaps`、`sandboxMode`、`learning`、`maxStepsPerTurn`、`checkRetries`、`checkCommands`、`extraReadRoots`、`extraWriteRoots`、`commands`；模型不能放宽自己的权限、预算与学习设置。还有插件试用（下节）。这些字段用户在设置页（SDK `settings.update`）改是用户操作，不弹审批；上下文策略的封闭 schema 没有它们，能力组件改不到。
+"始终审批"表（任何模式都问）：`sudo` 类提权、删除项目目录本身、写入 `.nexgent/config.json` 的下列字段（契约 `GUARDED_PROJECT_CONFIG_FIELDS`）：`approvals`、`costCaps`、`sandboxMode`、`learning`、`maxStepsPerTurn`、`checkRetries`、`checkCommands`、`collaboration`、`extraReadRoots`、`extraWriteRoots`、`commands`；模型不能放宽自己的权限、预算与学习设置。还有插件试用（下节）。这些字段用户在设置页（SDK `settings.update`）改是用户操作，不弹审批；上下文策略的封闭 schema 没有它们，能力组件改不到。
 
 **粒度。** 用户每次应答选择作用范围：
 
@@ -247,7 +247,7 @@
 
 | 项 | 规则 |
 | --- | --- |
-| 深度 | 只有根会话（含讨论串）能启动成员；成员看不到 `delegate`、`workflow`、`organize`、`start_thread`、`message_thread`、`read_thread`、`list_threads`、`update_project_notes`、`capability_draft`、`capability_try`（契约 `MEMBER_DENIED_TOOLS`：协作工具加能力工具，成员不能再启动成员，也不能起草或试用能力组件），kernel 拒绝以子会话为父会话创建子会话 |
+| 深度 | 只有根会话（含讨论串）能启动成员；成员看不到 `delegate`、`workflow`、`organize`、`start_thread`、`message_thread`、`read_thread`、`list_threads`、`update_project_notes`、`post_board`、`read_board`、`message_peer`、`ask_coordinator`、`capability_draft`、`capability_try`（契约 `MEMBER_DENIED_TOOLS`：协作工具加能力工具，成员不能再启动成员，也不能起草或试用能力组件），kernel 拒绝以子会话为父会话创建子会话 |
 | 沙箱 | 成员的模式取父会话、预设、显式请求三者中最窄的；任何一项宽于父会话时创建失败，错误码 `sandbox/denied`，不悄悄降级（`childSandboxMode`）。顺序：`read-only` < `workspace-write` < `full-access` |
 | 工具范围 | 预设的 `tools`（`allow` / `deny`）用成员作用域上的 `restrict()` 实现，与父会话可见的集合求交；`MEMBER_DENIED_TOOLS` 总是叠加在上面 |
 | 路径与命令 | 与父会话相同的路径策略、命令策略和 `extraReadRoots`。可写的成员在自己的项目副本里工作（`data-formats.md` §子会话与成员“成员的工作副本”）：副本取代项目根成为它的读写根与命令的可写根，项目本身只读；自己检查路径的工具（文件工具、`run_code` 的宿主函数、表格与文档工具）用同一个按调用划定的沙箱（`sandboxForCall`：工作目录即副本算作项目、这次调用的模式、只放行本会话的临时目录），所以写自己的副本不会被当成“项目外写入”去问，讨论串也一样（讨论串里的成员从讨论串的副本复制、合回讨论串的副本）；`read-only` 成员和放不下副本的项目照旧共用项目根。成员改项目（合回，或共用项目根时可能改项目的工具调用）都先等根轮快照完成。所有会话都能读 `<系统临时目录>/nexgent-workdirs/`（成员副本与冲突副本） |
@@ -260,6 +260,8 @@
 成员在 `read-only` 父会话下调用 `present` 照常可用（快照由宿主写）。
 
 **项目的总对话（协调者）只派活。** 总对话自己不干活。它的作用域上用 `limitEffects(COORDINATOR_TOOL_EFFECTS)`（`['read', 'network']`）只留效果全在这两类里的工具（读文件、搜索、网页、讨论串工具、`update_project_notes`、`present`），再遮掉 `organize`、`delegate`、`workflow`（`COORDINATOR_DENIED_TOOLS`）：每一块活都交给讨论串，讨论串自己派成员。`write_file`、`str_replace`、`bash`、`run_code` 等写或执行的工具既不出现在它的请求里，调用也报 `tool/not-found`。这个限制只作用于总对话自己：讨论串（各自是根会话，在自己的项目副本里工作）照常拿到写、执行和派成员的工具，它们的成员再按上表收窄。
+
+**讨论串之间的工具只在互相配合模式下有。** 项目配置 `collaboration` 是 `hybrid` 时，讨论串有 `post_board`、`read_board`、`message_peer`、`ask_coordinator`（`PEER_TOOL_NAMES`），总对话只有 `read_board`；`central`（默认）时谁都没有；其他对话与成员任何时候都没有。这些工具只写项目数据目录里的看板文件、或把一条消息交给同一个总对话下的讨论串或总对话本身，不碰项目文件。`collaboration` 是受保护字段，模型不能改，只由用户在设置里改。宿主还按这次任务的协作方式拒绝 `start_thread`：`overlap: sequence` 时，与在跑的讨论串路径重叠或没写 `owns` 的讨论串不能同时开；你点名了讨论串（`exactThreads`）时，计划以外的标题不能开。
 
 ## 网页获取（`web_fetch`）
 

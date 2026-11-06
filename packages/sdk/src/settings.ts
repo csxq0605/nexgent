@@ -86,10 +86,11 @@ export async function readSettings(configFile: string, where: CredentialEnv): Pr
     apiKey: await describeApiKey(where),
     checkRetries: config.checkRetries ?? DEFAULT_CHECK_RETRIES,
     checkCommands: config.checkCommands ?? [],
+    collaboration: config.collaboration ?? 'central',
   }
 }
 
-const PATCH_FIELDS = new Set(['model', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'learning', 'checkRetries', 'checkCommands'])
+const PATCH_FIELDS = new Set(['model', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'learning', 'checkRetries', 'checkCommands', 'collaboration'])
 
 /** Merge a patch into `config.json` (validated as a whole before writing). */
 export async function updateSettings(configFile: string, patch: SettingsPatch, where: CredentialEnv): Promise<ProjectSettings> {

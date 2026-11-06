@@ -1690,7 +1690,7 @@ export class Agent {
         ...(handbook === undefined || handbook.ids.length === 0 ? {} : { handbook: [...handbook.ids] }),
         ...(organized === undefined ? {} : { organization: organized.decision }),
       })
-      this.emit({ type: 'turn.start', sessionId: this.sessionId, turn, ...(organized?.decision.change === undefined ? {} : { change: organized.decision.change }) })
+      this.emit({ type: 'turn.start', sessionId: this.sessionId, turn, ...(organized?.decision.change === undefined ? {} : { change: organized.decision.change }), ...(organized?.decision.trial === undefined ? {} : { trial: organized.decision.trial }) })
       this.componentUse.turn.clear()
       if (this.member === undefined) this.init.tree.beginRootTurn()
       this.beginTaskRecord(services.taskRecorder, turn)
@@ -1860,7 +1860,7 @@ export class Agent {
   private async organizeTurn(organizer: TurnOrganizer | undefined, turn: number, source: 'user' | 'feedback', text: string, materialIds: readonly string[], rating: number | undefined, thread = false) {
     if (organizer === undefined || this.member !== undefined) return undefined
     try {
-      return await organizer.decide({ sessionId: this.sessionId, turn, text, source, materialIds, projectRoot: this.init.workspace.root, ...(COORDINATOR_TOOL_NAMES.some(name => this.init.tools.get(name) !== undefined) ? { coordinator: true } : {}), ...(rating === undefined ? {} : { rating }), ...(thread ? { thread: true } : {}) })
+      return await organizer.decide({ sessionId: this.sessionId, turn, text, source, materialIds, projectRoot: this.init.workspace.root, ...(COORDINATOR_TOOL_NAMES.some(name => this.init.tools.get(name) !== undefined) ? { coordinator: true, collaboration: this.init.projectConfig.collaboration ?? 'central' } : {}), ...(rating === undefined ? {} : { rating }), ...(thread ? { thread: true } : {}) })
     } catch {
       return undefined
     }

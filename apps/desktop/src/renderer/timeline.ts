@@ -13,6 +13,7 @@ import type {
   FileChange,
   TurnEndReason,
   OrganizationChangeNote,
+  CollaborationTrialNote,
 } from '@nexgent/kernel'
 import type { CheckRetryView, CompactionUserWords, HistoryItem, MemberRunView, OrganizationView, RewindRecordView, SdkEvent, TurnCost, WorkflowView } from '@nexgent/sdk'
 
@@ -50,6 +51,8 @@ export type TimelineEntry =
   | { readonly kind: 'organization'; readonly key: string; readonly turn: number; readonly organization: OrganizationView }
   /** The one change to how the work is organized the turn tried, and why. */
   | { readonly kind: 'change'; readonly key: string; readonly turn: number; readonly change: OrganizationChangeNote }
+  /** Organization redo: the collaboration trial of a coordinator task, or the verdict on the last one. */
+  | { readonly kind: 'trial'; readonly key: string; readonly turn: number; readonly trial: CollaborationTrialNote }
   /** Redesign 3.2: the turn's checks failed and the model went back to fix them. */
   | { readonly kind: 'check.retry'; readonly key: string; readonly turn: number; readonly retry: CheckRetryView }
   /** Redesign 3.1: the user put files back to how they were before a turn. */
@@ -148,6 +151,9 @@ export function fromHistory(items: readonly HistoryItem[]): TimelineEntry[] {
         break
       case 'change':
         out.push({ kind: 'change', key: `ch:${item.turn}`, turn: item.turn, change: item.change })
+        break
+      case 'trial':
+        out.push({ kind: 'trial', key: `tr:${item.turn}`, turn: item.turn, trial: item.trial })
         break
       case 'turn.end':
         out.push({ kind: 'turn.end', key: `e:${item.turn}`, turn: item.turn, reason: item.reason, ...(item.cost === undefined ? {} : { cost: item.cost }) })
@@ -303,8 +309,10 @@ export function applyEvent(list: readonly TimelineEntry[], event: SdkEvent): Tim
       return [...list, { kind: 'rewind', key: `rw:${event.eventSeq}`, rewind: event.rewind }]
     case 'thread.message':
       return [...list, { kind: 'user', key: `u:${event.turn}:t${event.eventSeq}`, turn: event.turn, text: event.text, feedback: false, materials: [], thread: true }]
-    case 'turn.start':
-      return event.change === undefined ? [...list] : upsert(list, `ch:${event.turn}`, () => ({ kind: 'change', key: `ch:${event.turn}`, turn: event.turn, change: event.change! }))
+    case 'turn.start': {
+      const changed = event.change === undefined ? [...list] : upsert(list, `ch:${event.turn}`, () => ({ kind: 'change', key: `ch:${event.turn}`, turn: event.turn, change: event.change! }))
+      return event.trial === undefined ? changed : upsert(changed, `tr:${event.turn}`, () => ({ kind: 'trial', key: `tr:${event.turn}`, turn: event.turn, trial: event.trial! }))
+    }
     case 'goal':
     case 'material.added':
     // Step 4: project-level capability events have no place in a session timeline.

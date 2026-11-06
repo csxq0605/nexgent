@@ -217,12 +217,10 @@ describe('organizing members', () => {
     await lead.close()
   })
 
-  it('coordinator: tries the change found on the last similar task and records the measured organization', async () => {
+  it('records the measured organization of a team turn, with its collaboration events, and gives members no change sentence', async () => {
     const recorded: Omit<OrganizationRun, 'id' | 'at'>[] = []
-    const target = { part: 'builder', kind: 'implement' as const, cause: 'cost' as const, value: 0.6 }
-    const change = { id: 'ch-1', classId: 'c1', action: 'split' as const, target, baseline: 0.6, baselineUsd: 1, runId: 'r0', instruction: 'Split the builder role between two members.' }
     const memory: OrganizationMemory = {
-      suggest: async () => ({ classId: 'c1', key: ['export'], runs: 3, decision: 'team', control: false, organization: { name: 'lead-checker' }, change, note: { status: 'trying', action: 'split', target } }),
+      suggest: async () => ({ classId: 'c1', key: ['export'], runs: 3, decision: 'team', control: false, organization: { name: 'lead-checker' } }),
       record: async run => void recorded.push(run),
       noteRework: async () => undefined,
       noteReverts: async () => undefined,
@@ -237,14 +235,15 @@ describe('organizing members', () => {
     }, 0.99, memory)
     const lead = await app.agents.create()
     await lead.run(LARGE_TASK)
-    expect(organizationOf(llm.requests[0]!)).toContain('one change to the organization for this task: Split the builder role between two members.')
+    expect(organizationOf(llm.requests[0]!)).not.toContain('one change to the organization')
     const { records } = await app.ctx.session.readAll(lead.sessionId)
-    expect(ofType(records, 'turn.start')[0]).toMatchObject({ organization: { decision: 'team', change: { status: 'trying', action: 'split' } } })
-    expect(ofType(records, 'organization')[0]).toMatchObject({ change: { status: 'trying', action: 'split', target } })
+    expect(ofType(records, 'turn.start')[0]!.organization).toEqual({ decision: 'team', chosenBy: 'memory', suggested: 'lead-checker' })
     expect(ofType(records, 'subagent.start').every(start => typeof start.queuedMs === 'number')).toBe(true)
     expect(recorded).toHaveLength(1)
-    expect(recorded[0]!.change).toBe('ch-1')
+    expect(recorded[0]!.change).toBeUndefined()
+    expect(recorded[0]!.collaboration).toBeUndefined()
     const profile = recorded[0]!.profile!
+    expect(profile.events).toEqual({ overlap: 0, conflicts: 0, missing: 0, outside: 0, messages: 0, refused: 0 })
     expect(profile.parts.map(part => [part.name, part.kind])).toEqual([['coordinator', 'coordinator'], expect.any(Array), expect.any(Array)])
     expect(profile.parts.slice(1).map(part => part.name).sort()).toEqual(['left', 'right'])
     expect(profile.parts.find(part => part.name === 'coordinator')!.idleMs).toBeGreaterThan(0)
@@ -281,7 +280,8 @@ describe('two layers: the coordinator splits into threads, a thread organizes me
     const memory = {
       async suggest(input: unknown) {
         suggested.push(input)
-        return { classId: 'c', key: [], runs: 2, decision: 'team', control: false, organization: { name: 'lead-checker', roles: [{ name: 'checker', kind: 'test', after: ['coordinator'] }] }, change: { id: 'x', instruction: 'Split this task into 3 threads.' } }
+        return { classId: 'c', key: [], runs: 2, decision: 'team', control: false, organization: { name: 'lead-checker', roles: [{ name: 'checker', kind: 'test', after: ['coordinator'] }] },
+          collaboration: { mode: 'hybrid', handoff: 'manifest', overlap: 'sequence' }, trial: 'trial-1', trialNote: { status: 'trying', variable: 'overlap', value: 'sequence' } }
       },
       async record(run: unknown) { recorded.push(run) },
       async noteRework() {},
@@ -291,16 +291,23 @@ describe('two layers: the coordinator splits into threads, a thread organizes me
   }
   const end = (sessionId: string) => ({ sessionId, turn: 1, use: { decision: 'team', chosenBy: 'memory', reorganizations: 0, corrections: 0 }, reason: { kind: 'completed' }, usd: 0, projectRoot: '/p', tools: [], changes: [], presented: [] }) as unknown as Parameters<NonNullable<ReturnType<typeof defaultOrganizer>['noteTurnEnd']>>[0]
 
-  it('the coordinator\'s turn is a coordinator-level run: its section names threads and the split change, not members\' roles', async () => {
+  it('the coordinator\'s turn is a coordinator-level run: its section names threads and how they work together, not members\' roles', async () => {
     const { memory, suggested, recorded } = fakeMemory()
     const organizer = defaultOrganizer({ memory: () => memory, random: () => 0.99 })
-    const decided = await organizer.decide({ sessionId: 'c', turn: 1, text, source: 'user', materialIds: [], coordinator: true })
-    expect(suggested[0]).toMatchObject({ level: 'coordinator' })
+    const decided = await organizer.decide({ sessionId: 'c', turn: 1, text, source: 'user', materialIds: [], coordinator: true, collaboration: 'hybrid' })
+    expect(suggested[0]).toMatchObject({ level: 'coordinator', collaboration: 'hybrid' })
+    expect(decided!.decision).toMatchObject({ collaboration: { mode: 'hybrid', handoff: 'manifest', overlap: 'sequence' }, trial: { status: 'trying', variable: 'overlap' } })
     expect(decided!.section.body).toContain('start_thread')
-    expect(decided!.section.body).toContain('Split this task into 3 threads.')
+    expect(decided!.section.body).toContain('Give every thread `owns`')
+    expect(decided!.section.body).toContain('earlier threads brought in')
+    expect(decided!.section.body).toContain('read_board')
     expect(decided!.section.body).not.toContain('lead-checker')
     await organizer.noteTurnEnd!(end('c'))
-    expect(recorded[0]).toMatchObject({ level: 'coordinator', classId: 'c' })
+    expect(recorded[0]).toMatchObject({ level: 'coordinator', classId: 'c', collaboration: { overlap: 'sequence' }, trial: 'trial-1' })
+    // Without a library the coordinator's threads still work the way the project chose.
+    const alone = await defaultOrganizer({ random: () => 0.99 }).decide({ sessionId: 'c', turn: 1, text, source: 'user', materialIds: [], coordinator: true, collaboration: 'hybrid' })
+    expect(alone!.decision).toMatchObject({ decision: 'team', collaboration: { mode: 'hybrid', handoff: 'summary', overlap: 'parallel' } })
+    expect(alone!.section.body).toContain('read_board')
   })
 
   it('a thread\'s turn is a run of its own at the members\' level', async () => {

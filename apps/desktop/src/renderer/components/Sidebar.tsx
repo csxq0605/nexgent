@@ -4,6 +4,7 @@ import { useAppState, useAppStore } from '../hooks.js'
 import { T, formatTime, sessionGroup, sessionTitle } from '../strings.js'
 import { useUi, useView } from '../ui.js'
 import { Icon } from './Icon.js'
+import { NewThreadDialog } from './NewThreadDialog.js'
 import { State } from './State.js'
 
 const GROUPS = [
@@ -19,6 +20,7 @@ export function Sidebar(): JSX.Element {
   const ui = useUi()
   const { view } = useView()
   const [switching, setSwitching] = useState(false)
+  const [newThread, setNewThread] = useState(false)
   const switcher = useRef<HTMLDivElement>(null)
   // The project menu closes on Escape, on a click anywhere outside it, and when the view changes.
   useEffect(() => {
@@ -174,6 +176,13 @@ export function Sidebar(): JSX.Element {
         <Icon name="plus" />
         {T.newConversation}
       </button>
+      {coordinator !== undefined && (
+        <button type="button" className="nav-item" onClick={() => setNewThread(true)} data-testid="new-thread">
+          <Icon name="branch" />
+          {T.newThread}
+        </button>
+      )}
+      {newThread && <NewThreadDialog onClose={() => setNewThread(false)} />}
       <nav className="session-list" aria-label={T.conversations}>
         {state.sessions.length === 0 && <p className="muted small pad">{T.noConversations}</p>}
         {coordinator !== undefined && <div role="group" aria-label={T.coordinatorConversation}>{withThreads(coordinator)}</div>}

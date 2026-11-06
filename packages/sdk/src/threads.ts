@@ -19,11 +19,36 @@
  *
  * Once every thread run a coordinator turn started has ended (and that turn
  * has too), the host measures the turn again with the threads in it and
- * hands the profile to the organization library (`noteProfile`), which then
- * reflects on it like any team run.
+ * hands the profile to the organization library (`noteProfile`), which
+ * judges its collaboration.
+ *
+ * Organization redo (user, 2026-11-06):
+ * - The user can start a thread themselves (`startByUser`; its first turn
+ *   is the user's message, and its end wakes the coordinator), or name the
+ *   threads of a task with the message (`setPlan`: with `exact`, the host
+ *   starts only those, with the user's words for each).
+ * - A thread may be given `owns` (the paths its part changes). Its wake
+ *   note says which files it brought in outside them, and which files
+ *   another thread of the task also brought in.
+ * - The task's arrangement (`CollaborationConfig` on the coordinator turn's
+ *   decision) is enforced here: `overlap: sequence` refuses a thread whose
+ *   `owns` overlaps a running one's; `handoff: manifest` adds to each new
+ *   thread's task the files the task's earlier threads brought in.
+ * - With collaboration `hybrid` (the project's setting), threads share a
+ *   board (`<dataDir>/boards/<coordinator>.jsonl`), message each other (the
+ *   message joins the other's running turn, or waits for its next turn: no
+ *   turn is started for it) and ask the coordinator mid-turn.
  */
 import {
   addUsage,
+  ASK_COORDINATOR_TOOL,
+  BOARD_ENTRY_KINDS,
+  DEFAULT_COLLABORATION,
+  MAX_PLANNED_THREADS,
+  MESSAGE_PEER_TOOL,
+  PEER_MESSAGE_LEAD,
+  POST_BOARD_TOOL,
+  READ_BOARD_TOOL,
   LIST_THREADS_TOOL,
   MESSAGE_THREAD_TOOL,
   NexgentError,
@@ -57,11 +82,17 @@ import {
   type ContextProvider,
   type SystemPromptSection,
   UPDATE_PROJECT_NOTES_TOOL,
+  type BoardEntry,
+  type BoardEntryKind,
+  type CollaborationConfig,
+  type ThreadPeers,
+  type ThreadPlan,
+  type ThreadRunEvents,
 } from '@nexgent/kernel'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { dirname } from 'node:path'
+import { appendFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { toMemberResult } from '@nexgent/subagent'
-import { buildOrganizationProfile, reportBlocker } from '@nexgent/workflow'
+import { buildOrganizationProfile, reportBlocker, withinOwns } from '@nexgent/workflow'
 
 /** What the host needs from the SDK, for one project. */
 export interface ThreadRuntime {
@@ -73,8 +104,8 @@ export interface ThreadRuntime {
   records(sessionId: string): Promise<readonly SessionRecord[]>
   /** Append a host record to a root session (opened when it is not). */
   append(sessionId: string, record: HostRecordInput): Promise<void>
-  /** Start a turn with `source: thread`; `done` settles after the SDK's bookkeeping. */
-  startTurn(sessionId: string, text: string, materialIds?: readonly string[]): Promise<{ readonly turn: number; readonly done: Promise<TurnResult> }>
+  /** Start a turn with `source: thread` (`user`: the user's own message); `done` settles after the SDK's bookkeeping. */
+  startTurn(sessionId: string, text: string, materialIds?: readonly string[], source?: 'thread' | 'user'): Promise<{ readonly turn: number; readonly done: Promise<TurnResult> }>
   /** Join the session's running turn (`source: thread`); `false` when no turn takes it. */
   steer(sessionId: string, text: string): Promise<boolean>
   /** Whether a turn runs in the session. */
@@ -100,6 +131,8 @@ export interface ThreadRuntime {
   isCoordinator(sessionId: string): Promise<boolean>
   /** Coordinator step three: the project notes file (`<dataDir>/coordinator-notes.md`). */
   notesFile(): string
+  /** Organization redo: the directory of the coordinators' boards (`<dataDir>/boards`). */
+  boardsDir(): string
 }
 
 /** Coordinator step three: the project notes, in the project's data directory. */
@@ -162,7 +195,57 @@ export function threadInfoOf(threadId: string, records: readonly SessionRecord[]
     updatedAt: at(records),
     ...(blocker === undefined ? {} : { blocker }),
     ...(running && needsApproval ? { needsApproval: true as const } : {}),
+    ...(start.thread.origin === 'user' ? { origin: 'user' as const } : {}),
+    ...(start.thread.owns === undefined || start.thread.owns.length === 0 ? {} : { owns: [...start.thread.owns] }),
   }
+}
+
+/** Pure: whether two `owns` lists may touch the same file (a list that is absent may touch anything). */
+export function ownsOverlap(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  if (left === undefined || left.length === 0 || right === undefined || right.length === 0) return true
+  return left.some(path => withinOwns(path, right)) || right.some(path => withinOwns(path, left))
+}
+
+/** Pure: a title as plans compare it. */
+function titleKey(title: string): string {
+  return title.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+/** Pure: the arrangement of the coordinator's current task, from its records (its latest user turn's decision). */
+export function taskCollaboration(records: readonly SessionRecord[]): CollaborationConfig | undefined {
+  const turn = records.findLast(record => record.type === 'user.message' && record.source === 'user')
+  if (turn === undefined || turn.type !== 'user.message') return undefined
+  const start = records.find(record => record.type === 'turn.start' && record.turn === turn.turn)
+  return start?.type === 'turn.start' ? start.organization?.collaboration : undefined
+}
+
+/** One thread run of the coordinator's current task, from its records. */
+interface TaskThreadRun {
+  readonly threadId: string
+  readonly childTurn: number
+  readonly name: string
+  readonly ended: boolean
+  /** Files its merge brought into the project. */
+  readonly applied: readonly string[]
+}
+
+/** Pure: the thread runs of the coordinator's current task (since the user's latest message), in order. */
+export function taskThreadRuns(records: readonly SessionRecord[]): TaskThreadRun[] {
+  const since = records.findLast(record => record.type === 'user.message' && record.source === 'user')?.seq ?? 0
+  const out: TaskThreadRun[] = []
+  for (const record of records) {
+    if (record.seq < since || record.type !== 'subagent.start' || record.executionForm !== 'thread') continue
+    const end = records.find(item => item.type === 'subagent.end' && item.childSessionId === record.childSessionId && item.childTurn === record.childTurn)
+    const merge = end?.type === 'subagent.end' ? end.result.merge : undefined
+    out.push({
+      threadId: record.childSessionId,
+      childTurn: record.childTurn,
+      name: record.name,
+      ended: end !== undefined,
+      applied: merge === undefined || merge.held === true ? [] : merge.applied.filter(path => !merge.conflicts.some(conflict => conflict.path === path)),
+    })
+  }
+  return out
 }
 
 /** What a thread turn produced, from its records (as a member runner counts it). */
@@ -222,28 +305,184 @@ function openThreadRuns(records: readonly SessionRecord[], turns: ReadonlySet<nu
   return threadRuns(records, turns).filter(run => !ended.has(`${run.childSessionId}:${run.childTurn}`)).length
 }
 
+/** Pure: a thread's `owns` as given (trimmed, no empty paths, at most {@link THREAD_LIMITS.maxOwns}). */
+function cleanOwns(owns: readonly string[] | undefined): string[] | undefined {
+  if (owns === undefined) return undefined
+  const paths = [...new Set(owns.map(path => path.trim().replace(/\\/g, '/').replace(/^\.\//, '')).filter(path => path !== ''))]
+  if (paths.length > THREAD_LIMITS.maxOwns) throw new NexgentError('tool/invalid-input', `"owns" lists ${paths.length} paths (at most ${THREAD_LIMITS.maxOwns}): name directories instead of single files`)
+  return paths.length === 0 ? undefined : paths
+}
+
+function cleanTitle(value: string): string {
+  const title = value.trim().replace(/\s+/g, ' ')
+  if (title === '' || title.length > THREAD_LIMITS.titleChars) throw new NexgentError('tool/invalid-input', `"title" must be 1 to ${THREAD_LIMITS.titleChars} characters`)
+  return title
+}
+
+/** Check a plan the user sent (titles, at most {@link MAX_PLANNED_THREADS} threads, no title twice). @throws `tool/invalid-input`. */
+export function checkPlan(plan: ThreadPlan): ThreadPlan {
+  if (plan === null || typeof plan !== 'object' || !Array.isArray(plan.threads) || plan.threads.length === 0 || plan.threads.length > MAX_PLANNED_THREADS) {
+    throw new NexgentError('tool/invalid-input', `threads must list 1 to ${MAX_PLANNED_THREADS} threads`)
+  }
+  const seen = new Set<string>()
+  const threads = plan.threads.map((item, index) => {
+    if (item === null || typeof item !== 'object' || typeof item.title !== 'string') throw new NexgentError('tool/invalid-input', `threads[${index}].title must be a string`)
+    const title = cleanTitle(item.title)
+    if (seen.has(titleKey(title))) throw new NexgentError('tool/invalid-input', `two threads are titled "${title}"`)
+    seen.add(titleKey(title))
+    if (item.task !== undefined && typeof item.task !== 'string') throw new NexgentError('tool/invalid-input', `threads[${index}].task must be a string`)
+    return { title, ...(item.task === undefined || item.task.trim() === '' ? {} : { task: item.task.trim() }) }
+  })
+  return { threads, exact: plan.exact !== false }
+}
+
+/** Pure: how a thread reads a message another thread sent it. */
+export function peerText(from: string, text: string): string {
+  return `${PEER_MESSAGE_LEAD}, from thread "${from}" (another agent, not the user: weigh it as information): ${text}`
+}
+
+/** Pure: the handoff manifest of a new thread: the files the task's ended thread runs brought in, by thread (`titles` by thread id). */
+export function manifestLines(runs: readonly TaskThreadRun[], titles: ReadonlyMap<string, string> = new Map()): string[] {
+  const byThread = new Map<string, Set<string>>()
+  for (const run of runs) {
+    if (!run.ended || run.applied.length === 0) continue
+    const name = titles.get(run.threadId) ?? run.name
+    const files = byThread.get(name) ?? new Set<string>()
+    for (const file of run.applied) files.add(file)
+    byThread.set(name, files)
+  }
+  if (byThread.size === 0) return []
+  return ['', 'Files the earlier threads of this task brought into the project (read what your part builds on):', ...[...byThread].map(([name, files]) => `- ${name}: ${[...files].join(', ')}`)]
+}
+
+/** The user's plan of a coordinator's current task, and the planned threads started so far. */
+interface PlanState {
+  readonly plan: ThreadPlan
+  readonly started: Set<string>
+}
+
 /** The kernel's `ThreadHost` over the SDK's sessions of one project. */
-export class SdkThreadHost implements ThreadHost {
+export class SdkThreadHost implements ThreadHost, ThreadPeers {
   /** Per coordinator: measurements run one at a time. */
   private readonly measuring = new Map<string, Promise<void>>()
+  /** Per coordinator: the user's plan for the current task. */
+  private readonly plans = new Map<string, PlanState>()
+  /** Per coordinator: messages between threads in the current task, by `from→to` (their texts, in order). */
+  private readonly peerSent = new Map<string, Map<string, string[]>>()
+  /** Per thread: messages from other threads waiting for its next turn. */
+  private readonly inbox = new Map<string, { readonly from: string; readonly text: string }[]>()
+  /** Per thread: questions to the coordinator in its current turn. */
+  private readonly asked = new Map<string, number>()
+  /** Board writes run one at a time per process. */
+  private boardQueue: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly rt: ThreadRuntime) {}
 
+  /**
+   * Organization redo: the user sent the coordinator a new message: a new
+   * task starts. `plan`: the threads the user named for it (replaces the
+   * previous plan; absent: none). The counters of the previous task end.
+   */
+  newTask(coordinatorSessionId: string, plan?: ThreadPlan): void {
+    this.peerSent.delete(coordinatorSessionId)
+    if (plan === undefined) this.plans.delete(coordinatorSessionId)
+    else this.plans.set(coordinatorSessionId, { plan: checkPlan(plan), started: new Set() })
+  }
+
+  /** The user named (more) threads in the middle of the task: their plan replaces the previous one; the threads started so far stay started. */
+  setPlan(coordinatorSessionId: string, plan: ThreadPlan): void {
+    const started = this.plans.get(coordinatorSessionId)?.started ?? new Set<string>()
+    this.plans.set(coordinatorSessionId, { plan: checkPlan(plan), started })
+  }
+
+  /** The user's plan of the coordinator's current task, if any. */
+  plan(coordinatorSessionId: string): ThreadPlan | undefined {
+    return this.plans.get(coordinatorSessionId)?.plan
+  }
+
   async start(input: ThreadStartInput): Promise<ThreadInfo> {
-    const title = input.title.trim().replace(/\s+/g, ' ')
-    if (title === '' || title.length > THREAD_LIMITS.titleChars) throw new NexgentError('tool/invalid-input', `"title" must be 1 to ${THREAD_LIMITS.titleChars} characters`)
+    const title = cleanTitle(input.title)
     if (input.task.trim() === '') throw new NexgentError('tool/invalid-input', '"task" must not be empty')
+    const owns = cleanOwns(input.owns)
     const threads = await this.list({ coordinatorSessionId: input.coordinatorSessionId })
     if (threads.length >= THREAD_LIMITS.maxThreads) {
       throw new NexgentError('tool/denied', `this conversation already has ${threads.length} threads (at most ${THREAD_LIMITS.maxThreads}): give an existing thread the work with message_thread`)
     }
-    const running = threads.filter(thread => thread.status === 'running').length
-    if (running >= THREAD_LIMITS.maxRunning) {
-      throw new NexgentError('tool/denied', `${running} threads are running (at most ${THREAD_LIMITS.maxRunning} at once): wait for one to finish, or give a running one the work with message_thread`)
+    const running = threads.filter(thread => thread.status === 'running')
+    if (running.length >= THREAD_LIMITS.maxRunning) {
+      throw new NexgentError('tool/denied', `${running.length} threads are running (at most ${THREAD_LIMITS.maxRunning} at once): wait for one to finish, or give a running one the work with message_thread`)
     }
-    const threadId = await this.rt.create({ title, thread: { coordinatorSessionId: input.coordinatorSessionId, title } })
-    await this.runFor(input, threadId, threadRunName(title, threads.length + 1), title, input.task, input.materialIds)
+    // The user's plan: with `exact`, only the threads the user named, each once, with the user's words.
+    const planned = this.plans.get(input.coordinatorSessionId)
+    const item = planned?.plan.threads.find(thread => titleKey(thread.title) === titleKey(title))
+    if (planned?.plan.exact === true) {
+      const open = planned.plan.threads.filter(thread => !planned.started.has(titleKey(thread.title))).map(thread => `"${thread.title}"`)
+      if (item === undefined || planned.started.has(titleKey(title))) {
+        throw new NexgentError('tool/denied', open.length === 0
+          ? 'the user asked for exactly the threads already started for this task: give more work to one of them with message_thread, or ask the user'
+          : `the user asked for exactly these threads, with these titles: ${open.join(', ')} (not started yet). Start only those; give other work to one of them with message_thread, or ask the user`)
+      }
+    }
+    const records = await this.rt.records(input.coordinatorSessionId).catch(() => [] as readonly SessionRecord[])
+    const collaboration = taskCollaboration(records) ?? DEFAULT_COLLABORATION
+    if (collaboration.overlap === 'sequence' && running.length > 0) {
+      if (owns === undefined) throw new NexgentError('tool/denied', `threads are running (${running.map(thread => `"${thread.title}"`).join(', ')}): give this thread \`owns\` (the paths its part changes), or start it after they end`)
+      const blocking = running.filter(thread => ownsOverlap(thread.owns, owns))
+      if (blocking.length > 0) {
+        throw new NexgentError('tool/denied', `its paths overlap those of running threads (${blocking.map(thread => `"${thread.title}"${thread.owns === undefined ? ' (no owns)' : `: ${thread.owns.join(', ')}`}`).join('; ')}): start it after they end, or give it paths they do not change`)
+      }
+    }
+    const lines = [input.task.trim()]
+    if (item?.task !== undefined && item.task.trim() !== '') lines.push('', `The user's own words for this part: ${item.task.trim()}`)
+    if (owns !== undefined) lines.push('', `Your part changes only these paths: ${owns.join(', ')}. Change nothing else; when another file must change, say so in your report.`)
+    if (collaboration.handoff === 'manifest') lines.push(...manifestLines(taskThreadRuns(records), new Map(threads.map(thread => [thread.threadId, thread.title]))))
+    if (collaboration.mode === 'hybrid') {
+      const others = running.map(thread => `"${thread.title}"${thread.owns === undefined ? '' : ` (${thread.owns.join(', ')})`}`)
+      lines.push('', `You work beside the other threads of this task${others.length === 0 ? '' : ` (running now: ${others.join(', ')})`}. Read the board first (read_board); claim the paths you will change (post_board kind claim), post what others can build on, `
+        + 'message a thread directly when only it needs to know, and ask the coordinator when a decision is outside your part.')
+    }
+    const threadId = await this.rt.create({ title, thread: { coordinatorSessionId: input.coordinatorSessionId, title, ...(owns === undefined ? {} : { owns }) } })
+    planned?.started.add(titleKey(title))
+    await this.runFor(input, threadId, threadRunName(title, threads.length + 1), title, lines.join('\n'), input.materialIds)
     return this.info(threadId)
+  }
+
+  /**
+   * Organization redo: the user starts a thread of the coordinator
+   * themselves. Its first turn is the user's message (kept word for word),
+   * runs in the background, and wakes the coordinator when it ends so the
+   * coordinator can follow it up. It is the user's, not part of the
+   * coordinator's organization (not recorded there, not measured).
+   */
+  async startByUser(input: { readonly coordinatorSessionId: string; readonly title: string; readonly task: string; readonly materialIds?: readonly string[]; readonly owns?: readonly string[] }): Promise<ThreadInfo> {
+    const title = cleanTitle(input.title)
+    if (input.task.trim() === '') throw new NexgentError('tool/invalid-input', '"task" must not be empty')
+    const owns = cleanOwns(input.owns)
+    if (!(await this.rt.isCoordinator(input.coordinatorSessionId))) {
+      const start = (await this.rt.records(input.coordinatorSessionId))[0]
+      if (start?.type !== 'session.start' || start.thread !== undefined || start.parentSessionId !== undefined) throw new NexgentError('tool/invalid-input', 'threads belong to a top-level conversation')
+    }
+    const threads = await this.list({ coordinatorSessionId: input.coordinatorSessionId })
+    if (threads.length >= THREAD_LIMITS.maxThreads) throw new NexgentError('tool/denied', `this conversation already has ${threads.length} threads (at most ${THREAD_LIMITS.maxThreads})`)
+    const threadId = await this.rt.create({ title, thread: { coordinatorSessionId: input.coordinatorSessionId, title, origin: 'user', ...(owns === undefined ? {} : { owns }) } })
+    const started = await this.rt.startTurn(threadId, input.task, input.materialIds, 'user')
+    void started.done
+      .then(() => this.userThreadEnded(input.coordinatorSessionId, threadId, title, started.turn))
+      .catch(error => this.rt.report(input.coordinatorSessionId, error))
+    return this.info(threadId)
+  }
+
+  private async userThreadEnded(coordinatorSessionId: string, threadId: string, title: string, turn: number): Promise<void> {
+    if (this.rt.closed()) return
+    const records = await this.rt.records(threadId).catch(() => [] as readonly SessionRecord[])
+    const end = records.findLast(record => record.type === 'turn.end' && record.turn === turn)
+    // A turn the user stopped stays stopped.
+    if (end?.type === 'turn.end' && end.reason.kind === 'cancelled') return
+    const { status } = threadStatusOf(records, false)
+    const merge = this.rt.lastMerge(threadId)
+    const events = await this.runEvents(coordinatorSessionId, threadId, merge)
+    const note = threadWakeNote({ title, threadId, status, reply: replyOf(records, turn), ...(merge === undefined ? {} : { merge }), ...(events === undefined ? {} : { events }) })
+    await this.rt.wake(coordinatorSessionId, `The user started thread "${title}" themselves; follow it up like your own threads (do not redo its work).\n${note}`)
   }
 
   async message(input: ThreadCaller & { readonly threadId: string; readonly text: string }): Promise<ThreadInfo> {
@@ -256,7 +495,7 @@ export class SdkThreadHost implements ThreadHost {
         throw new NexgentError('tool/denied', `${running} threads are running (at most ${THREAD_LIMITS.maxRunning} at once): wait for one to finish before giving this thread its next step`)
       }
       const index = (await this.rt.threadIds(input.coordinatorSessionId)).indexOf(input.threadId) + 1
-      await this.runFor(input, input.threadId, threadRunName(info.title, index), info.title, input.text)
+      await this.runFor(input, input.threadId, threadRunName(info.title, index), info.title, this.withInbox(input.threadId, input.text))
     }
     return this.info(input.threadId)
   }
@@ -345,6 +584,7 @@ export class SdkThreadHost implements ThreadHost {
 
   /** Start a thread turn for the coordinator and record it there; returns once the run is recorded. */
   private async runFor(caller: ThreadCaller, threadId: string, name: string, title: string, text: string, materialIds?: readonly string[]): Promise<void> {
+    this.asked.delete(threadId)
     const started = await this.rt.startTurn(threadId, text, materialIds)
     const recorded = await this.rt.append(caller.coordinatorSessionId, {
       type: 'subagent.start',
@@ -394,6 +634,7 @@ export class SdkThreadHost implements ThreadHost {
     if (cause !== 'user' && cause !== 'cost-cap') {
       const { status } = threadStatusOf(records, false)
       const mergedThreads = result.merge !== undefined && result.merge.applied.length > 0 ? await this.mergedThreads(caller.coordinatorSessionId) : undefined
+      const events = await this.runEvents(caller.coordinatorSessionId, threadId, result.merge)
       await this.rt.wake(caller.coordinatorSessionId, threadWakeNote({
         title,
         threadId,
@@ -401,9 +642,157 @@ export class SdkThreadHost implements ThreadHost {
         reply: result.text,
         ...(result.merge === undefined ? {} : { merge: result.merge }),
         ...(mergedThreads === undefined ? {} : { mergedThreads }),
+        ...(events === undefined ? {} : { events }),
       }))
     }
     if (recorded) await this.measure(caller.coordinatorSessionId, caller.turn)
+  }
+
+  /**
+   * Organization redo: what the host saw between a thread's run and the
+   * task's other threads: files outside its `owns`, files another thread of
+   * the task also brought in, and messages waiting for threads not running.
+   */
+  private async runEvents(coordinatorSessionId: string, threadId: string, merge: WorkdirMerge | undefined): Promise<ThreadRunEvents | undefined> {
+    const applied = merge === undefined || merge.held === true ? [] : merge.applied.filter(path => !merge.conflicts.some(conflict => conflict.path === path))
+    const info = await this.info(threadId).catch(() => undefined)
+    const outside = info?.owns === undefined ? [] : applied.filter(path => !withinOwns(path, info.owns!))
+    const records = await this.rt.records(coordinatorSessionId).catch(() => [] as readonly SessionRecord[])
+    const titles = new Map<string, string>()
+    for (const id of await this.rt.threadIds(coordinatorSessionId).catch(() => [] as readonly string[])) {
+      const other = await this.info(id).catch(() => undefined)
+      if (other !== undefined) titles.set(id, other.title)
+    }
+    const overlap: { path: string; thread: string }[] = []
+    for (const run of taskThreadRuns(records)) {
+      if (run.threadId === threadId) continue
+      for (const path of run.applied) if (applied.includes(path) && !overlap.some(item => item.path === path)) overlap.push({ path, thread: titles.get(run.threadId) ?? run.name })
+    }
+    const waiting: { from: string; to: string }[] = []
+    for (const [to, messages] of this.inbox) {
+      if (!titles.has(to) || this.rt.running(to)) continue
+      for (const message of messages) if (!waiting.some(item => item.from === message.from && item.to === titles.get(to))) waiting.push({ from: message.from, to: titles.get(to)! })
+    }
+    if (outside.length === 0 && overlap.length === 0 && waiting.length === 0) return undefined
+    return { ...(outside.length === 0 ? {} : { outside }), ...(overlap.length === 0 ? {} : { overlap }), ...(waiting.length === 0 ? {} : { waiting }) }
+  }
+
+  /** A thread's next turn text with the messages other threads left for it, which it gets now. */
+  private withInbox(threadId: string, text: string): string {
+    const messages = this.inbox.get(threadId) ?? []
+    this.inbox.delete(threadId)
+    if (messages.length === 0) return text
+    return [...messages.map(message => peerText(message.from, message.text)), '', text].join('\n')
+  }
+
+  // -------------------------------------------------------------------------
+  // organization redo: threads that work together (`ThreadPeers`)
+  // -------------------------------------------------------------------------
+
+  /** A thread of the project, or `session/not-found`. */
+  private async thread(threadId: string): Promise<ThreadInfo> {
+    try {
+      return await this.info(threadId)
+    } catch {
+      throw new NexgentError('tool/denied', 'only threads work together on a board')
+    }
+  }
+
+  private boardFile(coordinatorSessionId: string): string {
+    return join(this.rt.boardsDir(), `${coordinatorSessionId}.jsonl`)
+  }
+
+  private async readBoard(coordinatorSessionId: string): Promise<BoardEntry[]> {
+    let text: string
+    try {
+      text = await readFile(this.boardFile(coordinatorSessionId), 'utf8')
+    } catch {
+      return []
+    }
+    const out: BoardEntry[] = []
+    for (const line of text.split('\n')) {
+      if (line.trim() === '') continue
+      try {
+        out.push(JSON.parse(line) as BoardEntry)
+      } catch {
+        // a torn last line
+      }
+    }
+    return out
+  }
+
+  async post(input: { readonly threadId: string; readonly kind: BoardEntryKind; readonly text: string; readonly paths?: readonly string[] }): Promise<BoardEntry> {
+    const info = await this.thread(input.threadId)
+    if (!(BOARD_ENTRY_KINDS as readonly string[]).includes(input.kind)) throw new NexgentError('tool/invalid-input', `"kind" must be one of ${BOARD_ENTRY_KINDS.join(', ')}`)
+    const text = input.text.trim()
+    if (text === '' || text.length > THREAD_LIMITS.peerChars) throw new NexgentError('tool/invalid-input', `"text" must be 1 to ${THREAD_LIMITS.peerChars} characters`)
+    const paths = cleanOwns(input.paths)
+    if (input.kind === 'claim' && paths === undefined) throw new NexgentError('tool/invalid-input', 'a claim names the paths you will change ("paths")')
+    const write = this.boardQueue.then(async () => {
+      const entries = await this.readBoard(info.coordinatorSessionId)
+      if (input.kind === 'claim') {
+        // A claim stands while its thread works (running, or waiting for an answer).
+        for (const entry of entries) {
+          if (entry.kind !== 'claim' || entry.threadId === input.threadId) continue
+          const other = await this.info(entry.threadId).catch(() => undefined)
+          if (other === undefined || (other.status !== 'running' && other.status !== 'waiting')) continue
+          if (ownsOverlap(entry.paths, paths)) {
+            throw new NexgentError('tool/denied', `"${entry.thread}" has claimed ${entry.paths?.join(', ') ?? 'these paths'} and is still working on them: take other paths, or message_peer it to agree who changes what`)
+          }
+        }
+      }
+      const entry: BoardEntry = {
+        seq: (entries.at(-1)?.seq ?? 0) + 1,
+        at: new Date().toISOString(),
+        threadId: input.threadId,
+        thread: info.title,
+        kind: input.kind,
+        text,
+        ...(paths === undefined ? {} : { paths }),
+      }
+      const file = this.boardFile(info.coordinatorSessionId)
+      await mkdir(dirname(file), { recursive: true })
+      await appendFile(file, `${JSON.stringify(entry)}\n`, 'utf8')
+      return entry
+    })
+    this.boardQueue = write.catch(() => undefined)
+    return write
+  }
+
+  async board(input: { readonly sessionId: string }): Promise<readonly BoardEntry[]> {
+    const info = await this.info(input.sessionId).catch(() => undefined)
+    return (await this.readBoard(info?.coordinatorSessionId ?? input.sessionId)).slice(-THREAD_LIMITS.boardShown)
+  }
+
+  async messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string }): Promise<{ readonly delivered: 'now' | 'next-turn'; readonly title: string }> {
+    const from = await this.thread(input.threadId)
+    const text = input.text.trim()
+    if (text === '' || text.length > THREAD_LIMITS.peerChars) throw new NexgentError('tool/invalid-input', `"text" must be 1 to ${THREAD_LIMITS.peerChars} characters`)
+    const others = (await this.list({ coordinatorSessionId: from.coordinatorSessionId })).filter(thread => thread.threadId !== from.threadId)
+    const wanted = input.to.trim()
+    const to = others.find(thread => thread.threadId === wanted) ?? others.find(thread => titleKey(thread.title) === titleKey(wanted))
+    if (to === undefined) throw new NexgentError('tool/invalid-input', `no other thread "${wanted}"${others.length === 0 ? '' : ` (threads: ${others.map(thread => `"${thread.title}"`).join(', ')})`}`)
+    if (to.status === 'stopped' || to.status === 'failed') throw new NexgentError('tool/denied', `"${to.title}" has ${to.status}: tell the coordinator instead (ask_coordinator)`)
+    const sent = this.peerSent.get(from.coordinatorSessionId) ?? new Map<string, string[]>()
+    const key = `${from.threadId}>${to.threadId}`
+    const texts = sent.get(key) ?? []
+    if (texts.includes(text)) throw new NexgentError('tool/denied', `you already sent "${to.title}" this message`)
+    if (texts.length >= THREAD_LIMITS.maxPeerMessages) throw new NexgentError('tool/denied', `you sent "${to.title}" ${texts.length} messages in this task (at most ${THREAD_LIMITS.maxPeerMessages}): post on the board, or ask the coordinator`)
+    sent.set(key, [...texts, text])
+    this.peerSent.set(from.coordinatorSessionId, sent)
+    if (this.rt.running(to.threadId) && (await this.rt.steer(to.threadId, peerText(from.title, text)))) return { delivered: 'now', title: to.title }
+    this.inbox.set(to.threadId, [...(this.inbox.get(to.threadId) ?? []), { from: from.title, text }])
+    return { delivered: 'next-turn', title: to.title }
+  }
+
+  async ask(input: { readonly threadId: string; readonly text: string }): Promise<void> {
+    const from = await this.thread(input.threadId)
+    const text = input.text.trim()
+    if (text === '' || text.length > THREAD_LIMITS.peerChars) throw new NexgentError('tool/invalid-input', `"text" must be 1 to ${THREAD_LIMITS.peerChars} characters`)
+    const asked = this.asked.get(input.threadId) ?? 0
+    if (asked >= THREAD_LIMITS.maxAsks) throw new NexgentError('tool/denied', `you asked the coordinator ${asked} times in this turn (at most ${THREAD_LIMITS.maxAsks}): put the rest in your report`)
+    this.asked.set(input.threadId, asked + 1)
+    await this.rt.wake(from.coordinatorSessionId, `Thread "${from.title}" (${from.threadId}) asks you while it keeps working: ${text}\nAnswer it with message_thread (it joins the thread's running turn).`)
   }
 
   /**
@@ -502,7 +891,7 @@ export const START_THREAD_DESCRIPTION = 'Hand one part of the work to a thread, 
   + 'in its own copy of the project (merged back when each of its turns ends). It does its part itself or organizes its own members. '
   + 'A thread that has finished folds away in the user\'s list; the user can open any thread and talk to it. Give it everything it needs in task: its part, the inputs, what to produce and where, '
   + 'and what not to touch. This returns at once; when the thread ends a turn you get a note with its reply. '
-  + `At most ${THREAD_LIMITS.maxRunning} threads run at once; give threads that run at the same time different files, and start a part that needs another's result after that thread ends.`
+  + `At most ${THREAD_LIMITS.maxRunning} threads run at once; give threads that run at the same time different files (name them in owns), and start a part that needs another's result after that thread ends.`
 
 export const MESSAGE_THREAD_DESCRIPTION = 'Tell one of your threads something: a correction, an answer to its question, or its next step. '
   + 'It joins the turn the thread is running, or starts its next turn in the background; you get a note when that turn ends.'
@@ -531,7 +920,8 @@ const STATUS_TEXT: Readonly<Record<ThreadStatus, string>> = {
 }
 
 function infoLine(info: ThreadInfo): string {
-  return `- ${info.title} (id ${info.threadId}): ${STATUS_TEXT[info.status]}, ${info.turns} turn${info.turns === 1 ? '' : 's'}${info.needsApproval === true ? '; a tool call in it waits for the user to allow it (the user answers in that thread)' : ''}${info.blocker === undefined ? '' : `; blocker: ${info.blocker}`}`
+  return `- ${info.title} (id ${info.threadId}): ${STATUS_TEXT[info.status]}, ${info.turns} turn${info.turns === 1 ? '' : 's'}${info.origin === 'user' ? '; started by the user' : ''}`
+    + `${info.owns === undefined ? '' : `; owns ${info.owns.join(', ')}`}${info.needsApproval === true ? '; a tool call in it waits for the user to allow it (the user answers in that thread)' : ''}${info.blocker === undefined ? '' : `; blocker: ${info.blocker}`}`
 }
 
 function host(lookup: () => ThreadHost | undefined, context: ToolContext): ThreadHost {
@@ -544,6 +934,11 @@ function host(lookup: () => ThreadHost | undefined, context: ToolContext): Threa
 function text(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') throw new NexgentError('tool/invalid-input', `"${field}" must be a non-empty string`)
   return value
+}
+
+function pathList(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) throw new NexgentError('tool/invalid-input', `"${field}" must be a list of paths`)
+  return value.map(item => text(item, `${field}[]`))
 }
 
 /** The four thread tools over `ctx.threads`. */
@@ -560,6 +955,7 @@ export function threadTools(lookup: () => ThreadHost | undefined): Tool[] {
         title: text(args.title, 'title'),
         task: text(args.task, 'task'),
         ...(materialIds === undefined ? {} : { materialIds }),
+        ...(args.owns === undefined ? {} : { owns: pathList(args.owns, 'owns') }),
       })
       return {
         content: `Thread "${info.title}" started (id ${info.threadId}). It works in the background; you get a note when its turn ends. Go on with other work or end your turn: do not wait for it.`,
@@ -602,6 +998,64 @@ export function threadTools(lookup: () => ThreadHost | undefined): Tool[] {
     },
   }
   return [start, message, read, list]
+}
+
+export const POST_BOARD_DESCRIPTION = 'Post on the board the threads of this task share: a fact the others can build on, a claim on the paths you will change (refused when a working thread has claimed them), '
+  + 'a handoff (what you produced and where, for the thread that builds on it), or a blocker. The coordinator and the user see the board.'
+
+export const READ_BOARD_DESCRIPTION = 'The latest entries of the board this task\'s threads share (facts, claims, handoffs, blockers), with who posted them.'
+
+export const MESSAGE_PEER_DESCRIPTION = 'Send another thread of this task a short message it needs from you (an interface you agreed, a file you changed that it uses, a question about its part). '
+  + 'It joins that thread\'s running turn, or waits for its next turn. Prefer the board for anything every thread should know.'
+
+export const ASK_COORDINATOR_DESCRIPTION = 'Ask the coordinator something now, without ending your turn (a decision outside your part, a conflict with another thread). It answers with a message that joins your turn; keep working meanwhile.'
+
+/** Organization redo: the tools threads work together with (only threads of a `hybrid` project see them; the coordinator sees `read_board`). */
+export function peerTools(lookup: () => (ThreadPeers & ThreadHost) | undefined): Tool[] {
+  const peers = (context: ToolContext): ThreadPeers => {
+    if (context.member !== undefined) throw new NexgentError('tool/denied', 'members do not use the board; report to the thread that started you')
+    const found = lookup()
+    if (found === undefined) throw new NexgentError('tool/failed', 'this host runs no threads')
+    return found
+  }
+  const post: Tool = {
+    definition: definition(POST_BOARD_TOOL, POST_BOARD_DESCRIPTION),
+    handler: async (raw, context): Promise<ToolOutput> => {
+      const args = (raw ?? {}) as Record<string, unknown>
+      const entry = await peers(context).post({
+        threadId: context.sessionId,
+        kind: text(args.kind, 'kind') as BoardEntryKind,
+        text: text(args.text, 'text'),
+        ...(args.paths === undefined ? {} : { paths: pathList(args.paths, 'paths') }),
+      })
+      return { content: `Posted on the board (#${entry.seq}, ${entry.kind}).`, meta: { seq: entry.seq } }
+    },
+  }
+  const read: Tool = {
+    definition: definition(READ_BOARD_TOOL, READ_BOARD_DESCRIPTION),
+    handler: async (_raw, context): Promise<ToolOutput> => {
+      const entries = await peers(context).board({ sessionId: context.sessionId })
+      if (entries.length === 0) return { content: 'The board is empty.' }
+      return { content: entries.map(entry => `#${entry.seq} ${entry.thread} (${entry.kind})${entry.paths === undefined ? '' : ` [${entry.paths.join(', ')}]`}: ${entry.text}`).join('\n') }
+    },
+  }
+  const message: Tool = {
+    definition: definition(MESSAGE_PEER_TOOL, MESSAGE_PEER_DESCRIPTION),
+    handler: async (raw, context): Promise<ToolOutput> => {
+      const args = (raw ?? {}) as Record<string, unknown>
+      const sent = await peers(context).messagePeer({ threadId: context.sessionId, to: text(args.to, 'to'), text: text(args.text, 'text') })
+      return { content: sent.delivered === 'now' ? `Sent to "${sent.title}"; it reads it in its running turn.` : `Left for "${sent.title}", which is not running; it gets it when its next turn starts.` }
+    },
+  }
+  const ask: Tool = {
+    definition: definition(ASK_COORDINATOR_TOOL, ASK_COORDINATOR_DESCRIPTION),
+    handler: async (raw, context): Promise<ToolOutput> => {
+      const args = (raw ?? {}) as Record<string, unknown>
+      await peers(context).ask({ threadId: context.sessionId, text: text(args.text, 'text') })
+      return { content: 'The coordinator has your question; its answer joins your turn. Keep working meanwhile.' }
+    },
+  }
+  return [post, read, message, ask]
 }
 
 /**
@@ -667,7 +1121,7 @@ export function threadsPlugin(threads: SdkThreadHost) {
     apply(ctx: Context): void {
       ctx.provide('threads', threads)
       ctx.inject(['tools'], scope => {
-        for (const tool of [...threadTools(() => threads), projectNotesTool(threads)]) scope.effect(() => scope.tools.register(tool), `tools.register(${tool.definition.name})`)
+        for (const tool of [...threadTools(() => threads), ...peerTools(() => threads), projectNotesTool(threads)]) scope.effect(() => scope.tools.register(tool), `tools.register(${tool.definition.name})`)
       })
       ctx.inject(['context'], scope => {
         scope.effect(() => scope.context.register(coordinatorProvider(threads)), 'context.register(coordinator)')

@@ -3,7 +3,7 @@ import type { DeliverableSummary, FileChange } from '@nexgent/kernel'
 import type { CheckFailureView } from '@nexgent/sdk'
 import { useAppState } from '../hooks.js'
 import { openingMessages, rewindableTurns, shownEntries, userMarks, type TimelineEntry } from '../timeline.js'
-import { T, changeNoteText, learnedNote, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
+import { T, changeNoteText, learnedNote, trialNoteText, threadNoteText, durationText, errorText, fileChangeText, riskText, stepsParts, toolVerb, turnEndText, turnUsdText } from '../strings.js'
 import { DeliverableCard } from './DeliverableCard.js'
 import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
@@ -350,6 +350,8 @@ function EntryView({
           {entry.userWords === undefined ? T.compacted : T.compactedKept(entry.userWords.turns.length, entry.userWords.dropped)}
         </div>
       )
+    case 'trial':
+      return <div className="turn-change small muted" data-testid="turn-trial">{trialNoteText(entry.trial)}</div>
     case 'change':
     {
       const learned = learnedNote(entry.change)

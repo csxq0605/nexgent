@@ -371,6 +371,12 @@ export function SettingsPage({ onClose, initialGroup }: { readonly onClose: () =
                     ))}
                   </select>
                 </Row>
+                <Row name={L.collaboration} help={L.collaborationHelp} testId="settings-collaboration">
+                  <select value={settings.collaboration} aria-label={L.collaboration} onChange={e => saveProject({ collaboration: e.target.value as ProjectSettings['collaboration'] })} data-testid="setting-collaboration">
+                    <option value="central">{L.collaborationCentral}</option>
+                    <option value="hybrid">{L.collaborationHybrid}</option>
+                  </select>
+                </Row>
               </Group>
               <Group id="permissions">
                 <Row name={L.sandbox} help={L.sandboxHelp}>

@@ -3,7 +3,7 @@
  * wording stays consistent. Components import from here instead of writing
  * literals.
  */
-import type { ApprovalRequest, CredentialInfo, ErrorInfo, FileChange, GoalStatus, LLMUsage, MemberExecutionForm, OrganizationChangeNote, OrganizationName, OrganizationRoleKind, OrganizationPartKind, TurnEndReason } from '@nexgent/kernel'
+import type { ApprovalRequest, CollaborationTrialNote, CredentialInfo, ErrorInfo, FileChange, GoalStatus, LLMUsage, MemberExecutionForm, OrganizationChangeNote, OrganizationName, OrganizationRoleKind, OrganizationPartKind, TurnEndReason } from '@nexgent/kernel'
 
 export const T = {
   appName: 'Nexgent',
@@ -128,6 +128,10 @@ export const T = {
   openThread: '进入讨论串',
   threadRunning: '进行中',
   threadDone: '做完了',
+  newThread: '新建讨论串',
+  threadTitle: '标题',
+  threadTask: '要它做什么',
+  threadStart: '开始',
   threadsDone: (n: number) => `已完成的讨论串（${n}）`,
   threadWaiting: '等你回复',
   threadStopped: '停了',
@@ -364,6 +368,27 @@ export function learnedNote(note: OrganizationChangeNote): { readonly title: str
 }
 
 /** Coordinator: the team card's one line on how this organization differs from the last similar task, and why. */
+/** Organization redo: what a collaboration trial changes, in words. */
+function trialWhat(trial: CollaborationTrialNote): string {
+  if (trial.variable === 'overlap' && trial.value === 'sequence') return '改同一批文件的讨论串先后进行'
+  if (trial.variable === 'handoff' && trial.value === 'manifest') return '新讨论串拿到前面讨论串带进来的文件清单'
+  return `${trial.variable} = ${trial.value}`
+}
+
+/** Organization redo: the line on the collaboration trial a coordinator task runs, or the verdict on the last one. */
+export function trialNoteText(trial: CollaborationTrialNote): string {
+  switch (trial.status) {
+    case 'trying':
+      return `这次试一种协作方式：${trialWhat(trial)}`
+    case 'kept':
+      return `以后都这样协作：${trialWhat(trial)}`
+    case 'reverted':
+      return `试过没变好，已改回：${trialWhat(trial)}`
+    case 'inconclusive':
+      return `没试出结果，先不这样：${trialWhat(trial)}`
+  }
+}
+
 export function changeNoteText(note: OrganizationChangeNote): string {
   const now = changeNowText
   if (note.status === 'trying') return now(note.action, note.target)
@@ -620,11 +645,7 @@ export const L = {
   orgTeamBetter: (kind: string, organization: string, points: number, cost: string) => `${kind}任务用“${organization}”分工，比单独做的顺利率高 ${points}%${cost}。`,
   orgSoloBetter: (kind: string, points: number, cost: string) => `${kind}任务单独做更好，顺利率比组队高 ${points}%${cost}。`,
   orgComparing: (kind: string, runs: number) => `${kind}任务还在比较组队和单独做（已做 ${runs} 次）。`,
-  orgSince: (cost: number, time: number, held: boolean) => {
-    const part = (value: number, less: string, more: string) => (value === 0 ? '' : `${value < 0 ? less : more} ${Math.abs(value)}%`)
-    const parts = [part(cost, '花费少', '花费多'), part(time, '快', '慢')].filter(text => text !== '')
-    return `组织调整后，比一开始${parts.length === 0 ? '花费和耗时差不多' : parts.join('、')}，${held ? '质量没变' : '质量有所下降'}。`
-  },
+
   orgCost: (percent: number) => (percent === 0 ? '，花费差不多' : `，花费${percent > 0 ? '多' : '少'} ${Math.abs(percent)}%`),
   effect: (points: number) => (points === 0 ? '用上经验的任务和没用上的结果差不多。' : `用上经验的任务，结果${points > 0 ? '好' : '差'} ${Math.abs(points)} 分（满分 100）。`),
   noneActive: '还没有正式用上的经验',
@@ -718,6 +739,10 @@ export const L = {
   thinkingHelp: '复杂任务更稳，但更慢、更贵。',
   effort: '思考深度',
   effortHelp: '想得越深越慢、越贵。',
+  collaboration: '讨论串协作',
+  collaborationHelp: '集中分派：讨论串只向总对话汇报。互相配合：讨论串共用一块看板，可以互相发消息、随时问总对话。',
+  collaborationCentral: '集中分派',
+  collaborationHybrid: '互相配合',
   sandbox: '文件权限',
   sandboxHelp: '只读时 Nexgent 只能看；可写时只能改这个项目里的文件。',
   perTask: '每个任务',

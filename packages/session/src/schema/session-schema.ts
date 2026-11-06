@@ -39,6 +39,22 @@ const ORGANIZATION_HOTSPOT: JsonObject = {
   },
 }
 
+/** Organization redo: how a coordinator task's threads work together (`CollaborationConfig`). */
+const COLLABORATION_CONFIG: JsonObject = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['mode', 'handoff', 'overlap'],
+  properties: { mode: { enum: ['central', 'hybrid'] }, handoff: { enum: ['summary', 'manifest'] }, overlap: { enum: ['parallel', 'sequence'] } },
+}
+
+/** Organization redo: the line about a collaboration trial (`CollaborationTrialNote`). */
+const COLLABORATION_TRIAL_NOTE: JsonObject = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['status', 'variable', 'value'],
+  properties: { status: { enum: ['trying', 'kept', 'reverted', 'inconclusive'] }, variable: { enum: ['handoff', 'overlap'] }, value: { type: 'string', minLength: 1 } },
+}
+
 /** Coordinator: the team card's line about the organization (`OrganizationChangeNote`). */
 const ORGANIZATION_CHANGE_NOTE: JsonObject = {
   type: 'object',
@@ -191,7 +207,7 @@ export const sessionRecordSchema: JsonObject = {
     memberName: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,31}$' },
     // 'team' only appears in member sessions written before the team tools were removed.
     memberExecutionForm: { enum: ['delegated', 'team', 'workflow', 'thread'] },
-    threadOrigin: closedObject({ coordinatorSessionId: ref('nonEmptyString'), title: ref('nonEmptyString') }, ['coordinatorSessionId', 'title']),
+    threadOrigin: closedObject({ coordinatorSessionId: ref('nonEmptyString'), title: ref('nonEmptyString'), origin: { const: 'user' }, owns: { type: 'array', items: ref('nonEmptyString') } }, ['coordinatorSessionId', 'title']),
     memberIdentity: closedObject(
       { name: ref('memberName'), executionForm: ref('memberExecutionForm'), preset: ref('nonEmptyString') },
       ['name', 'executionForm'],
@@ -401,7 +417,7 @@ export const sessionRecordSchema: JsonObject = {
         type: 'object',
         additionalProperties: false,
         required: ['decision', 'chosenBy'],
-        properties: { decision: { enum: ['solo', 'team'] }, chosenBy: { enum: [...ORGANIZATION_CHOSEN_BY, 'retry'] }, suggested: { enum: [...ORGANIZATION_NAMES] }, change: ORGANIZATION_CHANGE_NOTE },
+        properties: { decision: { enum: ['solo', 'team'] }, chosenBy: { enum: [...ORGANIZATION_CHOSEN_BY, 'retry'] }, suggested: { enum: [...ORGANIZATION_NAMES] }, change: ORGANIZATION_CHANGE_NOTE, collaboration: COLLABORATION_CONFIG, trial: COLLABORATION_TRIAL_NOTE },
       },
     }, ['turn']),
     turnEndRecord: record('turn.end', { turn, reason: ref('turnEndReason') }, ['turn', 'reason']),

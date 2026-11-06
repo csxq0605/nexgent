@@ -32,7 +32,8 @@ import { NexgentError } from './contracts/errors.js'
 import { EFFORT_LEVELS, type Effort, type ThinkingMode } from './contracts/llm.js'
 import type { CommandSandboxStatus, SessionLock } from './contracts/session.js'
 import type { SandboxMode } from './contracts/workspace.js'
-import { COORDINATOR_DENIED_TOOLS, COORDINATOR_TOOL_EFFECTS, COORDINATOR_TOOL_NAMES, THREAD_TOOL_NAMES, type ThreadOrigin } from './contracts/threads.js'
+import { COORDINATOR_DENIED_TOOLS, COORDINATOR_TOOL_EFFECTS, COORDINATOR_TOOL_NAMES, PEER_TOOL_NAMES, THREAD_TOOL_NAMES, type ThreadOrigin } from './contracts/threads.js'
+import type { CollaborationMode } from './contracts/config.js'
 import { SANDBOX_MODES } from './contracts/workspace.js'
 import { Agent, DEFAULT_MAX_OUTPUT_CONTINUATIONS, DEFAULT_MAX_STEPS, type AgentInit, type AgentSettings, type ProjectGrantWriter } from './agent.js'
 import { readProjectSettings, type LoadedProjectConfig } from './project-config.js'
@@ -334,10 +335,14 @@ export class AgentsService extends Service {
    * only the coordinator conversation keeps the coordinator tools (which
    * assign, never write or execute). Effects of the agent's fiber.
    */
-  private scopeRoot(ctx: Context, thread?: ThreadOrigin, coordinator = false): void {
+  private scopeRoot(ctx: Context, thread?: ThreadOrigin, coordinator = false, collaboration: CollaborationMode = 'central'): void {
     const tools = ctx.tools as ToolRegistryService
-    // Coordinator step two: a thread does not start or talk to threads.
+    // Coordinator step two: a thread does not start threads or give them work.
     if (thread !== undefined) tools.restrict({ deny: [...THREAD_TOOL_NAMES] })
+    // Organization redo: threads work together through the host only when the project's collaboration is hybrid (the user's choice);
+    // the coordinator then reads their board; no other conversation has a board.
+    if (collaboration !== 'hybrid' || (thread === undefined && !coordinator)) tools.restrict({ deny: [...PEER_TOOL_NAMES] })
+    else if (thread === undefined) tools.restrict({ deny: PEER_TOOL_NAMES.filter(name => name !== 'read_board') })
     // Coordinator step three: only the coordinator conversation keeps the project notes.
     if (!coordinator || thread !== undefined) tools.restrict({ deny: [...COORDINATOR_TOOL_NAMES] })
     // The coordinator only assigns, follows and relays (user, 2026-10-20): no tool that writes or executes; its members and threads keep theirs.
@@ -588,7 +593,7 @@ export class AgentsService extends Service {
       const scope = await this.scope(sessionId)
       let capabilities: CapabilityLoad | undefined
       try {
-        this.scopeRoot(scope.ctx, thread, options.coordinator === true)
+        this.scopeRoot(scope.ctx, thread, options.coordinator === true, loaded.config.collaboration)
         capabilities = host === undefined || version === undefined
           ? undefined
           : await this.loadCapabilities(host, { sessionId, scope: scope.ctx, version, resumed: false })
@@ -770,7 +775,7 @@ export class AgentsService extends Service {
       let capabilities: CapabilityLoad | undefined
       try {
         if (parent !== undefined) this.scopeMember(scope.ctx, parent.scope, preset)
-        else this.scopeRoot(scope.ctx, state.metadata.thread, options.coordinator === true)
+        else this.scopeRoot(scope.ctx, state.metadata.thread, options.coordinator === true, loaded?.config.collaboration)
         if (host !== undefined && switched !== undefined) {
           const loadedCaps = await this.loadCapabilities(host, {
             sessionId,
@@ -837,5 +842,11 @@ export class AgentsService extends Service {
 function assertThread(thread: ThreadOrigin): ThreadOrigin {
   if (typeof thread.coordinatorSessionId !== 'string' || thread.coordinatorSessionId === '') throw new NexgentError('tool/invalid-input', 'thread.coordinatorSessionId must be a session id')
   if (typeof thread.title !== 'string' || thread.title.trim() === '') throw new NexgentError('tool/invalid-input', 'thread.title must be a non-empty string')
-  return { coordinatorSessionId: thread.coordinatorSessionId, title: thread.title.trim() }
+  const owns = thread.owns?.map(path => path.trim()).filter(path => path !== '')
+  return {
+    coordinatorSessionId: thread.coordinatorSessionId,
+    title: thread.title.trim(),
+    ...(thread.origin === 'user' ? { origin: 'user' as const } : {}),
+    ...(owns === undefined || owns.length === 0 ? {} : { owns }),
+  }
 }

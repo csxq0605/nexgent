@@ -441,6 +441,18 @@ export class AppStore {
     this.pages += 1
   }
 
+  /** Organization redo: the user starts a thread of the coordinator conversation themselves; it opens once started. */
+  async startThread(title: string, task: string): Promise<boolean> {
+    const projectId = this.projectId
+    const coordinator = this.state.sessions.find(session => session.coordinator === true)
+    if (projectId === undefined || coordinator === undefined) return false
+    const info = await this.guard(c => c.call('threads.start', { projectId, sessionId: coordinator.sessionId, title: title.trim(), task: task.trim() }))
+    if (info === undefined || this.projectId !== projectId) return false
+    await this.refreshSessions()
+    await this.openSession(info.threadId)
+    return true
+  }
+
   async newSession(): Promise<void> {
     const projectId = this.projectId
     if (projectId === undefined || this.creating) return

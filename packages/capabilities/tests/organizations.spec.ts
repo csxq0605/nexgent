@@ -9,7 +9,6 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { OrganizationRun, TurnOrganizationEnd } from '@nexgent/kernel'
 import { asksRedo, defaultOrganizer } from '@nexgent/workflow'
-import { scriptedProvider } from '@nexgent/test-support'
 import { describe, expect, it } from 'vitest'
 import {
   classVerdict,
@@ -22,22 +21,18 @@ import {
   summarizeOrganizations,
   type FoldedRun,
   wentWell,
-  chooseAction,
-  findHotspot,
-  judgeChange,
-  followedChange,
-  layoutInstruction,
-  newChange,
-  reflectedRun,
-  reflectOnRun,
-  sinceStart,
-  type ReflectedRun,
-  modelReflector,
-  parseChoice,
-  partExcerpt,
-  type ReflectionRequest,
+  collaborationFor,
+  counted,
+  judgeTrial,
+  keptCollaboration,
+  MAX_TRIAL_RUNS,
+  needFor,
+  newTrial,
+  trialNote,
+  type TrialRun,
+  type TrialState,
 } from '../src/index.js'
-import type { OrganizationChange, OrganizationProfile, SessionRecord } from '@nexgent/kernel'
+import { NO_COLLABORATION_EVENTS, type CollaborationEvents, type OrganizationProfile } from '@nexgent/kernel'
 
 const KEY = ['export', 'csv', 'report', 'endpoint']
 let n = 0
@@ -225,214 +220,102 @@ function profile(builderShare: number, over: { failures?: number; usd?: number; 
   const part = (name: string, kind: 'coordinator' | 'implement', share: number, failures = 0) => ({ name, kind, tokens: Math.round(share * 1000), share, usd: share * usd, ms: share * ms, failures, retries: 0, idleMs: 0, wasted: false })
   return { usd, ms, tokens: 1000, parts: [part('coordinator', 'coordinator', 1 - builderShare), part('builder', 'implement', builderShare, over.failures)] }
 }
-/** A profile whose builder part was split between two implement members (a followed `split`). */
-function halves(builderShare: number): OrganizationProfile {
-  const base = profile(builderShare)
-  const builder = base.parts[1]!
-  const half = { ...builder, share: builderShare / 2, usd: builder.usd / 2, tokens: builder.tokens / 2 }
-  return { ...base, parts: [base.parts[0]!, { ...half, name: 'builder-1' }, { ...half, name: 'builder-2' }] }
-}
-const team = { name: 'lead-checker' as const, roles: [{ name: 'builder', kind: 'implement' as const, after: [] }] }
+describe('collaboration trials', () => {
+  const events = (over: Partial<CollaborationEvents> = {}): CollaborationEvents => ({ ...NO_COLLABORATION_EVENTS, ...over })
+  let seq = 0
+  const trun = (over: Partial<TrialRun> = {}): TrialRun => {
+    seq += 1
+    return { id: `t${seq}`, seq, level: 'coordinator', parts: 2, events: events(), sound: true, usd: 1, ...over }
+  }
 
-describe('coordinator reflection', () => {
-  it('finds the hottest part from the run alone and picks one change, skipping one that already failed', () => {
-    const hot = findHotspot(profile(0.6), [])
-    expect(hot).toMatchObject({ part: 'builder', kind: 'implement', cause: 'cost' })
-    expect(chooseAction(hot!, team, new Set())).toBe('split')
-    expect(chooseAction(hot!, team, new Set(['implement:cost:split']))).toBe('narrow-reading')
-    // Failures beat a large share.
-    expect(findHotspot(profile(0.5, { failures: 3 }), [])).toMatchObject({ cause: 'failures', value: 3 })
-    // Below every threshold: nothing to change.
-    expect(findHotspot(profile(0.3, { ms: 10_000 }), [profile(0.3)])?.part).not.toBe('builder')
+  it('counts only settled coordinator runs split among at least two threads', () => {
+    expect(counted(trun())).toBe(true)
+    expect(counted(trun({ parts: 1 }))).toBe(false)
+    const { level: _level, ...member } = trun()
+    expect(counted(member)).toBe(false)
+    expect(counted(trun({ waiting: true }))).toBe(false)
   })
 
-  it('keeps a change after two better runs and reverts one at once when the task went worse', () => {
-    const change: OrganizationChange = { id: 'x', classId: 'c', action: 'split', target: { part: 'builder', kind: 'implement', cause: 'cost', value: 0.6 }, baseline: 0.6, baselineUsd: 1, runId: 'r0', instruction: '' }
-    const tried = (share: number, good = true, usd = 1): ReflectedRun => ({ id: `t${share}`, seq: 1, decision: 'team', usd, profile: profile(share, { usd }), change: 'x', good })
-    expect(judgeChange(change, [tried(0.4)])).toBeUndefined()
-    expect(judgeChange(change, [tried(0.4), tried(0.3)])).toBe('kept')
-    expect(judgeChange(change, [tried(0.4), tried(0.55)])).toBe('reverted')
-    expect(judgeChange(change, [tried(0.3, false)])).toBe('reverted')
-    expect(judgeChange(change, [tried(0.3, true, 1.5)])).toBe('reverted')
+  it('needs as many clean runs as chance alone would rarely give, and none for rare events', () => {
+    expect(needFor(1)).toBe(2)
+    expect(needFor(0.8)).toBe(2)
+    expect(needFor(0.5)).toBe(4)
+    expect(needFor(0.2)).toBeUndefined()
+    expect(needFor(0)).toBeUndefined()
   })
 
-  it('does not count a run that did not follow the change, nor revert one only for a mid-task correction', () => {
-    const solo = (usd = 1): OrganizationProfile => ({ usd, ms: 10_000, tokens: 1000, parts: [{ name: 'coordinator', kind: 'coordinator', tokens: 1000, share: 1, usd, ms: 10_000, failures: 0, retries: 0, idleMs: 0, wasted: false }] })
-    const change: OrganizationChange = { id: 'y', classId: 'c', action: 'split', target: { part: 'coordinator', kind: 'coordinator', cause: 'cost', value: 0.8 }, baseline: 0.8, baselineUsd: 1, runId: 'r0', instruction: '' }
-    const source: ReflectedRun = { id: 'r0', seq: 0, decision: 'team', usd: 1, profile: solo(), good: true }
-    // The coordinator kept all the work: no trial, dropped as unfollowed (not "tried, did not work").
-    expect(judgeChange(change, [source, { id: 'r1', seq: 1, decision: 'team', usd: 1, profile: solo(), change: 'y', good: false }])).toBe('unfollowed')
-    // Followed, with a correction: the correction alone does not revert it; the measured values decide.
-    const corrected: ReflectedRun = { id: 'r2', seq: 2, decision: 'team', usd: 1, profile: profile(0.7), change: 'y', good: false, sound: true }
-    expect(judgeChange(change, [source, corrected])).toBeUndefined()
-    expect(judgeChange(change, [source, corrected, { ...corrected, id: 'r3', seq: 3 }])).toBe('kept')
-    expect(reflectedRun(run({ corrections: 2 }))).toMatchObject({ good: false, sound: true })
+  it('starts a trial on events that keep happening, and none on a rare one', () => {
+    const often = [trun({ events: events({ conflicts: 1 }) }), trun({ events: events({ overlap: 2 }) }), trun(), trun({ events: events({ conflicts: 1 }) })]
+    const trial = newTrial(often, [], undefined, 'trial-1')
+    expect(trial).toMatchObject({ id: 'trial-1', variable: 'overlap', value: 'sequence', target: ['overlap', 'conflicts'], baseline: { runs: 4, hits: 3 }, need: 2, runId: often.at(-1)!.id })
+    // One conflict in five runs is too rare to tell from luck with few runs.
+    const rare = [trun(), trun(), trun(), trun(), trun({ events: events({ conflicts: 1 }) })]
+    expect(newTrial(rare, [])).toBeUndefined()
+    // Too few runs, or a clean latest run, start nothing.
+    expect(newTrial([trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) })], [])).toBeUndefined()
+    expect(newTrial([...often, trun()], [])).toBeUndefined()
   })
 
-  it('judges the coordinator\'s split by how many parts it made, and words its change as the split', () => {
-    const part = (name: string, kind: 'thread' | 'member' | 'coordinator', share: number) => ({ name, kind, tokens: 100, share, usd: share, ms: 1000, failures: 0, retries: 0, idleMs: 0, wasted: false })
-    const split = (...parts: ReturnType<typeof part>[]): OrganizationProfile => ({ usd: 1, ms: 1000, tokens: 300, parts: [part('coordinator', 'coordinator', 0.1), ...parts] })
-    const source: ReflectedRun = { id: 'r0', seq: 0, decision: 'team', usd: 1, level: 'coordinator', profile: split(part('docs', 'thread', 0.7), part('check', 'thread', 0.2)), good: true }
-    const hotspot = { part: 'docs', kind: 'thread' as const, cause: 'cost' as const, value: 0.7 }
-    const change = newChange({ classId: 'c', run: source, hotspot, action: 'split', history: [source] })
-    expect(change.instruction).toContain('Split this task into 3 threads: divide the part of "docs" between two threads')
-    expect(layoutInstruction('merge', hotspot, source.profile, 'check')).toContain('Split this task into 1 thread: the part of "docs" goes to the thread "check"')
-    // Three parts, whatever their form, follow a split of two; the same two do not.
-    expect(followedChange(change, { ...source, id: 'r1', profile: split(part('a', 'thread', 0.4), part('b', 'thread', 0.3), part('check', 'member', 0.2)) }, source)).toBe(true)
-    expect(followedChange(change, { ...source, id: 'r1' }, source)).toBe(false)
+  it('keeps a trial after enough clean runs that applied it, and reverts it at once when the events come back or the result is worse', () => {
+    const trial = newTrial([trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) })], [], undefined, 'h')!
+    expect(trial).toMatchObject({ variable: 'handoff', value: 'manifest', need: 2 })
+    const under = (over: Partial<TrialRun> = {}) => trun({ trial: 'h', collaboration: { mode: 'central', handoff: 'manifest', overlap: 'parallel' }, ...over })
+    expect(judgeTrial(trial, [under()])).toBeUndefined()
+    expect(judgeTrial(trial, [under(), under()])).toBe('kept')
+    expect(judgeTrial(trial, [under(), under({ events: events({ missing: 1 }) })])).toBe('reverted')
+    expect(judgeTrial(trial, [under({ sound: false })])).toBe('reverted')
+    expect(judgeTrial(trial, [under({ usd: 1.6 })])).toBe('reverted')
+    // A run that did not apply it (a single thread) is no trial; enough of them end it without a verdict.
+    const idle = Array.from({ length: MAX_TRIAL_RUNS }, () => under({ parts: 1 }))
+    expect(judgeTrial(trial, idle.slice(0, 2))).toBeUndefined()
+    expect(judgeTrial(trial, idle)).toBe('inconclusive')
   })
 
-  it('proposes no change for a run whose work was not divided, but still judges a change it did not follow', () => {
-    const alone: OrganizationProfile = { usd: 1, ms: 1000, tokens: 100, parts: [{ name: 'coordinator', kind: 'coordinator', tokens: 100, share: 1, usd: 1, ms: 1000, failures: 0, retries: 0, idleMs: 0, wasted: false }] }
-    const solo = (id: string, change?: string): ReflectedRun => ({ id, seq: 0, decision: 'team', usd: 1, profile: alone, good: true, ...(change === undefined ? {} : { change }) })
-    expect(reflectOnRun('c', [solo('r1')], [])).toEqual({})
-    const change: OrganizationChange = { id: 'x', classId: 'c', action: 'split', target: { part: 'coordinator', kind: 'coordinator', cause: 'cost', value: 1 }, baseline: 1, baselineUsd: 1, runId: 'r1', instruction: '' }
-    expect(reflectOnRun('c', [solo('r1'), solo('r2', 'x')], [{ change, seq: 1 }])).toEqual({ verdict: { changeId: 'x', verdict: 'unfollowed' } })
+  it('gives a kept value as the default and the trial going on on top of it', () => {
+    const overlap = { id: 'o', shape: 'coordinator', variable: 'overlap' as const, value: 'sequence', target: ['overlap' as const], baseline: { runs: 3, hits: 3 }, need: 2, baselineUsd: 1, runId: 'x' }
+    const handoff = { ...overlap, id: 'h', variable: 'handoff' as const, value: 'manifest', target: ['missing' as const] }
+    const states: TrialState[] = [{ trial: overlap, seq: 1, verdict: { verdict: 'kept', seq: 5 } }, { trial: handoff, seq: 6 }]
+    expect(keptCollaboration(states, 'hybrid')).toEqual({ mode: 'hybrid', handoff: 'summary', overlap: 'sequence' })
+    expect(collaborationFor(states)).toMatchObject({ collaboration: { mode: 'central', handoff: 'manifest', overlap: 'sequence' }, trial: { id: 'h' } })
+    expect(trialNote(states, [])).toEqual({ status: 'kept', variable: 'overlap', value: 'sequence' })
+    expect(trialNote(states, [trun({ seq: 7 })])).toEqual({ status: 'trying', variable: 'handoff', value: 'manifest' })
+    const done: TrialState[] = [{ trial: handoff, seq: 6, verdict: { verdict: 'reverted', seq: 9 } }]
+    expect(trialNote(done, [trun({ seq: 8 })])).toEqual({ status: 'reverted', variable: 'handoff', value: 'manifest' })
+    expect(trialNote(done, [trun({ seq: 10 })])).toBeUndefined()
+    // A reverted variable cools down before it is tried again.
+    const hit = Array.from({ length: 4 }, (_, index) => trun({ seq: 10 + index, events: events({ missing: 1 }) }))
+    expect(newTrial(hit, done)).toBeUndefined()
   })
 
-  it('keeps the coordinator\'s splits and the members\' divisions of work in separate classes', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'org-level-'))
+  it('starts, applies and judges a trial through the library and the organizer, end to end', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nexgent-collab-'))
     try {
       const library = new OrganizationLibrary(dir)
-      const text = 'export csv report endpoint'
-      const first = await library.suggest({ text, random: () => 0.9, level: 'coordinator' })
-      await library.record({ classId: first.classId, key: first.key, sessionId: 'c', turn: 1, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1 })
-      expect((await library.suggest({ text, random: () => 0.9, level: 'coordinator' })).classId).toBe(first.classId)
-      expect((await library.suggest({ text, random: () => 0.9 })).classId).not.toBe(first.classId)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('records a change after a team task, gives it to the next similar one, and keeps it once it helped', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'org-reflect-'))
-    try {
-      const library = new OrganizationLibrary(dir)
-      const base = { classId: 'c-reflect', key: KEY, turn: 1, decision: 'team' as const, control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, organization: team }
-      await library.record({ ...base, sessionId: 'a', profile: profile(0.6) })
-      const first = await library.suggest({ text: KEY.join(' '), random: () => 0.9 })
-      expect(first.change).toMatchObject({ action: 'split', target: { part: 'builder', cause: 'cost' }, baseline: 0.6 })
-      expect(first.change!.instruction).toContain('split')
-      expect(first.note).toMatchObject({ status: 'trying', action: 'split' })
-      const id = first.change!.id
-      await library.record({ ...base, sessionId: 'b', profile: halves(0.4), change: id })
-      await library.record({ ...base, sessionId: 'c', profile: halves(0.3), change: id })
-      const after = await library.suggest({ text: KEY.join(' '), random: () => 0.9 })
-      expect(after.kept?.map(item => item.id)).toEqual([id])
-      expect(after.note).toMatchObject({ status: 'kept', action: 'split' })
-      expect(after.note?.measured?.before).toBe(0.6)
-      expect(after.note?.measured?.after).toBeCloseTo(0.35)
-      expect((await library.summary())[0]).toMatchObject({ classId: 'c-reflect', changesKept: 1 })
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('gives a differently worded task in the same project the change of the class it will be recorded in', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'org-project-'))
-    try {
-      const library = new OrganizationLibrary(dir)
-      const traits = ['ext:js', 'ext:md', 'tool:bash']
-      const base = { key: KEY, turn: 1, decision: 'team' as const, control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, organization: team, projectRoot: '/p', traits }
-      await library.record({ ...base, classId: 'c-project', sessionId: 'a', profile: profile(0.6) })
-      const text = '给命令行工具加撤销和导入两个命令，再加一个统计页'
-      // Another project, or no project: the words alone decide (a new class, no change).
-      expect((await library.suggest({ text, random: () => 0.9, projectRoot: '/q' })).change).toBeUndefined()
-      const same = await library.suggest({ text, random: () => 0.9, projectRoot: '/p' })
-      expect(same).toMatchObject({ classId: 'c-project', change: { action: 'split' } })
-      // Recorded with the change it tried, the run is judged (one better run: still trying, no second change).
-      await library.record({ ...base, key: same.key, classId: same.classId, sessionId: 'b', profile: halves(0.4), change: same.change!.id })
-      const lines = await library.lines()
-      expect(lines.filter(line => line.type === 'change')).toHaveLength(1)
-      expect((await library.suggest({ text: KEY.join(' '), random: () => 0.9 })).change?.id).toBe(same.change!.id)
-    } finally {
-      await rm(dir, { recursive: true, force: true })
-    }
-  })
-
-  it('lets a model pick the change from the run records, and falls back to the rule when it cannot', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'org-model-'))
-    try {
-      const base = { classId: 'c-model', key: KEY, turn: 1, decision: 'team' as const, control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, organization: team }
-      const asked: ReflectionRequest[] = []
-      // The model's answer, as text, for each call in turn.
-      const answers = [
-        '{"cause":"The builder read the whole tree before each edit.","action":"narrow-reading","reason":"Its cost was reading, not the size of its part, so splitting would only double the reading."}',
-        '{"cause":"x","action":"parallelize","reason":"not one of the listed changes"}',
-      ]
-      const reflector = async (request: ReflectionRequest) => {
-        asked.push(request)
-        return parseChoice(answers.shift() ?? 'not json')
+      const TASK = 'Add the export endpoint to the report service.\nWrite its tests and update the README.'
+      const organizer = defaultOrganizer({ memory: () => library, random: () => 0.9 })
+      const thread = (name: string) => ({ name, kind: 'thread' as const, tokens: 1, share: 0.5, usd: 0.5, ms: 1, failures: 0, retries: 0, idleMs: 0, wasted: false })
+      const profile = (conflicts: number): OrganizationProfile => ({ usd: 1, ms: 10, tokens: 3, parts: [{ ...thread('coordinator'), kind: 'coordinator' }, thread('a'), thread('b')], events: events({ conflicts }) })
+      // Three coordinator runs split among two threads, each with a conflict, start a trial.
+      for (let turn = 1; turn <= 3; turn += 1) {
+        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'summary', overlap: 'parallel' } })
+        await library.noteProfile({ sessionId: 'coord', turn, profile: profile(1) })
       }
-      const library = new OrganizationLibrary(dir, { reflector })
-      await library.record({ ...base, sessionId: 'a', profile: profile(0.6) })
-      const first = await library.suggest({ text: KEY.join(' '), random: () => 0.9 })
-      // Data found the hotspot; the model chose among the changes that fit it.
-      expect(asked[0]).toMatchObject({ sessionId: 'a', turn: 1, hotspot: { part: 'builder', cause: 'cost' }, allowed: ['split', 'narrow-reading'] })
-      expect(first.change).toMatchObject({ action: 'narrow-reading', chosenBy: 'model', cause: 'The builder read the whole tree before each edit.', baseline: 0.6 })
-      expect(first.change!.instruction).toContain('read only those')
-      expect(first.change!.instruction).toContain('Found cause: The builder read')
-
-      // A worse run reverts it on the same data; with one fitting change left there is nothing to ask.
-      await library.record({ ...base, sessionId: 'b', profile: profile(0.6, { usd: 2 }), usd: 2, change: first.change!.id })
-      const second = await library.suggest({ text: KEY.join(' '), random: () => 0.9 })
-      expect(second.note).toMatchObject({ status: 'reverted', action: 'narrow-reading' })
-      expect(asked).toHaveLength(1)
-      expect(second.change).toMatchObject({ action: 'split', chosenBy: 'rule' })
-      expect(second.change!.reason).toBeUndefined()
-
-      // An answer outside the list leaves the rule's pick.
-      const invalid = new OrganizationLibrary(join(dir, 'invalid'), { reflector })
-      await invalid.record({ ...base, sessionId: 'd', profile: profile(0.6) })
-      expect(asked).toHaveLength(2)
-      expect((await invalid.suggest({ text: KEY.join(' '), random: () => 0.9 })).change).toMatchObject({ action: 'split', chosenBy: 'rule' })
-
-      // A failing reflector leaves the rule's pick too.
-      const failing = new OrganizationLibrary(join(dir, 'other'), { reflector: async () => { throw new Error('offline') } })
-      await failing.record({ ...base, sessionId: 'c', profile: profile(0.6) })
-      expect((await failing.suggest({ text: KEY.join(' '), random: () => 0.9 })).change).toMatchObject({ action: 'split', chosenBy: 'rule' })
+      const [trial] = await library.trials()
+      expect(trial?.trial).toMatchObject({ variable: 'overlap', value: 'sequence', need: 2 })
+      const next = await organizer.decide({ sessionId: 'coord', turn: 4, text: TASK, source: 'user', materialIds: [], coordinator: true, collaboration: 'central' })
+      expect(next?.decision).toMatchObject({ decision: 'team', collaboration: { overlap: 'sequence', handoff: 'summary', mode: 'central' }, trial: { status: 'trying', variable: 'overlap' } })
+      expect(next?.section.body).toContain('owns')
+      for (let turn = 4; turn <= 5; turn += 1) {
+        await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'summary', overlap: 'sequence' }, trial: trial!.trial.id })
+        await library.noteProfile({ sessionId: 'coord', turn, profile: profile(0) })
+      }
+      expect((await library.trials())[0]?.verdict?.verdict).toBe('kept')
+      const after = await library.suggest({ text: TASK, level: 'coordinator', random: () => 0.9 })
+      expect(after).toMatchObject({ collaboration: { overlap: 'sequence' }, trialNote: { status: 'kept', variable: 'overlap' } })
+      expect(after.trial).toBeUndefined()
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
-  })
-
-  it('shows the model the hot part\'s own records', async () => {
-    const at = '2026-10-20T00:00:00.000Z'
-    const coordinator = [
-      { type: 'session.start', ts: at, seq: 1, model: 'm' },
-      { type: 'user.message', ts: at, seq: 2, turn: 1, source: 'user', content: 'do it' },
-      { type: 'subagent.start', ts: at, seq: 3, turn: 1, childSessionId: 'k', childTurn: 1, name: 'builder', executionForm: 'workflow', task: 'build the thing' },
-    ] as unknown as SessionRecord[]
-    const child = [
-      { type: 'assistant.message', ts: at, seq: 1, turn: 1, step: 1, content: '', toolCalls: [{ id: 'c1', name: 'read_file', arguments: '{"path":"a"}' }], usage: {} },
-      { type: 'tool.result', ts: at, seq: 2, turn: 1, step: 1, toolCallId: 'c1', name: 'read_file', content: '', isError: true, error: { code: 'tool/failed', message: 'no such file a' }, durationMs: 1 },
-    ] as unknown as SessionRecord[]
-    const excerpt = await partExcerpt({ sessionId: 's', turn: 1, hotspot: { part: 'builder', kind: 'implement', cause: 'failures', value: 2 } }, async id => (id === 's' ? coordinator : child))
-    expect(excerpt).toContain('--- builder, run 1 ---')
-    expect(excerpt).toContain('[call] read_file {"path":"a"}')
-    expect(excerpt).toContain('[failed] read_file: no such file a')
-    expect(excerpt).not.toContain('do it')
-    // Over the project's model: one auxiliary request on the run's model; a failed request leaves it to the rule.
-    const request: ReflectionRequest = { sessionId: 's', turn: 1, hotspot: { part: 'builder', kind: 'implement', cause: 'failures', value: 2 }, profile: profile(0.6), allowed: ['sequence', 'split'] }
-    const llm = scriptedProvider([], { reflectionReply: '{"cause":"It read a file that did not exist yet.","action":"sequence","reason":"The file came from a part that ran at the same time."}' })
-    const reflect = modelReflector({ llm: () => llm, readRecords: async id => (id === 's' ? coordinator : child) })
-    expect(await reflect(request)).toMatchObject({ action: 'sequence' })
-    expect(llm.reflectionCalls[0]!.request).toMatchObject({ model: 'm' })
-    expect(llm.reflectionCalls[0]!.options).toMatchObject({ purpose: 'auxiliary' })
-    expect(llm.calls).toHaveLength(0)
-    // Through the script instead (empty: the request fails).
-    const failing = scriptedProvider([], { reflectionReply: false })
-    expect(await modelReflector({ llm: () => failing, readRecords: async id => (id === 's' ? coordinator : child) })(request)).toBeUndefined()
-    expect(failing.calls).toHaveLength(1)
-    expect(await modelReflector({ llm: () => undefined, readRecords: async () => coordinator })(request)).toBeUndefined()
-    expect(parseChoice('```json\n{"cause":"c","action":"merge","reason":"r"}\n```')).toEqual({ action: 'merge', cause: 'c', reason: 'r' })
-    expect(parseChoice('{"cause":"c","action":"rewrite-everything","reason":"r"}')).toBeUndefined()
-  })
-
-  it('compares the latest similar team tasks with the first ones', () => {
-    const r = (usd: number, ms: number, good = true): ReflectedRun => ({ id: `s${usd}`, seq: 0, decision: 'team', usd, profile: profile(0.5, { usd, ms }), good })
-    expect(sinceStart([r(1, 10), r(1, 10), r(1, 10)])).toBeUndefined()
-    expect(sinceStart([r(1, 10_000), r(1, 10_000), r(0.7, 8_000), r(0.7, 8_000)])).toEqual({ costChange: -0.3, timeChange: -0.2, qualityHeld: true })
   })
 })
 

@@ -71,6 +71,7 @@ export const SETTINGS: ProjectSettings = {
   apiKey: { configured: false },
   dataDir: '/home/me/.nexgent/projects/p1',
   checkRetries: 2,
+  collaboration: 'central',
   checkCommands: [],
 }
 
@@ -131,6 +132,12 @@ export class FakeBridge implements NexgentBridge {
       return { ...first, coordinator: true }
     },
     'threads.list': input => this.threads.filter(thread => thread.coordinatorSessionId === input.sessionId),
+    'threads.start': input => {
+      const thread = { threadId: 't9', title: input.title, coordinatorSessionId: input.sessionId, status: 'running' as const, turns: 1, createdAt: SESSION.createdAt, updatedAt: SESSION.updatedAt, origin: 'user' as const }
+      this.sessions = [...this.sessions, { ...SESSION, sessionId: 't9', title: input.title, thread: { coordinatorSessionId: input.sessionId, title: input.title, origin: 'user' } }]
+      this.threads = [...this.threads, thread]
+      return thread
+    },
     'sessions.rename': input => {
       const summary = { ...(this.sessions.find(s => s.sessionId === input.sessionId) ?? SESSION), title: input.title }
       this.sessions = this.sessions.map(s => (s.sessionId === input.sessionId ? summary : s))

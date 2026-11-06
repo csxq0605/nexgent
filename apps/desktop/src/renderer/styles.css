@@ -3374,3 +3374,9 @@ details[open] > summary .fold-mark.closed {
   border-radius: 50%;
   background: currentColor;
 }
+
+.new-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}

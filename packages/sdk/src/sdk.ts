@@ -35,6 +35,7 @@ import {
   isNexgentError,
   nexgentHome,
   NexgentError,
+  renderThreadPlan,
   resolveProjectConfig,
   toErrorInfo,
   UNKNOWN_USAGE,
@@ -62,6 +63,7 @@ import {
   type TurnResult,
   type UserMessageSource,
   type WorkdirMerge,
+  type ThreadPlan,
 } from '@nexgent/kernel'
 import { capabilitiesOf, type CapabilityService } from '@nexgent/capabilities'
 import type { LearningHost } from '@nexgent/evolve'
@@ -94,7 +96,7 @@ import { writeExportBundle } from './export.js'
 import { listProjectFiles } from './files.js'
 import { checkRetryOf, collaborationView, historyItems, memberRunView, organizationView, withTurnCosts, runKey, sessionSummary, summaryOfEntry, turnUsage } from './history.js'
 import { RecentProjects } from './recent.js'
-import { COORDINATOR_NOTES_FILE, SdkThreadHost, type ThreadRuntime } from './threads.js'
+import { checkPlan, COORDINATOR_NOTES_FILE, SdkThreadHost, type ThreadRuntime } from './threads.js'
 import { nameConversation } from './title.js'
 import { acknowledgeLearning, describeApiKey, readSettings, readUserSettings, secretValues, setApiKey, updateSettings, updateUserSettings, type CredentialEnv } from './settings.js'
 
@@ -445,13 +447,25 @@ export class LocalNexgentSdk implements NexgentSdk {
     const project = this.project(input.projectId)
     const entry = await this.rootSession(project, input.sessionId)
     if (typeof input.text !== 'string') throw invalid('text must be a string')
+    // Organization redo: the threads the user names for the task travel with the message, word for word.
+    let plan: ThreadPlan | undefined
+    if (input.threads !== undefined) {
+      if (entry.agent.thread !== undefined) throw invalid('a thread does not start threads; name them in the coordinator conversation')
+      plan = checkPlan({ threads: input.threads, exact: input.exactThreads !== false })
+    }
+    const text = plan === undefined ? input.text : [input.text.trim(), renderThreadPlan(plan)].filter(part => part !== '').join('\n\n')
     for (;;) {
       const running = entry.running
       if (running === undefined) break
-      if (!running.tally.ended && entry.agent.steer(input.text, input.materialIds === undefined ? {} : { materialIds: input.materialIds })) return { sessionId: entry.agent.sessionId, turn: running.tally.turn, steered: true }
+      if (!running.tally.ended && entry.agent.steer(text, input.materialIds === undefined ? {} : { materialIds: input.materialIds })) {
+        if (plan !== undefined) project.threads.setPlan(entry.agent.sessionId, plan)
+        return { sessionId: entry.agent.sessionId, turn: running.tally.turn, steered: true }
+      }
       await running.done.catch(() => undefined)
     }
-    const { sessionId, turn } = await this.startTurn(input)
+    // A new message starts a new task: its plan (or none) replaces the last one.
+    if (entry.agent.thread === undefined) project.threads.newTask(entry.agent.sessionId, plan)
+    const { sessionId, turn } = await this.startTurn({ ...input, text })
     return { sessionId, turn }
   }
 
@@ -646,9 +660,9 @@ export class LocalNexgentSdk implements NexgentSdk {
         const entry = await this.rootSession(project(), sessionId)
         await entry.agent.appendHostRecord(record)
       },
-      startTurn: async (sessionId, text, materialIds) => {
+      startTurn: async (sessionId, text, materialIds, source = 'thread') => {
         await this.followCoordinatorPlan(project(), sessionId)
-        const started = await this.startTurn({ source: 'thread', projectId: project().projectId, sessionId, text, ...(materialIds === undefined ? {} : { materialIds }) })
+        const started = await this.startTurn({ ...(source === 'thread' ? { source: 'thread' as const } : {}), projectId: project().projectId, sessionId, text, ...(materialIds === undefined ? {} : { materialIds }) })
         return { turn: started.turn, done: started.done }
       },
       steer: async (sessionId, text) => {
@@ -705,6 +719,7 @@ export class LocalNexgentSdk implements NexgentSdk {
       },
       isCoordinator: async sessionId => (await this.coordinatorId(project())) === sessionId,
       notesFile: () => join(project().app.ctx.workspace.layout.dataDir, COORDINATOR_NOTES_FILE),
+      boardsDir: () => join(project().app.ctx.workspace.layout.dataDir, 'boards'),
     }
   }
 
@@ -1078,7 +1093,7 @@ export class LocalNexgentSdk implements NexgentSdk {
     const tally = entry.running?.tally ?? entry.pending ?? entry.memberTally
     switch (event.type) {
       case 'turn.start':
-        send({ type: 'turn.start', turn: event.turn, source: tally?.turn === event.turn ? tally.source : 'user', ...(event.change === undefined ? {} : { change: event.change }) })
+        send({ type: 'turn.start', turn: event.turn, source: tally?.turn === event.turn ? tally.source : 'user', ...(event.change === undefined ? {} : { change: event.change }), ...(event.trial === undefined ? {} : { trial: event.trial }) })
         return
       case 'request.start':
         tally?.steps.push(UNKNOWN_USAGE)
@@ -1269,6 +1284,23 @@ export class LocalNexgentSdk implements NexgentSdk {
         if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
         return this.project(input.projectId).threads.list({ coordinatorSessionId: input.sessionId })
       },
+      'threads.start': async input => {
+        if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
+        if (typeof input.title !== 'string' || typeof input.task !== 'string') throw invalid('title and task must be strings')
+        const project = this.project(input.projectId)
+        await this.rootSession(project, input.sessionId)
+        return project.threads.startByUser({
+          coordinatorSessionId: input.sessionId,
+          title: input.title,
+          task: input.task,
+          ...(input.materialIds === undefined ? {} : { materialIds: input.materialIds }),
+          ...(input.owns === undefined ? {} : { owns: input.owns }),
+        })
+      },
+      'threads.board': async input => {
+        if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
+        return this.project(input.projectId).threads.board({ sessionId: input.sessionId })
+      },
       'sessions.open': async input => {
         const project = this.project(input.projectId)
         // A member is never locked by the SDK: opening one shows it read-only.
@@ -1434,8 +1466,17 @@ export class LocalNexgentSdk implements NexgentSdk {
         return { ...(await readSettings(layout.configFile, this.credentialEnv)), dataDir: layout.dataDir }
       },
       'settings.update': async input => {
-        const { layout } = this.project(input.projectId).app.ctx.workspace
-        return { ...(await updateSettings(layout.configFile, input.patch, this.credentialEnv)), dataDir: layout.dataDir }
+        const project = this.project(input.projectId)
+        const { layout } = project.app.ctx.workspace
+        const settings = await updateSettings(layout.configFile, input.patch, this.credentialEnv)
+        // Organization redo: the collaboration mode decides which tools the coordinator and its threads have, set when a
+        // conversation opens: idle conversations are closed so that their next turn reopens them with the new mode.
+        if (input.patch?.collaboration !== undefined) {
+          for (const [sessionId, entry] of [...project.sessions]) {
+            if (entry.running === undefined && entry.agent.parentSessionId === undefined) await this.closeSession(project, sessionId).catch(() => undefined)
+          }
+        }
+        return { ...settings, dataDir: layout.dataDir }
       },
       'settings.setApiKey': input => setApiKey(this.credentialEnv, input?.value),
 

@@ -7,13 +7,12 @@
  * `capabilities` context provider.
  */
 import { resolve } from 'node:path'
-import { nexgentHome, resolveUserDataLayout, type Context, type LLMProvider, type SessionRecord } from '@nexgent/kernel'
+import { nexgentHome, resolveUserDataLayout, type Context, type SessionRecord } from '@nexgent/kernel'
 import { capabilitiesProvider, type CompactionOverrideSink } from './provider.js'
 import { CapabilityService, type CapabilitiesConfig } from './service.js'
 import { HandbookHost, seededRandom } from './handbook/host.js'
 import { capabilityTools } from './tools.js'
 import { OrganizationLibrary } from './organizations/library.js'
-import { modelReflector } from './organizations/model-reflection.js'
 
 /** Plugin-row config. */
 export type CapabilitiesPluginConfig = CapabilitiesConfig
@@ -40,10 +39,7 @@ export const CapabilitiesPlugin = {
     })
     ctx.provide('capabilities', service)
     // New direction step 3: the user's organization library.
-    // Coordinator step three: a model picks the change for a run's hotspot from its records (the rule decides when it cannot).
-    ctx.provide('organizations', new OrganizationLibrary(resolveUserDataLayout(userHome).organizations, {
-      reflector: modelReflector({ llm: () => ctx.get('llm') as LLMProvider | undefined, readRecords }),
-    }))
+    ctx.provide('organizations', new OrganizationLibrary(resolveUserDataLayout(userHome).organizations))
     ctx.provide('capabilityHost', { ...host, handbookForTurn: input => handbook.forTurn(input) })
     ctx.inject(['tools'], scope => {
       for (const tool of capabilityTools(service, readRecords)) {

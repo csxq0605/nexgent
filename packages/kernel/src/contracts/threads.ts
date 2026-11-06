@@ -26,8 +26,12 @@ import type { ToolEffect } from './tools.js'
 export interface ThreadOrigin {
   /** The coordinator conversation the thread belongs to. */
   readonly coordinatorSessionId: string
-  /** Short name the coordinator gave it (shown on its card and in the sidebar). */
+  /** Short name the coordinator (or the user) gave it (shown on its card and in the sidebar). */
   readonly title: string
+  /** Organization redo: the user started the thread themselves (absent: the coordinator did). */
+  readonly origin?: 'user'
+  /** Organization redo: the project paths (files or directories) the thread's part is given; it should change only these. */
+  readonly owns?: readonly string[]
 }
 
 /**
@@ -57,6 +61,10 @@ export interface ThreadInfo {
   readonly blocker?: string
   /** Coordinator step three: a tool call in the thread waits for the user to allow it. */
   readonly needsApproval?: true
+  /** Organization redo: the user started it ({@link ThreadOrigin.origin}). */
+  readonly origin?: 'user'
+  /** Organization redo: the paths its part is given ({@link ThreadOrigin.owns}). */
+  readonly owns?: readonly string[]
 }
 
 /** `read_thread`: a thread with its last reply and what its last turn changed. */
@@ -88,6 +96,16 @@ export const THREAD_LIMITS = {
   titleChars: 60,
   /** Coordinator step three: characters of the project notes (`update_project_notes`). */
   notesChars: 8_000,
+  /** Organization redo: paths in one thread's `owns`. */
+  maxOwns: 20,
+  /** Organization redo: characters of a message between threads or to the coordinator, and of a board entry. */
+  peerChars: 600,
+  /** Organization redo: messages one thread may send another in one task. */
+  maxPeerMessages: 6,
+  /** Organization redo: times one thread may ask its coordinator in one turn. */
+  maxAsks: 3,
+  /** Organization redo: board entries `read_board` shows (the latest). */
+  boardShown: 40,
 } as const
 
 /** Where in the coordinator conversation a thread run is started from (its `subagent.start` goes there). */
@@ -105,6 +123,8 @@ export interface ThreadStartInput extends ThreadCaller {
   /** The thread's first message: its part, inputs, what to produce and where. */
   readonly task: string
   readonly materialIds?: readonly string[]
+  /** Organization redo: the paths the part is given ({@link ThreadOrigin.owns}). */
+  readonly owns?: readonly string[]
 }
 
 /**
@@ -136,6 +156,12 @@ export const START_THREAD_TOOL: Step2ToolSpec = {
       title: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.titleChars, description: 'A few words naming the piece of work.' },
       task: { type: 'string', minLength: 1, description: 'Everything the thread needs: its part, the inputs, what to produce and where, and what not to touch.' },
       materialIds: { type: 'array', items: { type: 'string', minLength: 1 } },
+      owns: {
+        type: 'array',
+        maxItems: THREAD_LIMITS.maxOwns,
+        items: { type: 'string', minLength: 1 },
+        description: 'Project-relative files or directories this part changes (the thread should change only these). Give it whenever other threads run at the same time.',
+      },
     },
   },
 }
@@ -177,6 +203,29 @@ export const THREAD_TOOLS: readonly Step2ToolSpec[] = [START_THREAD_TOOL, MESSAG
 /** Names of {@link THREAD_TOOLS}. */
 export const THREAD_TOOL_NAMES = ['start_thread', 'message_thread', 'read_thread', 'list_threads'] as const
 
+/**
+ * Organization redo: what the host saw between this thread run and the
+ * task's other threads, for the wake note: files it brought in outside its
+ * `owns`, files another thread of the task also brought in, and messages
+ * from other threads it has not read yet.
+ */
+export interface ThreadRunEvents {
+  readonly outside?: readonly string[]
+  readonly overlap?: readonly { readonly path: string; readonly thread: string }[]
+  /** Threads with messages waiting for this thread, when it is not running. */
+  readonly waiting?: readonly { readonly from: string; readonly to: string }[]
+}
+
+/** Pure: the wake note's lines for {@link ThreadRunEvents}. */
+export function renderThreadRunEvents(events: ThreadRunEvents | undefined): string[] {
+  if (events === undefined) return []
+  const lines: string[] = []
+  if ((events.outside?.length ?? 0) > 0) lines.push(`It changed files outside the paths its part was given: ${events.outside!.join(', ')}.`)
+  if ((events.overlap?.length ?? 0) > 0) lines.push(`Files another thread of this task also changed: ${events.overlap!.map(item => `${item.path} (also "${item.thread}")`).join(', ')}. Check that the two changes fit together.`)
+  for (const item of events.waiting ?? []) lines.push(`Thread "${item.from}" left a message for "${item.to}", which is not running; it gets it when its next turn starts (message_thread starts one).`)
+  return lines
+}
+
 /** Pure: the note a thread's ended turn wakes its coordinator with. */
 export function threadWakeNote(input: {
   readonly title: string
@@ -191,6 +240,8 @@ export function threadWakeNote(input: {
    * each checked only its own copy, so the whole project wants one check.
    */
   readonly mergedThreads?: number
+  /** Organization redo: what the host saw between this run and the task's other threads. */
+  readonly events?: ThreadRunEvents
 }): string {
   const what = input.status === 'done' ? 'finished its turn' : input.status === 'waiting' ? 'stopped with a question or blocker' : input.status === 'failed' ? 'failed' : 'was stopped'
   const { wakeChars, wakeTailChars } = THREAD_LIMITS
@@ -203,7 +254,136 @@ export function threadWakeNote(input: {
   const check = input.mergedThreads !== undefined && input.mergedThreads >= 2
     ? [`All threads have ended, and the changes of ${input.mergedThreads} threads are now merged into the project; each thread checked only its own copy. Before you report the task as done, have one thread check the whole project (run its tests, build or program, whatever it has) and fix what the merge broke.`]
     : []
-  return [`Thread "${input.title}" (${input.threadId}) ${what}. Its last reply:\n${reply.trim() === '' ? '(empty)' : reply}`, ...merge, ...check].join('\n')
+  return [`Thread "${input.title}" (${input.threadId}) ${what}. Its last reply:\n${reply.trim() === '' ? '(empty)' : reply}`, ...merge, ...renderThreadRunEvents(input.events), ...check].join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// Organization redo: threads that work together (collaboration `hybrid`)
+// ---------------------------------------------------------------------------
+
+/** What a board entry is: a fact others can build on, a claim on paths, a handoff of results, a blocker. */
+export const BOARD_ENTRY_KINDS = ['fact', 'claim', 'handoff', 'blocker'] as const
+export type BoardEntryKind = typeof BOARD_ENTRY_KINDS[number]
+
+/** One entry of a coordinator's board (`<dataDir>/boards/<coordinator>.jsonl`). */
+export interface BoardEntry {
+  /** Position on the board, from 1. */
+  readonly seq: number
+  readonly at: string
+  /** The thread's session id. */
+  readonly threadId: string
+  /** Its title when it posted. */
+  readonly thread: string
+  readonly kind: BoardEntryKind
+  readonly text: string
+  /** Project paths the entry is about (a claim's paths are the thread's while it works on them). */
+  readonly paths?: readonly string[]
+}
+
+/**
+ * What a thread can do with the other threads of its coordinator, through
+ * the host (`ctx.threads` implements it when the project's collaboration is
+ * `hybrid`). Every call names the calling thread; the coordinator and the
+ * user see everything (the board, and each message in both threads).
+ */
+export interface ThreadPeers {
+  /** Post on the board. A claim on paths another running thread has claimed is refused (`tool/denied`). */
+  post(input: { readonly threadId: string; readonly kind: BoardEntryKind; readonly text: string; readonly paths?: readonly string[] }): Promise<BoardEntry>
+  /** The latest entries of the board of the conversation `sessionId` belongs to (a thread's coordinator, or the coordinator itself). */
+  board(input: { readonly sessionId: string }): Promise<readonly BoardEntry[]>
+  /**
+   * Send another thread of the same coordinator a message: it joins that
+   * thread's running turn, or waits for its next one (no turn is started).
+   * Refused over {@link THREAD_LIMITS.maxPeerMessages} per pair and task, and for the same text twice.
+   */
+  messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string }): Promise<{ readonly delivered: 'now' | 'next-turn'; readonly title: string }>
+  /** Ask the coordinator now, in the middle of a turn (it is woken with the question). */
+  ask(input: { readonly threadId: string; readonly text: string }): Promise<void>
+}
+
+/** `post_board`: post a fact, a claim, a handoff or a blocker for the other threads. */
+export const POST_BOARD_TOOL: Step2ToolSpec = {
+  name: 'post_board',
+  effects: ['read'],
+  approval: 'never',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['kind', 'text'],
+    properties: {
+      kind: { type: 'string', enum: [...BOARD_ENTRY_KINDS] },
+      text: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.peerChars },
+      paths: { type: 'array', maxItems: THREAD_LIMITS.maxOwns, items: { type: 'string', minLength: 1 }, description: 'Project paths the entry is about; for a claim, the paths you will change.' },
+    },
+  },
+}
+
+/** `read_board`: the latest board entries of this task's threads. */
+export const READ_BOARD_TOOL: Step2ToolSpec = {
+  name: 'read_board',
+  effects: ['read'],
+  approval: 'never',
+  concurrent: true,
+  inputSchema: { type: 'object', additionalProperties: false, properties: {} },
+}
+
+/** `message_peer`: tell another thread something it needs from you. */
+export const MESSAGE_PEER_TOOL: Step2ToolSpec = {
+  name: 'message_peer',
+  effects: ['read'],
+  approval: 'never',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['to', 'text'],
+    properties: {
+      to: { type: 'string', minLength: 1, description: 'The other thread\'s title or id (read_board and the board show them).' },
+      text: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.peerChars },
+    },
+  },
+}
+
+/** `ask_coordinator`: ask the coordinator now, without ending your turn. */
+export const ASK_COORDINATOR_TOOL: Step2ToolSpec = {
+  name: 'ask_coordinator',
+  effects: ['read'],
+  approval: 'never',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['text'],
+    properties: { text: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.peerChars } },
+  },
+}
+
+/** The tools threads work together with, in the order above. */
+export const PEER_TOOLS: readonly Step2ToolSpec[] = [POST_BOARD_TOOL, READ_BOARD_TOOL, MESSAGE_PEER_TOOL, ASK_COORDINATOR_TOOL]
+
+/** Names of {@link PEER_TOOLS}. Only threads of a `hybrid` project see them (the coordinator sees `read_board`). */
+export const PEER_TOOL_NAMES = ['post_board', 'read_board', 'message_peer', 'ask_coordinator'] as const
+
+/** Opening words of a message from another thread, as the receiving thread reads it. */
+export const PEER_MESSAGE_LEAD = 'Message from another thread of this task'
+
+/**
+ * Organization redo: the threads the user asked for with a message to the
+ * coordinator (`turns.send` `threads`). With `exact`, the host starts no
+ * other threads for the task and keeps the user's words for each.
+ */
+export interface ThreadPlan {
+  readonly threads: readonly { readonly title: string; readonly task?: string }[]
+  readonly exact: boolean
+}
+
+/** Most threads one plan names. */
+export const MAX_PLANNED_THREADS = 8
+
+/** Pure: the plan as the coordinator's message carries it. */
+export function renderThreadPlan(plan: ThreadPlan): string {
+  const lead = plan.exact
+    ? 'Threads I want for this task (start exactly these, with these titles, and no others):'
+    : 'Threads I suggest for this task:'
+  return [lead, ...plan.threads.map((item, index) => `${index + 1}. ${item.title}${item.task === undefined || item.task.trim() === '' ? '' : `: ${item.task.trim()}`}`)].join('\n')
 }
 
 /**

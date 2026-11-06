@@ -22,7 +22,8 @@ import type { TaskCheck } from './contracts/ledger.js'
 import type { FileChange } from './contracts/tasking.js'
 import type { TurnEndReason } from './contracts/session.js'
 import type { SandboxMode } from './contracts/workspace.js'
-import type { OrganizationProfile, OrganizationChange, OrganizationChangeNote, OrganizationClassSummary, OrganizationDecision, OrganizationLevel, OrganizationName, OrganizationRole, OrganizationRun, OrganizationShape, OrganizationUse } from './contracts/organization.js'
+import type { CollaborationMode } from './contracts/config.js'
+import type { CollaborationConfig, CollaborationTrialNote, OrganizationProfile, OrganizationChange, OrganizationChangeNote, OrganizationClassSummary, OrganizationDecision, OrganizationLevel, OrganizationName, OrganizationRole, OrganizationRun, OrganizationShape, OrganizationUse } from './contracts/organization.js'
 import type { SessionRecord } from './contracts/session.js'
 import type { ThreadHost } from './contracts/threads.js'
 import type { SystemPromptSection } from './contracts/context.js'
@@ -63,6 +64,8 @@ export interface TurnOrganizerInput {
    * and its turns are coordinator-level runs in the organization library.
    */
   readonly coordinator?: boolean
+  /** Organization redo, with `coordinator`: the project's {@link CollaborationMode} (how its threads work together). */
+  readonly collaboration?: CollaborationMode
   /** A thread's turn the coordinator gave it: one part of a larger task, so the thread judges from the part whether members are worth it. */
   readonly thread?: boolean
 }
@@ -119,8 +122,14 @@ export interface OrganizationSuggestion {
   readonly change?: OrganizationChange
   /** Coordinator (team only): changes the class kept, newest first (at most 3). */
   readonly kept?: readonly OrganizationChange[]
-  /** Coordinator (team only): the line for the team card. */
+  /** Coordinator (team only): the line for the team card (older changes; no longer produced). */
   readonly note?: OrganizationChangeNote
+  /** Organization redo (coordinator level): how the task's threads work together, the shape's defaults with any trial applied. */
+  readonly collaboration?: CollaborationConfig
+  /** Organization redo: the trial this task runs (its id), when it runs one. */
+  readonly trial?: string
+  /** Organization redo: the line about the trial or the last verdict. */
+  readonly trialNote?: CollaborationTrialNote
 }
 
 /**
@@ -137,7 +146,7 @@ export interface OrganizationMemory {
    * project's latest run's traits place it in, the same rule `record` uses,
    * so the run gets the advice of the class it is recorded in.
    */
-  suggest(input: { readonly text: string; readonly random?: () => number; readonly projectRoot?: string; readonly level?: OrganizationLevel }): Promise<OrganizationSuggestion>
+  suggest(input: { readonly text: string; readonly random?: () => number; readonly projectRoot?: string; readonly level?: OrganizationLevel; readonly collaboration?: CollaborationMode }): Promise<OrganizationSuggestion>
   record(run: Omit<OrganizationRun, 'id' | 'at'>): Promise<void>
   /** The user asked for changes to what a session's last recorded turn produced. */
   noteRework(input: { readonly sessionId: string }): Promise<void>

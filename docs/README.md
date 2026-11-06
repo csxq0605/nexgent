@@ -11,7 +11,7 @@
 
 | 文档 | 内容 |
 |---|---|
-| [PROJECT_POSITIONING.md](PROJECT_POSITIONING.md) | 产品与设计定位：协调者与讨论串、两层组织、复盘与组织记忆、项目规则与笔记、经验、权限 |
+| [PROJECT_POSITIONING.md](PROJECT_POSITIONING.md) | 产品与设计定位：协调者与讨论串、两层组织、协作问题与协作试验、项目规则与笔记、经验、权限 |
 | [spec/data-formats.md](spec/data-formats.md) | 数据格式：用户数据目录、会话 JSONL、账本、讨论串、组织库、经验手册 |
 | [spec/permissions.md](spec/permissions.md) | 权限：沙箱、命令策略、审批、费用上限、密钥、本地 IPC |
 | [spec/agent-hooks.md](spec/agent-hooks.md) | 内核钩子：一轮对话里各步骤的顺序与扩展点 |

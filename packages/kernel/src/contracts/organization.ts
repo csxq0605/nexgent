@@ -38,8 +38,12 @@ export interface OrganizationDecision {
   readonly chosenBy: 'size' | 'control' | 'default' | 'memory'
   /** Step 3: the organization suggested from similar tasks, when there was one. */
   readonly suggested?: OrganizationName
-  /** Coordinator: the one change to the organization this team turn tries, or the verdict on the last one. */
+  /** Coordinator: the one change to the organization this team turn tries, or the verdict on the last one (older records). */
   readonly change?: OrganizationChangeNote
+  /** Organization redo: how this coordinator task's threads work together. */
+  readonly collaboration?: CollaborationConfig
+  /** Organization redo: the collaboration trial this task runs, or the verdict on the last one. */
+  readonly trial?: CollaborationTrialNote
 }
 
 /** Step 3: what `chosenBy` may be. */
@@ -184,6 +188,10 @@ export interface OrganizationRun {
    * they have (`OrganizationMemory.noteProfile`).
    */
   readonly waiting?: true
+  /** Organization redo: how the task's threads worked together. */
+  readonly collaboration?: CollaborationConfig
+  /** Organization redo: the {@link CollaborationTrial} this run was under (its id). */
+  readonly trial?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +242,8 @@ export interface OrganizationProfile {
   readonly tokens: number
   /** The coordinator first, then members in start order. */
   readonly parts: readonly OrganizationPart[]
+  /** Organization redo: what went wrong between the parts (absent on older lines). */
+  readonly events?: CollaborationEvents
 }
 
 /** What makes a part the hottest spot of a task. */
@@ -302,13 +312,6 @@ export type OrganizationChangeChooser = 'model' | 'rule'
 export const ORGANIZATION_REASON_CHARS = 400
 
 /**
- * Coordinator step three: the opening words of the system prompt of the
- * background request that picks an organization change (`purpose:
- * auxiliary`), so a host or a scripted model can tell it from a task's requests.
- */
-export const ORGANIZATION_REFLECTION_LEAD = 'You review how an AI agent organized one finished task'
-
-/**
  * How a change ended: kept (two similar tasks improved it, nothing got
  * worse), reverted (tried and did not work: not given again for that kind
  * of part and cause) or unfollowed (the task did not do what the change
@@ -358,14 +361,106 @@ export interface OrganizationClassSummary {
   readonly teamGood?: number
   /** Mean team cost over mean solo cost, minus 1 (0.3 is 30 % more). */
   readonly costChange?: number
-  /**
-   * Coordinator: the class's latest team runs against its first ones
-   * (median of up to 3 each, once there are at least 4 team runs with a
-   * profile): cost and time change (−0.3 is 30 % less), and whether the share
-   * of runs that went well held.
-   */
-  readonly sinceStart?: { readonly costChange: number; readonly timeChange: number; readonly qualityHeld: boolean }
-  /** Coordinator: changes kept and reverted in the class. */
-  readonly changesKept?: number
-  readonly changesReverted?: number
+}
+
+// ---------------------------------------------------------------------------
+// Organization redo (user, 2026-11-06): optimizing how the parts work together
+// ---------------------------------------------------------------------------
+
+/**
+ * What went wrong between the parts of one task, counted by the host from
+ * the run records (never from what a model says about itself). These are
+ * the signals organization optimization targets: each one is a concrete
+ * failure of collaboration that cost work or quality.
+ */
+export interface CollaborationEvents {
+  /** Project files that two or more parts each brought into the project. */
+  readonly overlap: number
+  /** Merge conflicts (a part's version was set aside because the project changed the same file). */
+  readonly conflicts: number
+  /** A part tried to read a file another part of the task wrote, and the file was not there (the handoff missed it). */
+  readonly missing: number
+  /** Files a thread brought in outside the paths it was given (`owns`). */
+  readonly outside: number
+  /** Messages threads sent each other (`message_peer`). */
+  readonly messages: number
+  /** Board claims and thread messages the host refused (taken paths, limits). */
+  readonly refused: number
+}
+
+/** The names of {@link CollaborationEvents}. */
+export const COLLABORATION_EVENT_NAMES = ['overlap', 'conflicts', 'missing', 'outside', 'messages', 'refused'] as const
+export type CollaborationEventName = typeof COLLABORATION_EVENT_NAMES[number]
+
+/** No events. */
+export const NO_COLLABORATION_EVENTS: CollaborationEvents = Object.freeze({ overlap: 0, conflicts: 0, missing: 0, outside: 0, messages: 0, refused: 0 })
+
+/**
+ * How the threads of one coordinator task worked together, as the host
+ * applied it. `mode` is the project's setting (`config.json`
+ * `collaboration`, chosen by the user). The other two are what organization
+ * optimization tries, one at a time, and the host enforces:
+ *
+ * - `handoff`: `summary`: a thread gets only what the coordinator writes in
+ *   its brief; `manifest`: the host adds to every thread it starts the
+ *   project files the task's earlier threads brought in, and by whom.
+ * - `overlap`: `parallel`: threads whose files overlap may run at the same
+ *   time; `sequence`: the host refuses to start a thread whose `owns`
+ *   overlaps a running thread's, and asks for `owns` while others run.
+ */
+export interface CollaborationConfig {
+  readonly mode: 'central' | 'hybrid'
+  readonly handoff: 'summary' | 'manifest'
+  readonly overlap: 'parallel' | 'sequence'
+}
+
+/** The variables organization optimization tries. */
+export type CollaborationVariable = 'handoff' | 'overlap'
+
+/** The default arrangement (how threads worked before optimization changed anything). */
+export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 'central', handoff: 'summary', overlap: 'parallel' })
+
+/**
+ * Each variable's other value and the events it is meant to remove: a
+ * trial is started when its target events happen often on similar tasks
+ * and judged by whether they stop happening.
+ */
+export const COLLABORATION_TRIALS: readonly { readonly variable: CollaborationVariable; readonly value: string; readonly target: readonly CollaborationEventName[] }[] = Object.freeze([
+  { variable: 'overlap', value: 'sequence', target: ['overlap', 'conflicts'] },
+  { variable: 'handoff', value: 'manifest', target: ['missing'] },
+])
+
+/**
+ * One trial of a variable on a kind of task (`shape`): started when the
+ * target events happened on at least {@link baseline}`.hits` of
+ * {@link baseline}`.runs` similar runs, kept after {@link need} runs in a
+ * row under it without them (and without a worse result), reverted as
+ * soon as they come back or the result gets worse.
+ */
+export interface CollaborationTrial {
+  /** Lowercase uuid v4. */
+  readonly id: string
+  /** The kind of task: level and number of parts (`coordinatorShape`). */
+  readonly shape: string
+  readonly variable: CollaborationVariable
+  readonly value: string
+  readonly target: readonly CollaborationEventName[]
+  /** Similar runs before the trial and how many had a target event. */
+  readonly baseline: { readonly runs: number; readonly hits: number }
+  /** Clean runs in a row it needs to be kept: chance alone leaves that many clean at most 10 % of the time. */
+  readonly need: number
+  /** Median cost of the baseline runs in USD (a trial run may not cost more than 1.5 times it). */
+  readonly baselineUsd: number
+  /** The run whose events started it. */
+  readonly runId: string
+}
+
+/** How a trial ended: kept (its value becomes the shape's default), reverted, or inconclusive (too few runs could show it either way). */
+export type CollaborationVerdict = 'kept' | 'reverted' | 'inconclusive'
+
+/** The one line the user may see about collaboration on a task: the trial it runs, or the verdict on the last one. */
+export interface CollaborationTrialNote {
+  readonly status: 'trying' | CollaborationVerdict
+  readonly variable: CollaborationVariable
+  readonly value: string
 }

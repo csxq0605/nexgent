@@ -77,11 +77,10 @@
   - `Handbook.applyEvidence()`（`forTurn` 每轮先调）按 `handbookStatusFromEvidence` 启用或下线：两组各至少 3 个结局已知、给的那组不差于不给的 → 启用；给的那组有用户否定，或至少 4 个任务、均分低 0.1 以上 → 下线。`Handbook.evidence()` 给出每条的两组计数与均分。
   - 票只记“用到了 / 说它误导”：`upvote` 不再启用条目，`downvote` 只把启用的条目退回试用。
 
-## 组织库与反思（`src/organizations/`）
+## 组织库与协作试验（`src/organizations/`）
 
-- `OrganizationLibrary`（`library.ts`）：用户级组织库，按任务类记各次 `organize` 的运行（`OrganizationRun`）、结局与改动，`suggestOrganization` 给同类任务建议顺利的分工（带 `ORGANIZATION_CONTROL_RATE` 的随机对照），`summarizeOrganizations` 给界面用的类摘要；内置三种：`lead-checker`、`plan-build-review`、`explore-then-build`。
-- 反思（`reflection.ts`）：每个组队任务结束后读该次的 `OrganizationProfile`（`@nexgent/workflow` 的 `profile.ts`），找出耗时或失败的热点（`findHotspot`），选一种改组方式（`chooseAction`），下次同类任务带着这条改动试，跑出来比较后留用或还原（`judgeChange`、`reflectOnRun`）。不等用户开口。
-- 模型反思（`model-reflection.ts`）：`modelReflector` 让辅助模型在规则允许的改动里挑一种并写出具体说明（`parseChoice`）；没有模型或解析失败时用规则选的结果。
+- `OrganizationLibrary`（`library.ts`）：用户级组织库，按任务类记各次 `organize` 的运行（`OrganizationRun`）与结局，`suggestOrganization` 给同类任务建议顺利的分工（带 `ORGANIZATION_CONTROL_RATE` 的随机对照），`summarizeOrganizations` 给界面用的类摘要；内置三种：`lead-checker`、`plan-build-review`、`explore-then-build`。
+- 协作试验（`collaboration.ts`）：只看分给至少两个讨论串的协调者任务，按组织画像里的协作问题（`events`）一次试一个协作变量（`COLLABORATION_TRIALS`），宿主执行；目标问题连续 `need` 次没再出现就留下，再出现、结果不好或花费超过基线中位数 1.5 倍就退回（`newTrial`、`judgeTrial`、`collaborationFor`、`trialNote`）。不发模型请求。
 
 ## 两个工具
 

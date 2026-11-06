@@ -31,8 +31,6 @@ export {
   type ScriptedModelServer,
   type ScriptedModelServerOptions,
   isTitleRequest,
-  isReflectionRequest,
-  DEFAULT_REFLECTION_REPLY,
   scriptedModelServer,
   toWireUsage,
 } from './server.js'

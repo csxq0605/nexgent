@@ -5,9 +5,10 @@
  * members' child sessions) and builds an {@link OrganizationProfile}: per
  * part (the coordinator itself, each member) the tokens and share of the
  * cost, the wall time, failures and retries, idle wait, and whether the part's
- * work was thrown away. The organization library reflects on it
- * (`@nexgent/capabilities` `reflectOnRun`). Pure: no model requests, nothing
- * about the kind of task.
+ * work was thrown away, and the collaboration events between the task's
+ * threads ({@link collaborationEvents}), which the organization library
+ * judges its collaboration trials by. Pure: no model requests, nothing about
+ * the kind of task.
  *
  * - Cost: each part's model usage, priced with `costOf` when the host gives
  *   it (the model's real prices), otherwise weighted like Claude's price
@@ -22,8 +23,13 @@
  * - Wasted work: every file a member wrote into the project was later in
  *   the same task written whole again (`write_file`) by someone else, or
  *   deleted.
+ * - Collaboration events (organization redo, {@link collaborationEvents}):
+ *   files two parts both brought in, merge conflicts, a part reading a file
+ *   another part wrote and not finding it, a thread changing files outside
+ *   its `owns`, and messages between threads and refused claims.
  */
 import {
+  type CollaborationEvents,
   type LLMUsage,
   type OrganizationPart,
   type OrganizationPartKind,
@@ -138,6 +144,81 @@ function writtenPaths(records: readonly SessionRecord[], turn: number): string[]
   return [...out]
 }
 
+/** A run of a part as the collaboration events read it. */
+export interface CollaborationRun {
+  readonly name: string
+  readonly childSessionId: string
+  readonly childTurn: number
+  /** Files it brought into the project (or wrote, without a merge). */
+  readonly files: readonly string[]
+  /** Merge conflicts of the run. */
+  readonly conflicts: number
+}
+
+/** Pure: whether `file` is one of `owns` or inside one of them (project-relative paths). */
+export function withinOwns(file: string, owns: readonly string[]): boolean {
+  const normalized = file.replace(/\\/g, '/').replace(/^\.\//, '')
+  return owns.some(own => {
+    const root = own.replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    return root === '' || root === '.' || normalized === root || normalized.startsWith(`${root}/`)
+  })
+}
+
+/** The paths of the calls a session made in a turn, by call id. */
+function callPaths(records: readonly SessionRecord[], turn: number): Map<string, { readonly name: string; readonly args: Record<string, unknown> }> {
+  const out = new Map<string, { name: string; args: Record<string, unknown> }>()
+  for (const record of records) {
+    if (record.type !== 'assistant.message' || record.turn !== turn) continue
+    for (const call of record.toolCalls ?? []) out.set(call.id, { name: call.name, args: args(call) })
+  }
+  return out
+}
+
+/**
+ * Pure (organization redo): what went wrong between the parts of a task,
+ * from its runs and their sessions' records. Counted by the host, never
+ * from what a model says: files two parts both brought in (`overlap`),
+ * merge conflicts, reads of a file another part of the task wrote that
+ * found nothing (`missing`: the handoff did not carry it), files a thread
+ * brought in outside its `owns` (`outside`), messages between threads, and
+ * claims or messages the host refused.
+ */
+export function collaborationEvents(runs: readonly CollaborationRun[], children: ReadonlyMap<string, readonly SessionRecord[]> | undefined): CollaborationEvents {
+  const byFile = new Map<string, Set<string>>()
+  for (const run of runs) for (const file of run.files) byFile.set(file, (byFile.get(file) ?? new Set()).add(run.name))
+  const overlap = [...byFile.values()].filter(names => names.size >= 2).length
+  let missing = 0
+  let outside = 0
+  let messages = 0
+  let refused = 0
+  const outsideSeen = new Set<string>()
+  for (const run of runs) {
+    const records = children?.get(run.childSessionId) ?? []
+    const start = records[0]
+    const owns = start?.type === 'session.start' ? start.thread?.owns : undefined
+    if (owns !== undefined && owns.length > 0) {
+      for (const file of run.files) {
+        const key = `${run.name}:${file}`
+        if (!withinOwns(file, owns) && !outsideSeen.has(key)) {
+          outsideSeen.add(key)
+          outside += 1
+        }
+      }
+    }
+    const others = new Set(runs.filter(other => other.name !== run.name).flatMap(other => other.files))
+    const calls = callPaths(records, run.childTurn)
+    for (const call of calls.values()) if (call.name === 'message_peer') messages += 1
+    for (const record of records) {
+      if (record.type !== 'tool.result' || record.turn !== run.childTurn || !record.isError) continue
+      if ((record.name === 'post_board' || record.name === 'message_peer') && record.error?.code === 'tool/denied') refused += 1
+      if (record.name !== 'read_file' || !/ENOENT|no such file|does not exist|not found/i.test(record.content)) continue
+      const path = calls.get(record.toolCallId)?.args.path
+      if (typeof path === 'string' && [...others].some(file => samePath(path, file))) missing += 1
+    }
+  }
+  return { overlap, conflicts: runs.reduce((sum, run) => sum + run.conflicts, 0), missing, outside, messages, refused }
+}
+
 interface MemberRun {
   readonly name: string
   readonly thread: boolean
@@ -152,6 +233,7 @@ interface MemberRun {
   readonly files: readonly string[]
   /** Files it wrote whole (for judging whether it redid another part's work). */
   readonly whole: readonly string[]
+  readonly conflicts: number
 }
 
 /**
@@ -210,6 +292,7 @@ export function buildOrganizationProfile(input: ProfileInput): OrganizationProfi
       failures: (result.status === 'completed' ? 0 : 1) + (result.denied?.length ?? 0) + (result.merge?.conflicts.length ?? 0) + childErrors,
       files,
       whole: wholeWrites(child, record.childTurn).map(write => write.path),
+      conflicts: result.merge?.conflicts.length ?? 0,
     })
   }
 
@@ -292,7 +375,8 @@ export function buildOrganizationProfile(input: ProfileInput): OrganizationProfi
   })
   // Threads (coordinator step two) may end after the turn: the task lasts until the last of them.
   const taskMs = Math.max(turnMs, ...runs.map(run => run.end - turnStart))
-  return { usd: round(input.usd, 6), ms: Math.round(taskMs), tokens: parts.reduce((sum, part) => sum + part.tokens, 0), parts }
+  const events = collaborationEvents(runs, input.children)
+  return { usd: round(input.usd, 6), ms: Math.round(taskMs), tokens: parts.reduce((sum, part) => sum + part.tokens, 0), parts, events }
 }
 
 /** Pure: thread runs (coordinator step two) a turn started. */

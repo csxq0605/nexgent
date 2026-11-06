@@ -16,6 +16,7 @@ type FieldKind =
   | 'boolean'
   | 'version'
   | 'stringArray'
+  | 'objectArray'
   | 'object'
   | 'sandboxMode'
   | 'goalStatus'
@@ -51,6 +52,8 @@ export const METHOD_SPECS: Readonly<Record<SdkMethodName, MethodSpec>> = {
   'sessions.create': { projectId: id, title: { kind: 'string', optional: true }, sandboxMode: { kind: 'sandboxMode', optional: true }, plan: { kind: 'boolean', optional: true } },
   'sessions.coordinator': { projectId: id },
   'threads.list': session,
+  'threads.start': { ...session, title: { kind: 'nonEmptyString' }, task: { kind: 'nonEmptyString' }, materialIds: { kind: 'stringArray', optional: true }, owns: { kind: 'stringArray', optional: true } },
+  'threads.board': session,
   'sessions.open': session,
   'sessions.close': session,
   'sessions.export': { ...session, outDir: { kind: 'absolutePath' } },
@@ -60,7 +63,7 @@ export const METHOD_SPECS: Readonly<Record<SdkMethodName, MethodSpec>> = {
   'files.list': project,
   'dialogs.pickDirectory': {},
   'dialogs.pickFiles': {},
-  'turns.send': { ...session, text: { kind: 'string' }, materialIds: { kind: 'stringArray', optional: true } },
+  'turns.send': { ...session, text: { kind: 'string' }, materialIds: { kind: 'stringArray', optional: true }, threads: { kind: 'objectArray', optional: true }, exactThreads: { kind: 'boolean', optional: true } },
   'turns.cancel': session,
   'approvals.respond': { ...session, decision: { kind: 'approvalDecision' } },
   'materials.add': { projectId: id, sourcePath: { kind: 'absolutePath' }, sessionId: { kind: 'nonEmptyString', optional: true } },
@@ -134,6 +137,8 @@ function checkField(kind: FieldKind, value: unknown): boolean {
       return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
     case 'stringArray':
       return Array.isArray(value) && value.every((item) => typeof item === 'string' && item.length > 0)
+    case 'objectArray':
+      return Array.isArray(value) && value.every(isPlainObject)
     case 'object':
       return isPlainObject(value)
     case 'sandboxMode':

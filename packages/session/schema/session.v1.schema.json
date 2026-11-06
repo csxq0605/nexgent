@@ -465,6 +465,15 @@
         },
         "title": {
           "$ref": "#/$defs/nonEmptyString"
+        },
+        "origin": {
+          "const": "user"
+        },
+        "owns": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/nonEmptyString"
+          }
         }
       }
     },
@@ -1510,6 +1519,64 @@
                       "minimum": 0
                     }
                   }
+                }
+              }
+            },
+            "collaboration": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "mode",
+                "handoff",
+                "overlap"
+              ],
+              "properties": {
+                "mode": {
+                  "enum": [
+                    "central",
+                    "hybrid"
+                  ]
+                },
+                "handoff": {
+                  "enum": [
+                    "summary",
+                    "manifest"
+                  ]
+                },
+                "overlap": {
+                  "enum": [
+                    "parallel",
+                    "sequence"
+                  ]
+                }
+              }
+            },
+            "trial": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "status",
+                "variable",
+                "value"
+              ],
+              "properties": {
+                "status": {
+                  "enum": [
+                    "trying",
+                    "kept",
+                    "reverted",
+                    "inconclusive"
+                  ]
+                },
+                "variable": {
+                  "enum": [
+                    "handoff",
+                    "overlap"
+                  ]
+                },
+                "value": {
+                  "type": "string",
+                  "minLength": 1
                 }
               }
             }

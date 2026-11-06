@@ -36,10 +36,16 @@
  *
  * - Coordinator: every recorded team run carries an organization profile
  *   (what each part cost, how long it ran, failures, idle wait, wasted
- *   work). Recording it reflects on it (`reflection.ts`): the change the
- *   class is trying gets its verdict, and the hottest part of the run gets
- *   one new change, which the next similar team tasks are given
- *   ({@link coordinatorAdvice}).
+ *   work) and its collaboration events (overlapping files, conflicts,
+ *   missed handoffs, files outside a thread's part, messages between
+ *   threads).
+ * - Organization redo: coordinator runs split among threads are judged by
+ *   those events (`collaboration.ts`): when they keep happening, one
+ *   collaboration variable is tried on the next coordinator tasks (the host
+ *   enforces it), and kept or reverted by whether the events stop. Lines
+ *   `trial` and `trial-verdict`. The older `change` / `verdict` lines (one
+ *   sentence added to the next similar task's prompt) are still read and no
+ *   longer written or given to tasks.
  *
  * Nothing here depends on the kind of task.
  */
@@ -47,11 +53,10 @@ import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import type { OrganizationProfile, OrganizationChange, OrganizationChangeAction, OrganizationChangeVerdict, OrganizationClassSummary, OrganizationLevel, OrganizationMemory, OrganizationName, OrganizationRole, OrganizationRun, OrganizationSuggestion } from '@nexgent/kernel'
+import type { CollaborationMode, CollaborationTrial, CollaborationVerdict, OrganizationProfile, OrganizationChange, OrganizationChangeVerdict, OrganizationClassSummary, OrganizationLevel, OrganizationMemory, OrganizationName, OrganizationRole, OrganizationRun, OrganizationSuggestion } from '@nexgent/kernel'
 import { jaccard } from '../handbook/tokens.js'
 import { similarityKey } from '../handbook/tokens.js'
-import { changeNote, MAX_KEPT_CHANGES, reflectOnRun, sinceStart, withModelChoice, type ChangeState, type ReflectedRun } from './reflection.js'
-import type { OrganizationReflector } from './model-reflection.js'
+import { collaborationFor, judgeTrial, newTrial, trialNote, type TrialRun, type TrialState } from './collaboration.js'
 
 /** Overlap a task needs with a recorded one to join its class. */
 export const ORGANIZATION_CLASS_MIN = 0.25
@@ -88,6 +93,10 @@ export type OrganizationLogLine =
   | { readonly type: 'change'; readonly change: OrganizationChange; readonly at: string }
   /** Coordinator: the verdict on a change. */
   | { readonly type: 'verdict'; readonly classId: string; readonly changeId: string; readonly verdict: OrganizationChangeVerdict; readonly at: string }
+  /** Organization redo: a collaboration trial starts (the next coordinator tasks run with its value). */
+  | { readonly type: 'trial'; readonly trial: CollaborationTrial; readonly at: string }
+  /** Organization redo: the verdict on a collaboration trial. */
+  | { readonly type: 'trial-verdict'; readonly trialId: string; readonly verdict: CollaborationVerdict; readonly at: string }
   /**
    * Coordinator step two: the full profile of a run whose threads have all ended (replaces the run's profile and cost, ends its `waiting`).
    * `completed: false`: a thread run of the turn did not complete, so neither did the run.
@@ -112,7 +121,7 @@ export function foldOrganizationLog(lines: readonly OrganizationLogLine[]): Fold
       const { type: _type, ...run } = line
       latest.set(run.sessionId, runs.length)
       runs.push({ ...run, seq, reworked: false })
-    } else if (line.type === 'change' || line.type === 'verdict') {
+    } else if (line.type === 'change' || line.type === 'verdict' || line.type === 'trial' || line.type === 'trial-verdict') {
       continue
     } else if (line.type === 'profile') {
       const index = runs.findIndex(run => run.sessionId === line.sessionId && run.turn === line.turn)
@@ -131,34 +140,33 @@ export function foldOrganizationLog(lines: readonly OrganizationLogLine[]): Fold
   return runs
 }
 
-/** Pure: each class's changes in order, with their verdicts. */
-export function foldChanges(lines: readonly OrganizationLogLine[]): Map<string, ChangeState[]> {
-  const out = new Map<string, ChangeState[]>()
+/** Pure: the collaboration trials in order, with their verdicts. */
+export function foldTrials(lines: readonly OrganizationLogLine[]): TrialState[] {
+  const out: TrialState[] = []
   for (const [seq, line] of lines.entries()) {
-    if (line.type === 'change') out.set(line.change.classId, [...(out.get(line.change.classId) ?? []), { change: line.change, seq }])
-    if (line.type === 'verdict') {
-      const states = out.get(line.classId) ?? []
-      const index = states.findIndex(state => state.change.id === line.changeId && state.verdict === undefined)
-      if (index >= 0) states[index] = { ...states[index]!, verdict: { verdict: line.verdict, seq } }
+    if (line.type === 'trial') out.push({ trial: line.trial, seq })
+    if (line.type === 'trial-verdict') {
+      const index = out.findIndex(state => state.trial.id === line.trialId && state.verdict === undefined)
+      if (index >= 0) out[index] = { ...out[index]!, verdict: { verdict: line.verdict, seq } }
     }
   }
   return out
 }
 
-/** Pure: a folded run as reflection reads it. */
-export function reflectedRun(run: FoldedRun): ReflectedRun {
+/** Pure: a folded run as the collaboration trials read it. */
+export function trialRun(run: FoldedRun): TrialRun {
+  const profile = run.waiting === true ? undefined : run.profile
   return {
     id: run.id,
     seq: run.seq ?? 0,
-    decision: run.decision,
-    usd: run.usd,
-    good: wentWell(run),
-    sound: wentWell({ ...run, corrections: 0 }),
-    ...(run.organization === undefined ? {} : { organization: run.organization }),
-    // A run still waiting for its threads has no complete profile yet.
-    ...(run.profile === undefined || run.waiting === true ? {} : { profile: run.profile }),
-    ...(run.change === undefined ? {} : { change: run.change }),
     ...(run.level === undefined ? {} : { level: run.level }),
+    parts: profile?.parts.filter(part => part.kind !== 'coordinator').length ?? 0,
+    ...(profile?.events === undefined ? {} : { events: profile.events }),
+    ...(run.collaboration === undefined ? {} : { collaboration: run.collaboration }),
+    ...(run.trial === undefined ? {} : { trial: run.trial }),
+    sound: wentWell({ ...run, corrections: 0 }),
+    usd: run.usd,
+    ...(run.waiting === true ? { waiting: true } : {}),
   }
 }
 
@@ -283,8 +291,13 @@ export function projectClass(projectRoot: string | undefined, runs: readonly Fol
   return latest === undefined ? undefined : classByTraits(latest.traits, runs)
 }
 
-/** Pure: what a task of `key` should do, given every recorded run (`projectRoot`: see {@link projectClass}). */
-export function suggestOrganization(key: readonly string[], runs: readonly FoldedRun[], random: () => number, changes: ReadonlyMap<string, readonly ChangeState[]> = new Map(), projectRoot?: string): OrganizationSuggestion {
+/**
+ * Pure: what a task of `key` should do, given every recorded run
+ * (`projectRoot`: see {@link projectClass}). `collaboration` (coordinator
+ * level): the trials so far and the project's mode; a team task gets the
+ * arrangement its threads work with.
+ */
+export function suggestOrganization(key: readonly string[], runs: readonly FoldedRun[], random: () => number, projectRoot?: string, collaboration?: { readonly states: readonly TrialState[]; readonly mode: CollaborationMode }): OrganizationSuggestion {
   const classId = classFor(key, runs) ?? projectClass(projectRoot, runs) ?? randomUUID()
   const mine = runs.filter(run => run.classId === classId)
   const verdict = classVerdict(mine)
@@ -297,20 +310,20 @@ export function suggestOrganization(key: readonly string[], runs: readonly Folde
     runs: mine.length,
     decision,
     control,
-    ...(decision === 'team' ? { organization: pickOrganization(mine.filter(run => run.decision === 'team'), random), ...coordinatorAdvice(changes.get(classId) ?? [], mine) } : {}),
+    ...(decision === 'team' ? { organization: pickOrganization(mine.filter(run => run.decision === 'team'), random) } : {}),
+    ...(decision === 'team' && collaboration !== undefined ? collaborationAdvice(collaboration.states, runs, collaboration.mode) : {}),
   }
 }
 
-/** Pure: the change a team task of a class tries, the changes it kept, and the team card's line. */
-export function coordinatorAdvice(changes: readonly ChangeState[], runs: readonly FoldedRun[]): Pick<OrganizationSuggestion, 'change' | 'kept' | 'note'> {
-  const active = changes.find(state => state.verdict === undefined)?.change
-  const kept = changes.filter(state => state.verdict?.verdict === 'kept').map(state => state.change).reverse().slice(0, MAX_KEPT_CHANGES)
-  const note = changeNote(changes, runs.map(reflectedRun))
-  return { ...(active === undefined ? {} : { change: active }), ...(kept.length === 0 ? {} : { kept }), ...(note === undefined ? {} : { note }) }
+/** Pure: how a coordinator task's threads work together: the kept arrangement, the trial going on, and the line about it. */
+export function collaborationAdvice(states: readonly TrialState[], runs: readonly FoldedRun[], mode: CollaborationMode): Pick<OrganizationSuggestion, 'collaboration' | 'trial' | 'trialNote'> {
+  const { collaboration, trial } = collaborationFor(states, mode)
+  const note = trialNote(states, runs.filter(run => run.level === 'coordinator').map(trialRun))
+  return { collaboration, ...(trial === undefined ? {} : { trial: trial.id }), ...(note === undefined ? {} : { trialNote: note }) }
 }
 
 /** Pure: one line per class with at least two runs, most runs first. */
-export function summarizeOrganizations(runs: readonly FoldedRun[], changes: ReadonlyMap<string, readonly ChangeState[]> = new Map()): OrganizationClassSummary[] {
+export function summarizeOrganizations(runs: readonly FoldedRun[]): OrganizationClassSummary[] {
   const classes = new Map<string, FoldedRun[]>()
   for (const run of runs) classes.set(run.classId, [...(classes.get(run.classId) ?? []), run])
   const out: OrganizationClassSummary[] = []
@@ -325,10 +338,6 @@ export function summarizeOrganizations(runs: readonly FoldedRun[], changes: Read
     for (const run of members) if (run.organization !== undefined) names.set(run.organization.name, (names.get(run.organization.name) ?? 0) + 1)
     const organization = [...names.entries()].sort((l, r) => r[1] - l[1])[0]?.[0]
     const soloUsd = solo.n === 0 ? 0 : solo.usd / solo.n
-    const since = sinceStart(members.map(reflectedRun))
-    const states = changes.get(classId) ?? []
-    const kept = states.filter(state => state.verdict?.verdict === 'kept').length
-    const reverted = states.filter(state => state.verdict?.verdict === 'reverted').length
     out.push({
       classId,
       ...(members[0]!.level === undefined ? {} : { level: members[0]!.level }),
@@ -340,9 +349,6 @@ export function summarizeOrganizations(runs: readonly FoldedRun[], changes: Read
       ...(solo.n === 0 ? {} : { soloGood: solo.good / solo.n }),
       ...(team.n === 0 ? {} : { teamGood: team.good / team.n }),
       ...(solo.n > 0 && team.n > 0 && soloUsd > 0 ? { costChange: team.usd / team.n / soloUsd - 1 } : {}),
-      ...(since === undefined ? {} : { sinceStart: since }),
-      ...(kept === 0 ? {} : { changesKept: kept }),
-      ...(reverted === 0 ? {} : { changesReverted: reverted }),
     })
   }
   return out.sort((l, r) => r.soloRuns + r.teamRuns - (l.soloRuns + l.teamRuns))
@@ -353,24 +359,25 @@ export class OrganizationLibrary implements OrganizationMemory {
   readonly #file: string
   readonly #directory: string
   readonly #now: () => Date
-  readonly #reflector: OrganizationReflector | undefined
-  /** Model reflections still running (their change lines are not written yet). */
-  readonly #pending = new Set<Promise<void>>()
+  /** Writes run one at a time, so a judgement reads every line written before it. */
+  #queue: Promise<void> = Promise.resolve()
 
-  constructor(directory: string, options: { readonly now?: () => Date; readonly reflector?: OrganizationReflector } = {}) {
+  constructor(directory: string, options: { readonly now?: () => Date } = {}) {
     this.#directory = directory
     this.#file = join(directory, 'runs.jsonl')
     this.#now = options.now ?? (() => new Date())
-    this.#reflector = options.reflector
   }
 
-  /**
-   * Coordinator step three: settles once the model reflections started so
-   * far have written their change. Suggesting, recording and profiling wait
-   * for it, so the next task sees the change.
-   */
+  /** Settles once the writes started so far have finished. */
   async idle(): Promise<void> {
-    while (this.#pending.size > 0) await Promise.allSettled([...this.#pending])
+    await this.#queue
+  }
+
+  /** Run `task` after the writes before it. */
+  #serial<T>(task: () => Promise<T>): Promise<T> {
+    const next = this.#queue.then(task)
+    this.#queue = next.then(() => undefined, () => undefined)
+    return next
   }
 
   /** Every line; unreadable lines are skipped. */
@@ -386,7 +393,8 @@ export class OrganizationLibrary implements OrganizationMemory {
       if (line.trim() === '') continue
       try {
         const value = JSON.parse(line) as OrganizationLogLine
-        if (value.type === 'run' || value.type === 'rework' || value.type === 'review' || value.type === 'change' || value.type === 'verdict' || value.type === 'profile') out.push(value)
+        if (value.type === 'run' || value.type === 'rework' || value.type === 'review' || value.type === 'change' || value.type === 'verdict' || value.type === 'profile'
+          || value.type === 'trial' || value.type === 'trial-verdict') out.push(value)
       } catch {
         // a torn last line
       }
@@ -398,16 +406,17 @@ export class OrganizationLibrary implements OrganizationMemory {
     return foldOrganizationLog(await this.lines())
   }
 
-  async suggest(input: { readonly text: string; readonly random?: () => number; readonly projectRoot?: string; readonly level?: OrganizationLevel }): Promise<OrganizationSuggestion> {
+  async suggest(input: { readonly text: string; readonly random?: () => number; readonly projectRoot?: string; readonly level?: OrganizationLevel; readonly collaboration?: CollaborationMode }): Promise<OrganizationSuggestion> {
     await this.idle()
     const lines = await this.lines()
     const runs = foldOrganizationLog(lines).filter(run => run.level === input.level)
-    return suggestOrganization(similarityKey(input.text), runs, input.random ?? Math.random, foldChanges(lines), input.projectRoot)
+    const collaboration = input.level === 'coordinator' ? { states: foldTrials(lines), mode: input.collaboration ?? 'central' } : undefined
+    return suggestOrganization(similarityKey(input.text), runs, input.random ?? Math.random, input.projectRoot, collaboration)
   }
 
-  /** Coordinator: each class's changes with their verdicts. */
-  async changes(): Promise<Map<string, ChangeState[]>> {
-    return foldChanges(await this.lines())
+  /** Organization redo: the collaboration trials with their verdicts. */
+  async trials(): Promise<TrialState[]> {
+    return foldTrials(await this.lines())
   }
 
   async #append(line: OrganizationLogLine): Promise<void> {
@@ -415,23 +424,28 @@ export class OrganizationLibrary implements OrganizationMemory {
     await appendFile(this.#file, `${JSON.stringify(line)}\n`, 'utf8')
   }
 
-  async record(run: Omit<OrganizationRun, 'id' | 'at'>): Promise<void> {
-    await this.idle()
-    // Coordinator-level runs (the split into threads) and member-level runs are classed apart.
-    const runs = (await this.runs()).filter(other => other.level === run.level)
-    // Words matched no class: join the class of the run that did the most similar things.
-    const classId = runs.some(other => other.classId === run.classId) ? run.classId : classByTraits(run.traits, runs) ?? run.classId
-    await this.#append({ type: 'run', id: randomUUID(), at: this.#now().toISOString(), ...run, classId })
-    if (run.waiting !== true) await this.#reflect(classId)
+  record(run: Omit<OrganizationRun, 'id' | 'at'>): Promise<void> {
+    return this.#serial(async () => {
+      // Coordinator-level runs (the split into threads) and member-level runs are classed apart.
+      const runs = (await this.runs()).filter(other => other.level === run.level)
+      // Words matched no class: join the class of the run that did the most similar things.
+      const classId = runs.some(other => other.classId === run.classId) ? run.classId : classByTraits(run.traits, runs) ?? run.classId
+      const id = randomUUID()
+      await this.#append({ type: 'run', id, at: this.#now().toISOString(), ...run, classId })
+      if (run.waiting !== true && run.level === 'coordinator') await this.#judgeCollaboration(id)
+    })
   }
 
   /**
    * Coordinator step two: a run's full profile once its threads have ended;
-   * the threads' cost (`addUsd`) joins the run's cost. Reflects on its class
-   * up to that run. A run that is not waiting for threads is left alone.
+   * the threads' cost (`addUsd`) joins the run's cost. A coordinator run's
+   * collaboration is then judged. A run that is not waiting for threads is left alone.
    */
-  async noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
-    await this.idle()
+  noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
+    return this.#serial(() => this.#noteProfile(input))
+  }
+
+  async #noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
     const run = (await this.runs()).find(item => item.sessionId === input.sessionId && item.turn === input.turn)
     if (run === undefined || run.waiting !== true) return
     const usd = Math.round((run.usd + Math.max(0, input.addUsd ?? 0)) * 1e6) / 1e6
@@ -447,49 +461,29 @@ export class OrganizationLibrary implements OrganizationMemory {
       })),
     }
     await this.#append({ type: 'profile', sessionId: input.sessionId, turn: input.turn, profile, ...(input.completed === false ? { completed: false } : {}), at: this.#now().toISOString() })
-    await this.#reflect(run.classId, run.id)
+    if (run.level === 'coordinator') await this.#judgeCollaboration(run.id)
   }
 
   /**
-   * Coordinator: reflect on the class's latest run, or on run `upTo`: the
-   * verdict on the change under trial, then one new change for the hottest
-   * part. Step three: with a reflector, a model picks that change among the
-   * fitting ones in the background (the turn does not wait for it); the rule's
-   * pick stands when it gives no valid choice.
+   * Organization redo: judge the collaboration trial going on with the runs
+   * so far; with none going on, start one when the run `runId` (just
+   * settled) calls for it.
    */
-  async #reflect(classId: string, upTo?: string): Promise<void> {
+  async #judgeCollaboration(runId: string): Promise<void> {
     const lines = await this.lines()
-    const all = foldOrganizationLog(lines).filter(run => run.classId === classId)
-    const end = upTo === undefined ? all.length : all.findIndex(run => run.id === upTo) + 1
-    const runs = all.slice(0, end)
-    const reflection = reflectOnRun(classId, runs.map(reflectedRun), foldChanges(lines).get(classId) ?? [])
+    const runs = foldOrganizationLog(lines).filter(run => run.level === 'coordinator').map(trialRun)
+    const states = foldTrials(lines)
     const at = this.#now().toISOString()
-    if (reflection.verdict !== undefined) await this.#append({ type: 'verdict', classId, ...reflection.verdict, at })
-    if (reflection.change === undefined) return
-    const run = runs.at(-1)
-    // With one fitting change there is nothing to choose.
-    if (this.#reflector === undefined || run?.profile === undefined || (reflection.allowed ?? []).length < 2) {
-      await this.#append({ type: 'change', change: reflection.change, at })
+    const active = states.find(state => state.verdict === undefined)
+    if (active !== undefined) {
+      const verdict = judgeTrial(active.trial, runs)
+      if (verdict === undefined) return
+      await this.#append({ type: 'trial-verdict', trialId: active.trial.id, verdict, at })
+      // The run that decided the trial ran under it: it does not start the next one.
       return
     }
-    const task = this.#choose(this.#reflector, reflection.change, reflection.allowed ?? [], run)
-    this.#pending.add(task)
-    void task.finally(() => this.#pending.delete(task))
-  }
-
-  /** Ask the model for the change, then write it (the rule's when the answer is not valid). */
-  async #choose(reflector: OrganizationReflector, rule: OrganizationChange, allowed: readonly OrganizationChangeAction[], run: FoldedRun): Promise<void> {
-    const choice = await reflector({
-      sessionId: run.sessionId,
-      turn: run.turn,
-      hotspot: rule.target,
-      profile: run.profile!,
-      ...(run.organization === undefined ? {} : { organization: run.organization }),
-      allowed,
-    }).catch(() => undefined)
-    const redoneBy = run.profile?.parts.find(part => part.name === rule.target.part)?.redoneBy
-    const change = withModelChoice(rule, allowed, choice, redoneBy, reflectedRun(run)) ?? rule
-    await this.#append({ type: 'change', change, at: this.#now().toISOString() }).catch(() => undefined)
+    const trial = newTrial(runs, states, runId)
+    if (trial !== undefined) await this.#append({ type: 'trial', trial, at })
   }
 
   async noteReverts(input: { readonly projectRoot: string }): Promise<void> {
@@ -511,7 +505,6 @@ export class OrganizationLibrary implements OrganizationMemory {
   }
 
   async summary(): Promise<OrganizationClassSummary[]> {
-    const lines = await this.lines()
-    return summarizeOrganizations(foldOrganizationLog(lines), foldChanges(lines))
+    return summarizeOrganizations(foldOrganizationLog(await this.lines()))
   }
 }

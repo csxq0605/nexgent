@@ -223,8 +223,6 @@ describe('organizations on the capabilities page (new direction step 3)', () => 
     expect(organizationLead([{ ...base, verdict: 'solo-better', soloGood: 0.8, teamGood: 0.6, costChange: 1 }]))
       .toBe('同类任务单独做更好，顺利率比组队高 20%，花费少 50%。')
     expect(organizationLead([{ ...base, verdict: 'comparing' }])).toBe('同类任务还在比较组队和单独做（已做 17 次）。')
-    expect(organizationLead([{ ...base, verdict: 'comparing', sinceStart: { costChange: -0.3, timeChange: -0.2, qualityHeld: true } }]))
-      .toBe('同类任务还在比较组队和单独做（已做 17 次）。组织调整后，比一开始花费少 30%、快 20%，质量没变。')
   })
 
   it('says on the team card in one line what changed from the last similar task, and why', async () => {
