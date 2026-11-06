@@ -161,7 +161,7 @@ export interface OrganizationMemory {
    * a thread run of the turn did not complete, so the run did not either.
    * Only a run recorded as `waiting` takes it.
    */
-  noteProfile?(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void>
+  noteProfile?(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean | 'unknown' }): Promise<void>
 }
 
 /** What {@link CapabilityHost.attach} gets for one opened agent. */

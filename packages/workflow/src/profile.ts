@@ -153,6 +153,9 @@ export interface CollaborationRun {
   readonly files: readonly string[]
   /** Merge conflicts of the run. */
   readonly conflicts: number
+  /** When the run started and ended (ms since epoch): only runs that were going at the same time overlap. */
+  readonly start: number
+  readonly end: number
 }
 
 /** Pure: whether `file` is one of `owns` or inside one of them (project-relative paths). */
@@ -174,6 +177,34 @@ function callPaths(records: readonly SessionRecord[], turn: number): Map<string,
   return out
 }
 
+/** Files a session read at least twice in a turn (same range, successful reads) with no write of them in between (each file once). */
+function rereads(records: readonly SessionRecord[], turn: number): number {
+  const failed = new Set<string>()
+  for (const record of records) if (record.type === 'tool.result' && record.turn === turn && record.isError) failed.add(record.toolCallId)
+  const reads = new Map<string, Set<string>>()
+  const again = new Set<string>()
+  for (const record of records) {
+    if (record.type !== 'assistant.message' || record.turn !== turn) continue
+    for (const call of record.toolCalls ?? []) {
+      const callArgs = args(call)
+      const raw = callArgs.path
+      if (typeof raw !== 'string' || raw === '') continue
+      const path = raw.replace(/\\/g, '/').replace(/^\.\//, '')
+      if (call.name === 'read_file') {
+        if (failed.has(call.id)) continue
+        const range = JSON.stringify([callArgs.offset ?? null, callArgs.limit ?? null])
+        const seen = reads.get(path) ?? new Set<string>()
+        if (seen.has(range)) again.add(path)
+        seen.add(range)
+        reads.set(path, seen)
+      } else if (call.name === 'write_file' || call.name === 'str_replace') {
+        reads.delete(path)
+      }
+    }
+  }
+  return again.size
+}
+
 /**
  * Pure (organization redo): what went wrong between the parts of a task,
  * from its runs and their sessions' records. Counted by the host, never
@@ -181,16 +212,27 @@ function callPaths(records: readonly SessionRecord[], turn: number): Map<string,
  * merge conflicts, reads of a file another part of the task wrote that
  * found nothing (`missing`: the handoff did not carry it), files a thread
  * brought in outside its `owns` (`outside`), messages between threads, and
- * claims or messages the host refused.
+ * claims or messages the host refused (`details.collab` `claim` or `sequence`).
+ * Files two parts brought in only count when the parts ran at the same time.
+ * Also: files read again with no write between (`reread`), a thread
+ * changing its team again (`regroups`), and writes the host capped (`capped`:
+ * `limit`, `hops`, `wakes`) or refused as a waiting cycle (`cycles`).
+ * `unanswered`, `idle` and `checkFailed` come from the collaboration log
+ * and are merged in by the host.
  */
 export function collaborationEvents(runs: readonly CollaborationRun[], children: ReadonlyMap<string, readonly SessionRecord[]> | undefined): CollaborationEvents {
-  const byFile = new Map<string, Set<string>>()
-  for (const run of runs) for (const file of run.files) byFile.set(file, (byFile.get(file) ?? new Set()).add(run.name))
-  const overlap = [...byFile.values()].filter(names => names.size >= 2).length
+  const byFile = new Map<string, CollaborationRun[]>()
+  for (const run of runs) for (const file of run.files) byFile.set(file, [...(byFile.get(file) ?? []), run])
+  // A file counts when two parts that ran at the same time both brought it in.
+  const overlap = [...byFile.values()].filter(owners => owners.some((a, i) => owners.slice(i + 1).some(b => a.name !== b.name && a.start < b.end && b.start < a.end))).length
   let missing = 0
   let outside = 0
   let messages = 0
   let refused = 0
+  let reread = 0
+  let regroups = 0
+  let capped = 0
+  let cycles = 0
   const outsideSeen = new Set<string>()
   for (const run of runs) {
     const records = children?.get(run.childSessionId) ?? []
@@ -208,15 +250,36 @@ export function collaborationEvents(runs: readonly CollaborationRun[], children:
     const others = new Set(runs.filter(other => other.name !== run.name).flatMap(other => other.files))
     const calls = callPaths(records, run.childTurn)
     for (const call of calls.values()) if (call.name === 'message_peer') messages += 1
+    reread += rereads(records, run.childTurn)
+    regroups += Math.max(0, records.filter(record => record.type === 'organization' && record.turn === run.childTurn).length - 1)
     for (const record of records) {
       if (record.type !== 'tool.result' || record.turn !== run.childTurn || !record.isError) continue
-      if ((record.name === 'post_collab' || record.name === 'message_peer') && record.error?.code === 'tool/denied') refused += 1
+      const collab = record.error?.details?.collab
+      if (collab === 'claim' || collab === 'sequence') refused += 1
+      else if (collab === 'limit' || collab === 'hops' || collab === 'wakes') capped += 1
+      else if (collab === 'cycle') cycles += 1
+      else if (collab === undefined && (record.name === 'post_collab' || record.name === 'message_peer') && record.error?.code === 'tool/denied') refused += 1
       if (record.name !== 'read_file' || !/ENOENT|no such file|does not exist|not found/i.test(record.content)) continue
       const path = calls.get(record.toolCallId)?.args.path
       if (typeof path === 'string' && [...others].some(file => samePath(path, file))) missing += 1
     }
   }
-  return { overlap, conflicts: runs.reduce((sum, run) => sum + run.conflicts, 0), missing, outside, messages, refused }
+  return {
+    overlap, conflicts: runs.reduce((sum, run) => sum + run.conflicts, 0), missing, outside, messages, refused,
+    ...(reread > 0 ? { reread } : {}), ...(regroups > 0 ? { regroups } : {}), ...(capped > 0 ? { capped } : {}), ...(cycles > 0 ? { cycles } : {}),
+  }
+}
+
+/** When a child session's turn ran (its own turn.start and turn.end), else the coordinator's subagent record times, which can lag the child's real order. */
+function activeSpan(child: readonly SessionRecord[], turn: number, start: number, end: number): { readonly start: number; readonly end: number } {
+  const first = child.find(item => item.type === 'turn.start' && item.turn === turn)
+  const last = child.find(item => item.type === 'turn.end' && item.turn === turn)
+  return { start: first === undefined ? start : at(first), end: last === undefined ? end : at(last) }
+}
+
+/** Pure: whether two `owns` lists share a path (one inside the other). */
+function ownsTouch(left: readonly string[], right: readonly string[]): boolean {
+  return left.some(a => withinOwns(a, right)) || right.some(b => withinOwns(b, left))
 }
 
 interface MemberRun {
@@ -285,8 +348,7 @@ export function buildOrganizationProfile(input: ProfileInput): OrganizationProfi
       thread: start.executionForm === 'thread',
       childSessionId: record.childSessionId,
       childTurn: record.childTurn,
-      start: at(start),
-      end: at(record),
+      ...activeSpan(child, record.childTurn, at(start), at(record)),
       queuedMs: start.queuedMs ?? 0,
       usage: result.usage,
       failures: (result.status === 'completed' ? 0 : 1) + (result.denied?.length ?? 0) + (result.merge?.conflicts.length ?? 0) + childErrors,
@@ -376,7 +438,16 @@ export function buildOrganizationProfile(input: ProfileInput): OrganizationProfi
   // Threads (coordinator step two) may end after the turn: the task lasts until the last of them.
   const taskMs = Math.max(turnMs, ...runs.map(run => run.end - turnStart))
   const events = collaborationEvents(runs, input.children)
-  return { usd: round(input.usd, 6), ms: Math.round(taskMs), tokens: parts.reduce((sum, part) => sum + part.tokens, 0), parts, events }
+  // The threads' `owns`: any thread without one makes it `open`, any two that touch `overlap`, else `apart`.
+  const threadOwns = new Map<string, readonly string[]>()
+  for (const run of runs) {
+    if (!run.thread || threadOwns.has(run.name)) continue
+    const first = input.children?.get(run.childSessionId)?.[0]
+    threadOwns.set(run.name, first?.type === 'session.start' ? first.thread?.owns ?? [] : [])
+  }
+  const lists = [...threadOwns.values()]
+  const owns = lists.length < 2 ? undefined : lists.some(list => list.length === 0) ? 'open' as const : lists.some((a, i) => lists.slice(i + 1).some(b => ownsTouch(a, b))) ? 'overlap' as const : 'apart' as const
+  return { usd: round(input.usd, 6), ms: Math.round(taskMs), tokens: parts.reduce((sum, part) => sum + part.tokens, 0), parts, events, ...(owns === undefined ? {} : { owns }) }
 }
 
 /** Pure: thread runs (coordinator step two) a turn started. */

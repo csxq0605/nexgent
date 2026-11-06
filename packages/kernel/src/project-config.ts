@@ -10,6 +10,7 @@ import { assertLearningConfig } from './contracts/learning.js'
 import type { ApprovalGrant } from './contracts/approvals.js'
 import { EFFORT_LEVELS, type Effort } from './contracts/llm.js'
 import { SANDBOX_MODES, type SandboxMode, type WorkspaceLayout } from './contracts/workspace.js'
+import { THREAD_LIMITS } from './contracts/threads.js'
 import { readJsonFile, writeJsonFile } from './storage/json-file.js'
 
 /** A loaded project config: the resolved values plus what the file actually set. */
@@ -24,7 +25,7 @@ export interface LoadedProjectConfig {
 
 const KNOWN_FIELDS = new Set([
   'version', 'model', 'endpoint', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'approvals', 'extraReadRoots', 'learning',
-  'maxStepsPerTurn', 'checkRetries', 'checkCommands', 'collaboration',
+  'maxStepsPerTurn', 'checkRetries', 'checkCommands', 'collaboration', 'threads',
 ])
 
 function fail(path: string, message: string): never {
@@ -115,6 +116,13 @@ export function parseProjectConfig(value: unknown, path = 'config.json'): Loaded
   if (value.collaboration !== undefined) {
     if (!COLLABORATION_MODES.includes(value.collaboration as CollaborationMode)) fail(path, `collaboration must be one of ${COLLABORATION_MODES.join(', ')}`)
     input.collaboration = value.collaboration as CollaborationMode
+  }
+  if (value.threads !== undefined) {
+    const threads = value.threads as Record<string, unknown>
+    if (typeof threads !== 'object' || threads === null || Array.isArray(threads) || Object.keys(threads).some(key => key !== 'maxRunning')) fail(path, 'threads must be an object with only maxRunning')
+    const max = threads.maxRunning
+    if (max !== undefined && (typeof max !== 'number' || !Number.isInteger(max) || max < 1 || max > THREAD_LIMITS.maxRunningLimit)) fail(path, `threads.maxRunning must be an integer from 1 to ${THREAD_LIMITS.maxRunningLimit}`)
+    input.threads = max === undefined ? {} : { maxRunning: max }
   }
   if (value.learning !== undefined) {
     try {

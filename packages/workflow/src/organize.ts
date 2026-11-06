@@ -43,7 +43,9 @@ import {
   type OrganizationMemory,
   type OrganizationSuggestion,
   type SessionRecord,
+  COLLABORATION_EVENT_NAMES,
   type CollaborationConfig,
+  type CollaborationEvents,
   DEFAULT_COLLABORATION,
 } from '@nexgent/kernel'
 import { prepareArchitecture } from './architecture.js'
@@ -152,6 +154,13 @@ export interface DefaultOrganizerOptions {
   readonly costOf?: ProfileInput['costOf']
 }
 
+/** Pure: the non-zero collaboration events as one line, `events: overlap 1, conflicts 2` (empty when there are none). */
+export function renderEventCounts(events: CollaborationEvents | undefined): string {
+  if (events === undefined) return ''
+  const parts = COLLABORATION_EVENT_NAMES.filter(name => (events[name] ?? 0) > 0).map(name => `${name} ${events[name]}`)
+  return parts.length === 0 ? '' : `events: ${parts.join(', ')}`
+}
+
 /**
  * Organization redo: the coordinator's lines about how its threads work
  * together, for what the host enforces (generic: no example task).
@@ -164,6 +173,14 @@ export function collaborationLines(collaboration: CollaborationConfig | undefine
   }
   if (collaboration.handoff === 'changed') {
     lines.push('- Nexgent tells every thread of the task, as soon as it happens, which files each other thread brought into the project; you need not list them in briefs.')
+  }
+  if (collaboration.wake === 'named') {
+    lines.push('- A message from one thread to an idle thread wakes it: it starts its next turn (a limited number of times per task).')
+  }
+  if (collaboration.check === 'separate') {
+    lines.push('- When the threads have ended, Nexgent starts a thread that did none of the work to check the whole project; you need not start it.')
+  } else if (collaboration.check === 'merged') {
+    lines.push('- When two or more threads merged files, Nexgent has the thread that merged last check the whole project, so you need not start that check; with fewer, verify the result yourself.')
   }
   if (collaboration.mode === 'hybrid') {
     lines.push('- The threads also work together without you through the collaboration log: claims on files, notes, handoffs, blockers and messages to one thread, each delivered to the threads it concerns before their next step; they ask you mid-turn. '

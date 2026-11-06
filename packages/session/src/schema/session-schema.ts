@@ -44,7 +44,7 @@ const COLLABORATION_CONFIG: JsonObject = {
   type: 'object',
   additionalProperties: false,
   required: ['mode', 'handoff', 'overlap'],
-  properties: { mode: { enum: ['central', 'hybrid'] }, handoff: { enum: ['brief', 'changed'] }, overlap: { enum: ['parallel', 'sequence'] } },
+  properties: { mode: { enum: ['central', 'hybrid'] }, handoff: { enum: ['brief', 'changed'] }, overlap: { enum: ['parallel', 'sequence'] }, wake: { enum: ['coordinator', 'named'] }, check: { enum: ['merged', 'separate'] } },
 }
 
 /** Organization redo: the line about a collaboration trial (`CollaborationTrialNote`). */
@@ -52,7 +52,7 @@ const COLLABORATION_TRIAL_NOTE: JsonObject = {
   type: 'object',
   additionalProperties: false,
   required: ['status', 'variable', 'value'],
-  properties: { status: { enum: ['trying', 'kept', 'reverted', 'inconclusive'] }, variable: { enum: ['handoff', 'overlap'] }, value: { type: 'string', minLength: 1 } },
+  properties: { status: { enum: ['trying', 'kept', 'reverted', 'inconclusive'] }, variable: { enum: ['handoff', 'overlap', 'wake', 'check'] }, value: { type: 'string', minLength: 1 } },
 }
 
 /** Coordinator: the team card's line about the organization (`OrganizationChangeNote`). */
@@ -207,7 +207,7 @@ export const sessionRecordSchema: JsonObject = {
     memberName: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,31}$' },
     // 'team' only appears in member sessions written before the team tools were removed.
     memberExecutionForm: { enum: ['delegated', 'team', 'workflow', 'thread'] },
-    threadOrigin: closedObject({ coordinatorSessionId: ref('nonEmptyString'), title: ref('nonEmptyString'), origin: { const: 'user' }, owns: { type: 'array', items: ref('nonEmptyString') } }, ['coordinatorSessionId', 'title']),
+    threadOrigin: closedObject({ coordinatorSessionId: ref('nonEmptyString'), title: ref('nonEmptyString'), origin: { enum: ['user', 'plan'] }, owns: { type: 'array', items: ref('nonEmptyString') } }, ['coordinatorSessionId', 'title']),
     memberIdentity: closedObject(
       { name: ref('memberName'), executionForm: ref('memberExecutionForm'), preset: ref('nonEmptyString') },
       ['name', 'executionForm'],
@@ -373,7 +373,7 @@ export const sessionRecordSchema: JsonObject = {
       {
         turn,
         content: { type: 'string' },
-        source: { enum: ['user', 'inject', 'feedback', 'thread'] },
+        source: { enum: ['user', 'inject', 'feedback', 'thread', 'relay'] },
         materials: { type: 'array', items: ref('nonEmptyString') },
       },
       ['turn', 'content', 'source'],

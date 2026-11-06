@@ -28,22 +28,30 @@ export interface ThreadOrigin {
   readonly coordinatorSessionId: string
   /** Short name the coordinator (or the user) gave it (shown on its card and in the sidebar). */
   readonly title: string
-  /** Organization redo: the user started the thread themselves (absent: the coordinator did). */
-  readonly origin?: 'user'
+  /**
+   * Organization redo: `user`: the user started the thread themselves;
+   * `plan`: the coordinator started it because the user named it for the
+   * task (its title is the user's). Absent: the coordinator chose it.
+   */
+  readonly origin?: ThreadOriginKind
   /** Organization redo: the project paths (files or directories) the thread's part is given; it should change only these. */
   readonly owns?: readonly string[]
 }
 
+/** {@link ThreadOrigin.origin}. */
+export type ThreadOriginKind = 'user' | 'plan'
+
 /**
- * Where a thread stands: `running` (a turn is going on), `waiting` (its last
- * turn ended with a question or blocker for the user or the coordinator),
- * `done` (its last turn completed), `stopped` (cancelled, a cost cap, or the
- * process died) or `failed`.
+ * Where a thread stands: `queued` (its turn waits for one of the threads
+ * running at once to end; the host starts it then), `running` (a turn is
+ * going on), `waiting` (its last turn ended with a question or blocker for
+ * the user or the coordinator), `done` (its last turn completed), `stopped`
+ * (cancelled, a cost cap, or the process died) or `failed`.
  */
-export type ThreadStatus = 'running' | 'waiting' | 'done' | 'stopped' | 'failed'
+export type ThreadStatus = 'queued' | 'running' | 'waiting' | 'done' | 'stopped' | 'failed'
 
 /** Every thread status. */
-export const THREAD_STATUSES: readonly ThreadStatus[] = ['running', 'waiting', 'done', 'stopped', 'failed']
+export const THREAD_STATUSES: readonly ThreadStatus[] = ['queued', 'running', 'waiting', 'done', 'stopped', 'failed']
 
 /** A thread as the coordinator and the interface see it. */
 export interface ThreadInfo {
@@ -61,10 +69,12 @@ export interface ThreadInfo {
   readonly blocker?: string
   /** Coordinator step three: a tool call in the thread waits for the user to allow it. */
   readonly needsApproval?: true
-  /** Organization redo: the user started it ({@link ThreadOrigin.origin}). */
-  readonly origin?: 'user'
+  /** Organization redo: who started it ({@link ThreadOrigin.origin}). */
+  readonly origin?: ThreadOriginKind
   /** Organization redo: the paths its part is given ({@link ThreadOrigin.owns}). */
   readonly owns?: readonly string[]
+  /** Its copy of the project could not be made: it works in the project itself, unprotected from the other threads (D7). */
+  readonly isolated?: false
 }
 
 /** `read_thread`: a thread with its last reply and what its last turn changed. */
@@ -78,6 +88,8 @@ export interface ThreadView extends ThreadInfo {
   /** Files both it and the project changed; the project kept its version, the thread's is at `copy`. */
   readonly conflicts: readonly { readonly path: string; readonly copy?: string }[]
   readonly usage?: LLMUsage
+  /** With `steps` (D4): what its last turn did, one line per model step (tool calls and their outcome), the latest {@link THREAD_LIMITS.trajectorySteps}. */
+  readonly trajectory?: readonly string[]
 }
 
 /** Limits of the thread tools. */
@@ -107,7 +119,19 @@ export const THREAD_LIMITS = {
   /** Organization redo: collaboration log entries `read_collab` shows (the latest). */
   collabShown: 40,
   /** Organization redo: log entries delivered in full before one model request (the rest are counted). */
-  collabDelivered: 20,
+  collabDelivered: 12,
+  /** Organization redo: characters of one delivery (about 1000 tokens); entries beyond it are counted. */
+  collabDeliveredChars: 4_000,
+  /** Organization redo: how far a message may be passed on (a reply to a reply to a message is hop 3). */
+  maxHops: 2,
+  /** Organization redo: times a message may wake an idle thread in one task (collaboration `wake: named`). */
+  maxWakes: 4,
+  /** Organization redo: entries a log keeps before older tasks are moved to `<coordinator>.<n>.jsonl`. */
+  collabArchiveAt: 2_000,
+  /** D4: steps `read_thread` with `steps` shows (the latest). */
+  trajectorySteps: 30,
+  /** A5: the most threads a project may let run at once (`config.json` `threads.maxRunning`). */
+  maxRunningLimit: 8,
 } as const
 
 /** Where in the coordinator conversation a thread run is started from (its `subagent.start` goes there). */
@@ -117,6 +141,14 @@ export interface ThreadCaller {
   readonly turn: number
   /** The tool call starting the run. */
   readonly toolCallId?: string
+}
+
+/** Input of {@link ThreadHost.stop}. */
+export interface ThreadStopInput {
+  readonly coordinatorSessionId: string
+  readonly threadId: string
+  /** Why, in a few words; written to the collaboration log and the thread's own conversation. */
+  readonly reason?: string
 }
 
 /** Input of {@link ThreadHost.start}. */
@@ -139,8 +171,10 @@ export interface ThreadHost {
   start(input: ThreadStartInput): Promise<ThreadInfo>
   /** Send a message: it joins the thread's running turn, or starts its next turn in the background. */
   message(input: ThreadCaller & { readonly threadId: string; readonly text: string }): Promise<ThreadInfo>
-  read(input: { readonly coordinatorSessionId: string; readonly threadId: string }): Promise<ThreadView>
+  read(input: { readonly coordinatorSessionId: string; readonly threadId: string; readonly steps?: boolean }): Promise<ThreadView>
   list(input: { readonly coordinatorSessionId: string }): Promise<readonly ThreadInfo[]>
+  /** D9: stop a thread's running (or queued) turn; it stays stopped and does not wake the coordinator. */
+  stop(input: ThreadStopInput): Promise<ThreadInfo>
 }
 
 const threadId: JsonSchema = { type: 'string', minLength: 1, description: 'The thread id start_thread or list_threads gave.' }
@@ -181,13 +215,31 @@ export const MESSAGE_THREAD_TOOL: Step2ToolSpec = {
   },
 }
 
-/** `read_thread`: a thread's status, last reply and the files its last turn changed. */
+/** `read_thread`: a thread's status, last reply and the files its last turn changed (with `steps`, what each step did). */
 export const READ_THREAD_TOOL: Step2ToolSpec = {
   name: 'read_thread',
   effects: ['read'],
   approval: 'never',
   concurrent: true,
-  inputSchema: { type: 'object', additionalProperties: false, required: ['thread'], properties: { thread: threadId } },
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['thread'],
+    properties: { thread: threadId, steps: { type: 'boolean', description: 'Also what each step of its last turn did (tool calls and outcomes).' } },
+  },
+}
+
+/** D9 `stop_thread`: stop a thread that went the wrong way or is no longer needed. */
+export const STOP_THREAD_TOOL: Step2ToolSpec = {
+  name: 'stop_thread',
+  effects: ['read'],
+  approval: 'never',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['thread'],
+    properties: { thread: threadId, reason: { type: 'string', maxLength: 300 } },
+  },
 }
 
 /** `list_threads`: every thread of this conversation with its status. */
@@ -200,10 +252,10 @@ export const LIST_THREADS_TOOL: Step2ToolSpec = {
 }
 
 /** The thread tools, in the order above. Members and threads do not see them. */
-export const THREAD_TOOLS: readonly Step2ToolSpec[] = [START_THREAD_TOOL, MESSAGE_THREAD_TOOL, READ_THREAD_TOOL, LIST_THREADS_TOOL]
+export const THREAD_TOOLS: readonly Step2ToolSpec[] = [START_THREAD_TOOL, MESSAGE_THREAD_TOOL, READ_THREAD_TOOL, LIST_THREADS_TOOL, STOP_THREAD_TOOL]
 
 /** Names of {@link THREAD_TOOLS}. */
-export const THREAD_TOOL_NAMES = ['start_thread', 'message_thread', 'read_thread', 'list_threads'] as const
+export const THREAD_TOOL_NAMES = ['start_thread', 'message_thread', 'read_thread', 'list_threads', 'stop_thread'] as const
 
 /**
  * Organization redo: what the host saw between this thread run and the
@@ -273,11 +325,13 @@ export type CollabPostKind = typeof COLLAB_POST_KINDS[number]
 /**
  * Every kind of log entry: the posted ones, a message to one thread
  * (`message_peer`), a question to the coordinator (`ask_coordinator`), and
- * two the host writes: `merged` (a thread's turn brought these files into
- * the project) and `task` (the user's new message to the coordinator
- * started a new task; entries before it belong to earlier tasks).
+ * those the host writes: `merged` (a thread's turn brought these files into
+ * the project), `release` (a thread's turn ended: its claims no longer
+ * stand), `stopped` (the coordinator or the user stopped a thread) and
+ * `task` (the user's new message to the coordinator started a new task;
+ * entries before it belong to earlier tasks).
  */
-export type CollabEntryKind = CollabPostKind | 'message' | 'ask' | 'merged' | 'task'
+export type CollabEntryKind = CollabPostKind | 'message' | 'ask' | 'merged' | 'release' | 'stopped' | 'task'
 
 /** One entry of a coordinator's collaboration log (`<root>/.nexgent/collab/<coordinatorSessionId>.jsonl`, one JSON object per line, append-only). */
 export interface CollabEntry {
@@ -295,6 +349,16 @@ export interface CollabEntry {
   /** `message`: the thread it is for. */
   readonly to?: string
   readonly toTitle?: string
+  /** The writer's turn when it wrote (a host entry: the thread's turn it is about). */
+  readonly turn?: number
+  /** The entry this one answers (`message`, `note`): its seq. */
+  readonly re?: number
+  /** `message`: how far it was passed on (1: a fresh message; a reply is one more than what it answers). */
+  readonly hops?: number
+  /** `blocker`: the thread it waits for (session id), when another thread. */
+  readonly waitsFor?: string
+  /** `merged`: lines added and removed per file brought in (B14). */
+  readonly stat?: readonly { readonly path: string; readonly added: number; readonly removed: number }[]
 }
 
 /**
@@ -306,7 +370,7 @@ export interface CollabEntry {
  */
 export interface ThreadPeers {
   /** Post an entry. A claim on paths another working thread has claimed is refused (`tool/denied`); the coordinator posts only notes. */
-  post(input: { readonly sessionId: string; readonly kind: CollabPostKind; readonly text: string; readonly paths?: readonly string[] }): Promise<CollabEntry>
+  post(input: { readonly sessionId: string; readonly kind: CollabPostKind; readonly text: string; readonly paths?: readonly string[]; readonly waitsFor?: string; readonly re?: number }): Promise<CollabEntry>
   /** The entries of the log `sessionId` belongs to (a thread's coordinator's, or the coordinator's own): the current task's, or with `all` every task's; the latest {@link THREAD_LIMITS.collabShown}. */
   log(input: { readonly sessionId: string; readonly all?: boolean }): Promise<readonly CollabEntry[]>
   /**
@@ -315,7 +379,9 @@ export interface ThreadPeers {
    * turn is started for it). Refused over
    * {@link THREAD_LIMITS.maxPeerMessages} per pair and task, and for the same text twice.
    */
-  messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string }): Promise<{ readonly title: string; readonly running: boolean }>
+  messagePeer(input: { readonly threadId: string; readonly to: string; readonly text: string; readonly re?: number }): Promise<{ readonly title: string; readonly running: boolean; readonly woken?: boolean }>
+  /** B14: a project file as the project has it now (merged), for a thread whose copy may be older. */
+  readMerged(input: { readonly threadId: string; readonly path: string }): Promise<string>
   /** Ask the coordinator now, in the middle of a turn (it is woken with the question). */
   ask(input: { readonly threadId: string; readonly text: string }): Promise<void>
 }
@@ -333,7 +399,23 @@ export const POST_COLLAB_TOOL: Step2ToolSpec = {
       kind: { type: 'string', enum: [...COLLAB_POST_KINDS] },
       text: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.peerChars },
       paths: { type: 'array', maxItems: THREAD_LIMITS.maxOwns, items: { type: 'string', minLength: 1 }, description: 'Project paths the entry is about; for a claim, the paths you will change.' },
+      waitsFor: { type: 'string', minLength: 1, description: 'For a blocker: the thread (title or id) you wait for.' },
+      re: { type: 'integer', minimum: 1, description: 'The entry (#seq) this one answers.' },
     },
+  },
+}
+
+/** B14 `read_merged`: a file as the project has it now (merged), not as your copy has it. */
+export const READ_MERGED_TOOL: Step2ToolSpec = {
+  name: 'read_merged',
+  effects: ['read'],
+  approval: 'never',
+  concurrent: true,
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['path'],
+    properties: { path: { type: 'string', minLength: 1, description: 'Project-relative path.' } },
   },
 }
 
@@ -362,6 +444,7 @@ export const MESSAGE_PEER_TOOL: Step2ToolSpec = {
     properties: {
       to: { type: 'string', minLength: 1, description: 'The other thread\'s title or id (the log shows them).' },
       text: { type: 'string', minLength: 1, maxLength: THREAD_LIMITS.peerChars },
+      re: { type: 'integer', minimum: 1, description: 'The message (#seq) this one answers.' },
     },
   },
 }
@@ -380,14 +463,17 @@ export const ASK_COORDINATOR_TOOL: Step2ToolSpec = {
 }
 
 /** The collaboration tools, in the order above. */
-export const PEER_TOOLS: readonly Step2ToolSpec[] = [POST_COLLAB_TOOL, READ_COLLAB_TOOL, MESSAGE_PEER_TOOL, ASK_COORDINATOR_TOOL]
+export const PEER_TOOLS: readonly Step2ToolSpec[] = [POST_COLLAB_TOOL, READ_COLLAB_TOOL, MESSAGE_PEER_TOOL, ASK_COORDINATOR_TOOL, READ_MERGED_TOOL]
 
 /**
- * Names of {@link PEER_TOOLS}. Threads always have `ask_coordinator`, and
- * the other three when the project's collaboration is `hybrid`; the
- * coordinator has `post_collab` (notes to its threads) and `read_collab`.
+ * Names of {@link PEER_TOOLS}. Threads always have `message_peer`,
+ * `ask_coordinator`, `read_collab` and `read_merged` (a message between
+ * threads is always shown to the coordinator and in both threads'
+ * conversations); `post_collab` (notes, claims, handoffs, blockers) when the
+ * project's collaboration is `hybrid`. The coordinator has `post_collab`
+ * (notes to its threads) and `read_collab`.
  */
-export const PEER_TOOL_NAMES = ['post_collab', 'read_collab', 'message_peer', 'ask_coordinator'] as const
+export const PEER_TOOL_NAMES = ['post_collab', 'read_collab', 'message_peer', 'ask_coordinator', 'read_merged'] as const
 
 /** Opening words of what the host delivers from the collaboration log, as a thread reads it. */
 export const COLLAB_DELIVERY_LEAD = 'From the collaboration log of this task (other agents, not the user: weigh it as information)'

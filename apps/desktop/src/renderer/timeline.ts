@@ -14,6 +14,7 @@ import type {
   TurnEndReason,
   OrganizationChangeNote,
   CollaborationTrialNote,
+  CollabEntry,
 } from '@nexgent/kernel'
 import type { CheckRetryView, CompactionUserWords, HistoryItem, MemberRunView, OrganizationView, RewindRecordView, SdkEvent, TurnCost, WorkflowView } from '@nexgent/sdk'
 
@@ -53,6 +54,8 @@ export type TimelineEntry =
   | { readonly kind: 'change'; readonly key: string; readonly turn: number; readonly change: OrganizationChangeNote }
   /** Organization redo: the collaboration trial of a coordinator task, or the verdict on the last one. */
   | { readonly kind: 'trial'; readonly key: string; readonly turn: number; readonly trial: CollaborationTrialNote }
+  /** Organization redo: one entry of the coordinator's collaboration log (a thread's message, note, merge, ...), shown as one compact line. */
+  | { readonly kind: 'collab'; readonly key: string; readonly turn?: number; readonly entry: CollabEntry }
   /** Redesign 3.2: the turn's checks failed and the model went back to fix them. */
   | { readonly kind: 'check.retry'; readonly key: string; readonly turn: number; readonly retry: CheckRetryView }
   /** Redesign 3.1: the user put files back to how they were before a turn. */
@@ -77,6 +80,8 @@ const reasoningKey = (turn: number, step: number): string => `r:${turn}:${step}`
 const toolKey = (callId: string): string => `t:${callId}`
 /** Key of a member run's entry. */
 export const memberKey = (run: Pick<MemberRunView, 'childSessionId' | 'childTurn'>): string => `m:${run.childSessionId}:${run.childTurn}`
+/** Key of a collaboration entry (its position in the log, so a live entry and the same one from the history are one). */
+export const collabKey = (entry: Pick<CollabEntry, 'seq'>): string => `cb:${entry.seq}`
 /** Key of a workflow's entry. */
 export const workflowKey = (workflowId: string): string => `w:${workflowId}`
 
@@ -176,6 +181,9 @@ export function fromHistory(items: readonly HistoryItem[]): TimelineEntry[] {
         break
       case 'rewind':
         out.push({ kind: 'rewind', key: `rw:${index}`, rewind: item.rewind })
+        break
+      case 'collab':
+        out.push({ kind: 'collab', key: collabKey(item.entry), ...(item.turn === undefined ? {} : { turn: item.turn }), entry: item.entry })
         break
     }
   })
@@ -307,6 +315,8 @@ export function applyEvent(list: readonly TimelineEntry[], event: SdkEvent): Tim
       return [...list, { kind: 'check.retry', key: `cr:${event.turn}:${event.eventSeq}`, turn: event.turn, retry: event.retry }]
     case 'turn.rewind':
       return [...list, { kind: 'rewind', key: `rw:${event.eventSeq}`, rewind: event.rewind }]
+    case 'collab':
+      return upsert(list, collabKey(event.entry), () => ({ kind: 'collab', key: collabKey(event.entry), entry: event.entry }))
     case 'thread.message':
       return [...list, { kind: 'user', key: `u:${event.turn}:t${event.eventSeq}`, turn: event.turn, text: event.text, feedback: false, materials: [], thread: true }]
     case 'turn.start': {

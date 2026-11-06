@@ -18,6 +18,7 @@ import {
   compactionTail,
   fileChangeNote,
   NexgentError,
+  relayedWordsMessage,
   renderCompactionSummary,
   ZERO_USAGE,
   type AssistantMessage,
@@ -160,7 +161,8 @@ function applyRecord(draft: Draft, record: SessionRecord): void {
       meta.openTurn = record.turn
       break
     case 'user.message':
-      draft.messages.push({ role: 'user', content: record.content })
+      // The user's words passed on to a thread go to the model behind the same prefix as when they were first sent.
+      draft.messages.push({ role: 'user', content: record.source === 'relay' ? relayedWordsMessage(record.content) : record.content })
       break
     case 'turn.rewind':
       // The host changed files between turns: the model is told with its next request.

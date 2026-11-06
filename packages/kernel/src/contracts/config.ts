@@ -156,6 +156,8 @@ export interface ProjectConfig {
    * Absent: `central`. Changing it always needs approval.
    */
   readonly collaboration?: CollaborationMode
+  /** A5: the coordinator's threads. `maxRunning`: how many run at once (1 to `THREAD_LIMITS.maxRunningLimit`; absent: `THREAD_LIMITS.maxRunning`); more wait in a queue. */
+  readonly threads?: { readonly maxRunning?: number }
 }
 
 /**
@@ -201,7 +203,7 @@ export function checkCommandsProblem(value: unknown): string | undefined {
 export const GUARDED_PROJECT_CONFIG_FIELDS = [
   'approvals', 'costCaps', 'sandboxMode', 'learning', 'maxStepsPerTurn', 'checkRetries', 'checkCommands', 'collaboration',
   // ADR 0022: directories outside the project and the command sandbox are the user's to widen.
-  'extraReadRoots', 'extraWriteRoots', 'commands',
+  'extraReadRoots', 'extraWriteRoots', 'commands', 'threads',
 ] as const
 
 /** The defaults applied over a missing or partial config file. */
@@ -245,6 +247,7 @@ export function resolveProjectConfig(input: ProjectConfigInput = {}): ProjectCon
     ...(input.checkRetries === undefined ? {} : { checkRetries: input.checkRetries }),
     ...(input.checkCommands === undefined ? {} : { checkCommands: [...input.checkCommands] }),
     ...(input.collaboration === undefined ? {} : { collaboration: input.collaboration }),
+    ...(input.threads === undefined ? {} : { threads: { ...input.threads } }),
   }
 }
 

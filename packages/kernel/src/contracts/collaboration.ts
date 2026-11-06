@@ -424,6 +424,8 @@ export const MEMBER_DENIED_TOOLS = [
   'read_collab',
   'message_peer',
   'ask_coordinator',
+  'read_merged',
+  'stop_thread',
   'capability_draft',
   'capability_try',
 ] as const

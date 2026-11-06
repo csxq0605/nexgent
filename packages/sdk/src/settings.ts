@@ -23,6 +23,7 @@ import {
   readProjectConfig,
   resolveUserConfig,
   RETIRED_CONFIG_FIELDS,
+  THREAD_LIMITS,
   USER_CONFIG_FILE_NAME,
   writeJsonFile,
   type CredentialInfo,
@@ -87,10 +88,11 @@ export async function readSettings(configFile: string, where: CredentialEnv): Pr
     checkRetries: config.checkRetries ?? DEFAULT_CHECK_RETRIES,
     checkCommands: config.checkCommands ?? [],
     collaboration: config.collaboration ?? 'central',
+    threads: { maxRunning: config.threads?.maxRunning ?? THREAD_LIMITS.maxRunning },
   }
 }
 
-const PATCH_FIELDS = new Set(['model', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'learning', 'checkRetries', 'checkCommands', 'collaboration'])
+const PATCH_FIELDS = new Set(['model', 'thinking', 'effort', 'sandboxMode', 'costCaps', 'learning', 'checkRetries', 'checkCommands', 'collaboration', 'threads'])
 
 /** Merge a patch into `config.json` (validated as a whole before writing). */
 export async function updateSettings(configFile: string, patch: SettingsPatch, where: CredentialEnv): Promise<ProjectSettings> {

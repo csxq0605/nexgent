@@ -8,7 +8,7 @@
  */
 import type { ApprovalRequest, DeliverableSummary, ErrorInfo, FeedbackRating, Goal, GoalStatus, LLMUsage, MaterialMetadata, SandboxMode } from '@nexgent/kernel'
 import type { CommandSandboxStatus } from '@nexgent/kernel'
-import type { LearningConfig, ThreadInfo } from '@nexgent/kernel'
+import type { LearningConfig, ThreadInfo, ThreadPlan } from '@nexgent/kernel'
 import type { CostWarningView, HandbookEntryDetail, HandbookListing, LearningStatus, ProjectFileListing, ProjectInfo, ProjectSettings, RewindView, SdkEvent, SessionSummary, SettingsPatch, UserSettings, UserSettingsPatch } from '@nexgent/sdk'
 import { SdkClient, errorInfoOf, type NexgentBridge } from './bridge.js'
 import { applyEvent, feedbackEntry, fromHistory, userEntry, withWorkflows, workflowKey, type TimelineEntry } from './timeline.js'
@@ -453,6 +453,25 @@ export class AppStore {
     return true
   }
 
+  /** D9: stop a thread's running or queued turn; the thread list takes the answer at once. */
+  async stopThread(threadId: string): Promise<void> {
+    const projectId = this.projectId
+    const info = this.state.threads.find(t => t.threadId === threadId)
+    if (projectId === undefined || info === undefined) return
+    const stopped = await this.guard(c => c.call('threads.stop', { projectId, sessionId: info.coordinatorSessionId, threadId }))
+    if (stopped === undefined || this.projectId !== projectId) return
+    this.set(state => ({ threads: state.threads.map(t => (t.threadId === threadId ? stopped : t)) }))
+    void this.refreshSessions()
+  }
+
+  /** The threads the user named for the coordinator's current task (`threads.plan`), `null` when none. */
+  async threadPlan(): Promise<ThreadPlan | null> {
+    const projectId = this.projectId
+    const sessionId = this.state.sessionId
+    if (projectId === undefined || sessionId === undefined) return null
+    return (await this.guard(c => c.call('threads.plan', { projectId, sessionId }))) ?? null
+  }
+
   async newSession(): Promise<void> {
     const projectId = this.projectId
     if (projectId === undefined || this.creating) return
@@ -562,7 +581,8 @@ export class AppStore {
 
   // --- turns ----------------------------------------------------------------
 
-  async send(text: string, mentioned: readonly string[]): Promise<boolean> {
+  /** `plan`: the threads the user names for this message (with `exact`: only these). */
+  async send(text: string, mentioned: readonly string[], plan?: ThreadPlan): Promise<boolean> {
     const projectId = this.projectId
     const sessionId = this.state.sessionId
     const trimmed = text.trim()
@@ -570,14 +590,15 @@ export class AppStore {
     // While a turn runs the message joins it: the next step reads it.
     const materialIds = [...new Set([...mentioned, ...this.state.freshMaterialIds])]
     const names = materialIds.map(id => this.state.materials.find(m => m.id === id)?.originalName ?? id)
+    const named = plan === undefined || plan.threads.length === 0 ? {} : { threads: plan.threads, exactThreads: plan.exact }
     if (this.state.running) {
-      const handle = await this.guard(c => c.call('turns.send', { projectId, sessionId, text: trimmed, ...(materialIds.length > 0 ? { materialIds } : {}) }))
+      const handle = await this.guard(c => c.call('turns.send', { projectId, sessionId, text: trimmed, ...(materialIds.length > 0 ? { materialIds } : {}), ...named }))
       if (handle === undefined) return false
       if (this.state.sessionId === sessionId) this.set(state => ({ timeline: [...state.timeline, userEntry(handle.turn, trimmed, names)], freshMaterialIds: [] }))
       return true
     }
     this.set({ running: true })
-    const handle = await this.guard(c => c.call('turns.send', { projectId, sessionId, text: trimmed, ...(materialIds.length > 0 ? { materialIds } : {}) }))
+    const handle = await this.guard(c => c.call('turns.send', { projectId, sessionId, text: trimmed, ...(materialIds.length > 0 ? { materialIds } : {}), ...named }))
     if (handle === undefined) {
       this.set({ running: false })
       return false

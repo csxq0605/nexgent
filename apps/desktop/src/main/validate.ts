@@ -54,6 +54,8 @@ export const METHOD_SPECS: Readonly<Record<SdkMethodName, MethodSpec>> = {
   'threads.list': session,
   'threads.start': { ...session, title: { kind: 'nonEmptyString' }, task: { kind: 'nonEmptyString' }, materialIds: { kind: 'stringArray', optional: true }, owns: { kind: 'stringArray', optional: true } },
   'threads.collab': { ...session, all: { kind: 'boolean', optional: true } },
+  'threads.stop': { ...session, threadId: id, reason: { kind: 'string', optional: true } },
+  'threads.plan': session,
   'sessions.open': session,
   'sessions.close': session,
   'sessions.export': { ...session, outDir: { kind: 'absolutePath' } },

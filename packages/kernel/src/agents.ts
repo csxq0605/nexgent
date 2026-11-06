@@ -327,6 +327,8 @@ export class AgentsService extends Service {
     const tools = ctx.tools as ToolRegistryService
     if (typeof tools.inherit === 'function') tools.inherit(parent)
     tools.restrict({ deny: [...MEMBER_DENIED_TOOLS] })
+    // Members have no collaboration tool, whatever their thread has (`read_merged` is not in MEMBER_DENIED_TOOLS).
+    tools.restrict({ deny: [...PEER_TOOL_NAMES] })
     if (preset?.tools !== undefined) tools.restrict(preset.tools)
   }
 
@@ -339,11 +341,11 @@ export class AgentsService extends Service {
     const tools = ctx.tools as ToolRegistryService
     // Coordinator step two: a thread does not start threads or give them work.
     if (thread !== undefined) tools.restrict({ deny: [...THREAD_TOOL_NAMES] })
-    // Organization redo: a thread always may ask its coordinator; it writes to and reads the collaboration log only when the
-    // project's collaboration is hybrid (the user's choice). The coordinator posts notes to its threads and reads the log.
+    // A thread always has `message_peer`, `ask_coordinator`, `read_collab` and `read_merged`; `post_collab` only when the project's
+    // collaboration is hybrid (the user's choice). The coordinator has `post_collab` and `read_collab` (and `stop_thread`); any other root session has none.
     if (thread !== undefined) {
-      if (collaboration !== 'hybrid') tools.restrict({ deny: PEER_TOOL_NAMES.filter(name => name !== 'ask_coordinator') })
-    } else if (coordinator) tools.restrict({ deny: ['message_peer', 'ask_coordinator'] })
+      if (collaboration !== 'hybrid') tools.restrict({ deny: ['post_collab'] })
+    } else if (coordinator) tools.restrict({ deny: ['message_peer', 'ask_coordinator', 'read_merged'] })
     else tools.restrict({ deny: [...PEER_TOOL_NAMES] })
     // Coordinator step three: only the coordinator conversation keeps the project notes.
     if (!coordinator || thread !== undefined) tools.restrict({ deny: [...COORDINATOR_TOOL_NAMES] })
@@ -404,6 +406,7 @@ export class AgentsService extends Service {
     member?: { identity: MemberIdentity; parent: AgentEntry; budget: BudgetShare | undefined }
     capabilities?: CapabilityLoad
     workdir?: MemberWorkdir
+    isolated?: false
     thread?: ThreadOrigin
   }): Agent {
     const { member } = args
@@ -461,6 +464,7 @@ export class AgentsService extends Service {
       children: () => [...children],
       ...(args.capabilities === undefined ? {} : { capabilityVersion: args.capabilities.version, attached: args.capabilities.attached }),
       ...(args.workdir === undefined ? {} : { workdir: args.workdir }),
+      ...(args.isolated === false ? { isolated: false } : {}),
       ...(args.thread === undefined ? {} : { thread: args.thread }),
       onClose: closed => {
         if (this.live.get(closed.sessionId) === closed) this.live.delete(closed.sessionId)
@@ -604,6 +608,7 @@ export class AgentsService extends Service {
         throw error
       }
       const workdir = thread === undefined ? undefined : await this.openWorkdir(sessionId, sandboxMode)
+      const isolated = thread === undefined || this.isolatedWorkdir(workdir, sandboxMode)
       return this.build({
         sessionId,
         lock,
@@ -623,6 +628,7 @@ export class AgentsService extends Service {
         settings: this.settings(undefined, loaded.config),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(workdir === undefined ? {} : { workdir }),
+        ...(isolated ? {} : { isolated: false }),
         ...(thread === undefined ? {} : { thread }),
       })
     } catch (error) {
@@ -645,6 +651,11 @@ export class AgentsService extends Service {
     } catch {
       return undefined
     }
+  }
+
+  /** A thread is isolated when it has its own copy; a read-only one writes nothing, and without a copy service nothing is kept apart. */
+  private isolatedWorkdir(workdir: MemberWorkdir | undefined, sandboxMode: SandboxMode): boolean {
+    return workdir !== undefined || sandboxMode === 'read-only' || this.home.get('workdirs') === undefined
   }
 
   private async createChild(options: CreateAgentOptions, child: ChildAgentOptions): Promise<Agent> {
@@ -819,6 +830,7 @@ export class AgentsService extends Service {
         ...(parent === undefined || member === undefined ? {} : { member: { identity: member, parent, budget: options.child?.budget } }),
         ...(capabilities === undefined ? {} : { capabilities }),
         ...(workdir === undefined ? {} : { workdir }),
+        ...(state.metadata.thread === undefined || this.isolatedWorkdir(workdir, sandboxMode) ? {} : { isolated: false }),
         ...(state.metadata.thread === undefined ? {} : { thread: state.metadata.thread }),
       })
       // A reopened member works in this tree too: its form counts in the root's `formsUsed`.

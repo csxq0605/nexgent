@@ -97,6 +97,8 @@ export class FakeBridge implements NexgentBridge {
   sessions: SessionSummary[] = [SESSION]
   /** Coordinator step two: what `threads.list` answers. */
   threads: ThreadInfo[] = []
+  /** What `threads.plan` answers. */
+  plan: { threads: { title: string; task?: string }[]; exact: boolean } | null = null
   settings: ProjectSettings = SETTINGS
   /** API 7: what `userSettings.get` answers (`update` changes it like the SDK would). */
   userSettings: UserSettings = { learning: {} }
@@ -138,6 +140,11 @@ export class FakeBridge implements NexgentBridge {
       this.threads = [...this.threads, thread]
       return thread
     },
+    'threads.stop': input => {
+      this.threads = this.threads.map(t => (t.threadId === input.threadId ? { ...t, status: 'stopped' as const } : t))
+      return this.threads.find(t => t.threadId === input.threadId)!
+    },
+    'threads.plan': () => this.plan,
     'sessions.rename': input => {
       const summary = { ...(this.sessions.find(s => s.sessionId === input.sessionId) ?? SESSION), title: input.title }
       this.sessions = this.sessions.map(s => (s.sessionId === input.sessionId ? summary : s))

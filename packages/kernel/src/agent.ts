@@ -238,6 +238,13 @@ export type TurnInput =
     readonly source: 'thread'
     readonly text: string
     readonly materialIds?: readonly string[]
+    /**
+     * The user's own words the host passes on with the message (the user's
+     * message that named the thread's part). Each is recorded as
+     * `user.message { source: 'relay' }` right after the message, word for
+     * word, and sent behind {@link RELAYED_WORDS_PREFIX}.
+     */
+    readonly relay?: readonly string[]
   }
   | {
     /** A feedback turn: `feedback` is recorded after `turn.start`; the message text is `renderFeedbackPrompt(feedback)`. */
@@ -375,6 +382,8 @@ export interface AgentInit {
   readonly attached?: readonly AttachedComponent[]
   /** Rework K4 D4: a member's own copy of the project; its tools work there. */
   readonly workdir?: MemberWorkdir
+  /** `false`: a thread whose own copy of the project could not be opened, so it works in the project directory (see {@link Agent.isolated}). */
+  readonly isolated?: boolean
   /** Coordinator step two: this root session is a thread of a coordinator conversation. */
   readonly thread?: ThreadOrigin
 }
@@ -630,8 +639,18 @@ export function relayedCoordinatorNote(text: string): string {
   return `${RELAYED_COORDINATOR_NOTE_PREFIX}\n\n${text}`
 }
 
+/** Opens the user's own words the host passed on to a thread (`user.message { source: 'relay' }`); only the sent message has it, the record keeps the words. */
+export const RELAYED_WORDS_PREFIX = "The user's own words (passed on by Nexgent):"
+
+/** The message a relayed `text` is sent as. */
+export function relayedWordsMessage(text: string): string {
+  return `${RELAYED_WORDS_PREFIX}\n\n${text}`
+}
+
 /** A message passed on to members: its words and who sent them (the user, or the coordinator of the thread). */
 export interface RelayedSteer {
+  /** Names this message, so the same words sent twice are both passed on ({@link Agent.steer}). */
+  readonly id: string
   readonly text: string
   readonly from: 'user' | 'coordinator'
 }
@@ -698,6 +717,9 @@ export class Agent {
   readonly parentSessionId: string | undefined
   /** Coordinator step two: set when this root session is a thread of a coordinator conversation. */
   readonly thread: ThreadOrigin | undefined
+  /** `false` when a thread's copy of the project could not be opened and it works in the project directory itself; `true` otherwise. */
+  readonly isolated: boolean
+  private isolationNoted = false
   /** Step 4: the capability version this session runs on; absent without a capability host. */
   readonly capabilityVersion: CapabilityVersion | undefined
 
@@ -743,7 +765,8 @@ export class Agent {
   private snapshotStart: (() => Promise<unknown>) | undefined
   /** Messages sent while the turn runs ({@link steer}), waiting for the next model request. */
   /** `relay`: the words (the user's, or in a thread its coordinator's), passed on to a member that starts before this agent reads them ({@link unreadSteers}). */
-  private pendingSteers: { readonly content: string; readonly source: 'user' | 'inject' | 'thread'; readonly materialIds?: readonly string[]; readonly relay?: RelayedSteer }[] = []
+  private pendingSteers: { readonly content: string; readonly source: 'user' | 'inject' | 'thread'; readonly materialIds?: readonly string[]; readonly relays: readonly RelayedSteer[]; readonly words?: readonly string[] }[] = []
+  private steerSeq = 0
   /** The user's mid-turn messages this member already got from its parent, so none arrives twice. */
   private readonly relayedSeen = new Set<string>()
   /** The session state the turn's context providers got (a message sent mid-turn with materials is rendered against it). */
@@ -811,6 +834,7 @@ export class Agent {
     this.attribution = init.attribution
     this.member = init.member
     this.parentSessionId = init.parentSessionId
+    this.isolated = init.isolated !== false
     this.thread = init.thread
     this.capabilityVersion = init.capabilityVersion
     if (init.capabilityVersion !== undefined) {
@@ -1094,27 +1118,32 @@ export class Agent {
    * members get it like a user message, as the coordinator's. In the
    * coordinator, a thread's wake note; it has no members to pass it to.
    */
-  steer(text: string, options: { readonly relayed?: boolean; readonly from?: RelayedSteer['from']; readonly materialIds?: readonly string[]; readonly source?: 'thread' } = {}): boolean {
+  steer(text: string, options: { readonly relayed?: boolean; readonly from?: RelayedSteer['from']; readonly id?: string; readonly materialIds?: readonly string[]; readonly source?: 'thread'; readonly relay?: readonly string[] } = {}): boolean {
     if (this.closed || this.running === undefined || !this.acceptingSteers) return false
-    let relay: RelayedSteer
+    const newId = (): string => `s${++this.steerSeq}`
+    let relays: RelayedSteer[]
     if (options.source === 'thread') {
       if (this.thread === undefined) {
-        this.pendingSteers.push({ content: text, source: 'thread' })
+        this.pendingSteers.push({ content: text, source: 'thread', relays: [] })
         return true
       }
-      relay = { text, from: 'coordinator' }
-      this.pendingSteers.push({ content: text, source: 'thread', relay })
+      const words = (options.relay ?? []).filter(word => word.trim() !== '')
+      // The coordinator's message, then the user's own words it came with: members get both as sent.
+      relays = [{ id: newId(), text, from: 'coordinator' }, ...words.map(word => ({ id: newId(), text: word, from: 'user' as const }))]
+      this.pendingSteers.push({ content: text, source: 'thread', relays, ...(words.length > 0 ? { words } : {}) })
     } else if (options.relayed === true) {
-      relay = { text, from: options.from ?? 'user' }
-      this.relayedSeen.add(text)
-      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relay })
+      const relay: RelayedSteer = { id: options.id ?? newId(), text, from: options.from ?? 'user' }
+      relays = [relay]
+      this.relayedSeen.add(relay.id)
+      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relays })
     } else {
-      relay = { text, from: 'user' }
+      relays = [{ id: newId(), text, from: 'user' }]
       const materialIds = [...new Set(options.materialIds ?? [])]
-      this.pendingSteers.push({ content: text, source: 'user', relay, ...(materialIds.length > 0 ? { materialIds } : {}) })
+      this.pendingSteers.push({ content: text, source: 'user', relays, ...(materialIds.length > 0 ? { materialIds } : {}) })
     }
     for (const member of this.members()) {
-      if (member.busy) member.steer(relay.text, { relayed: true, from: relay.from })
+      if (!member.busy) continue
+      for (const relay of relays) member.steer(relay.text, { relayed: true, from: relay.from, id: relay.id })
     }
     return true
   }
@@ -1127,7 +1156,7 @@ export class Agent {
    * relayed at its turn's start.
    */
   unreadSteers(): readonly RelayedSteer[] {
-    return this.pendingSteers.flatMap(steer => steer.relay === undefined ? [] : [steer.relay])
+    return this.pendingSteers.flatMap(steer => steer.relays)
   }
 
   /** Cancel the running turn, if any. Streamed text is kept; running tools are aborted. */
@@ -1660,9 +1689,9 @@ export class Agent {
     this.acceptingSteers = true
     // A member started while its parent has not yet read the user's latest messages gets them too.
     for (const relay of this.init.parentSteers?.() ?? []) {
-      if (this.relayedSeen.has(relay.text)) continue
-      this.relayedSeen.add(relay.text)
-      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relay })
+      if (this.relayedSeen.has(relay.id)) continue
+      this.relayedSeen.add(relay.id)
+      this.pendingSteers.push({ content: relayedNote(relay), source: 'inject', relays: [relay] })
     }
     const services = this.init.services?.() ?? {}
     // Providers get the state before this turn. It is read before `turn.start`:
@@ -1681,6 +1710,11 @@ export class Agent {
     this.turnState = before !== undefined && 'state' in before ? before.state : undefined
     this.openTurn = turn
     try {
+      // Noted once per session: a reopened session already holds it from its first turn.
+      if (!this.isolated && !this.isolationNoted && turn === 1) {
+        this.isolationNoted = true
+        await this.appendError(errorInfo('workspace/not-found', "this thread's own copy of the project could not be opened; it works in the project directory itself, so other threads' changes and its own are not kept apart"), false, turn).catch(() => undefined)
+      }
       const handbook = await this.handbookForTurn(services.capabilityHost, turn, source, text)
       // Coordinator step two: a thread's wake note in the coordinator is not a new task; in a thread, the coordinator's message is its task.
       const organized = source === 'thread' && this.thread === undefined ? undefined
@@ -1719,6 +1753,7 @@ export class Agent {
       }
       await this.append({ type: 'user.message', turn, content: text, source, ...(materialIds.length > 0 ? { materials: materialIds } : {}) })
       this.messages.push({ role: 'user', content: text })
+      if (input.source === 'thread') await this.appendRelay(turn, input.relay ?? [])
 
       const tracker = { text: '', usage: ZERO_USAGE as LLMUsage }
       let reason: TurnEndReason
@@ -2031,7 +2066,9 @@ export class Agent {
       return []
     }
     const kept = new Set(tail.flatMap(message => (message.role === 'user' ? [message.content] : [])))
+    // Relayed words are sent behind a prefix: the kept tail holds the prefixed message.
     return records.flatMap(record => (record.type === 'user.message' && record.source !== 'inject' && record.source !== 'thread' && !kept.has(record.content)
+      && !(record.source === 'relay' && kept.has(relayedWordsMessage(record.content)))
       ? [{ turn: record.turn, text: record.content }]
       : []))
   }
@@ -2744,12 +2781,22 @@ export class Agent {
   /** Append the messages sent while the turn runs ({@link steer}) and send them with the next request. */
   private async drainSteers(turn: number): Promise<void> {
     while (this.pendingSteers.length > 0) {
-      const { content, source, materialIds } = this.pendingSteers.shift()!
+      const { content, source, materialIds, words } = this.pendingSteers.shift()!
       if (source === 'user') this.turnOrganization.corrections += 1
       // As at a turn's start, the material references (fenced as context) come right before the message.
       if (materialIds !== undefined) await this.injectSteerMaterials(turn, content, materialIds)
       await this.append({ type: 'user.message', turn, content, source, ...(materialIds === undefined ? {} : { materials: [...materialIds] }) })
       this.messages.push({ role: 'user', content })
+      await this.appendRelay(turn, words ?? [])
+    }
+  }
+
+  /** The user's own words passed on with a thread message: recorded as they are, sent behind {@link RELAYED_WORDS_PREFIX}. */
+  private async appendRelay(turn: number, words: readonly string[]): Promise<void> {
+    for (const word of words) {
+      if (word.trim() === '') continue
+      await this.append({ type: 'user.message', turn, content: word, source: 'relay' })
+      this.messages.push({ role: 'user', content: relayedWordsMessage(word) })
     }
   }
 

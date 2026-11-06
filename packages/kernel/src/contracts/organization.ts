@@ -244,6 +244,14 @@ export interface OrganizationProfile {
   readonly parts: readonly OrganizationPart[]
   /** Organization redo: what went wrong between the parts (absent on older lines). */
   readonly events?: CollaborationEvents
+  /** Organization redo: what the arrangement's values actually did in the task (a trial run counts only when its value took effect). */
+  readonly triggers?: CollaborationTriggers
+  /** Organization redo: the user named the task's threads (`turns.send` `threads`): it runs the user's split, not the library's, and is left out of trials. */
+  readonly planned?: true
+  /** Organization redo: whether the threads' `owns` kept apart (`apart`), overlapped (`overlap`), or a thread had none (`open`). */
+  readonly owns?: 'apart' | 'overlap' | 'open'
+  /** Organization redo: the user's corrections in the task, by the thread they went to (`coordinator` for the coordinator itself). */
+  readonly correctionsBy?: Readonly<Record<string, number>>
 }
 
 /** What makes a part the hottest spot of a task. */
@@ -374,7 +382,7 @@ export interface OrganizationClassSummary {
  * failure of collaboration that cost work or quality.
  */
 export interface CollaborationEvents {
-  /** Project files that two or more parts each brought into the project. */
+  /** Project files that two or more parts brought into the project while they ran at the same time (parts that ran one after another do not count). */
   readonly overlap: number
   /** Merge conflicts (a part's version was set aside because the project changed the same file). */
   readonly conflicts: number
@@ -386,10 +394,36 @@ export interface CollaborationEvents {
   readonly messages: number
   /** Claims and thread messages the host refused (taken paths, limits). */
   readonly refused: number
+  /** A thread read the same file again in one run without writing it in between (it had to look again for what a handoff should have said). */
+  readonly reread?: number
+  /** Messages to a thread, and questions to the coordinator, that got no answer in the task. */
+  readonly unanswered?: number
+  /** Writes the host refused because a limit was reached (messages, questions, hops, wakes). */
+  readonly capped?: number
+  /** Blockers that would have closed a waiting cycle (refused). */
+  readonly cycles?: number
+  /** Thread runs that ended waiting on another thread. */
+  readonly idle?: number
+  /** Times a thread changed its own team in a run (`organize` again). */
+  readonly regroups?: number
+  /** The final whole-project check found something wrong. */
+  readonly checkFailed?: number
+}
+
+/** What a run did with the trial's value, counted by the host: it only counts as a clean run when the value took effect. */
+export interface CollaborationTriggers {
+  /** `overlap: sequence`: starts the host held back or refused because paths overlapped. */
+  readonly sequence?: number
+  /** `handoff: changed`: `merged` entries delivered to a thread other than the writer, not about its own paths. */
+  readonly changed?: number
+  /** `wake: named`: idle threads a message woke. */
+  readonly named?: number
+  /** `check: separate`: final checks run by a separate thread. */
+  readonly separate?: number
 }
 
 /** The names of {@link CollaborationEvents}. */
-export const COLLABORATION_EVENT_NAMES = ['overlap', 'conflicts', 'missing', 'outside', 'messages', 'refused'] as const
+export const COLLABORATION_EVENT_NAMES = ['overlap', 'conflicts', 'missing', 'outside', 'messages', 'refused', 'reread', 'unanswered', 'capped', 'cycles', 'idle', 'regroups', 'checkFailed'] as const
 export type CollaborationEventName = typeof COLLABORATION_EVENT_NAMES[number]
 
 /** No events. */
@@ -416,13 +450,27 @@ export interface CollaborationConfig {
   readonly mode: 'central' | 'hybrid'
   readonly handoff: 'brief' | 'changed'
   readonly overlap: 'parallel' | 'sequence'
+  /**
+   * Who may wake an idle thread: `coordinator` (only the coordinator's
+   * `message_thread`; a thread's message waits for the next turn); `named`:
+   * a message to an idle thread starts its next turn, at most
+   * `THREAD_LIMITS.maxWakes` times per task. Absent: `coordinator`.
+   */
+  readonly wake?: 'coordinator' | 'named'
+  /**
+   * The final whole-project check the host runs once two or more threads
+   * merged and all ended: `merged` (the thread that merged last checks the
+   * whole project) or `separate` (a new thread that did none of the work
+   * checks it). Absent: `merged`.
+   */
+  readonly check?: 'merged' | 'separate'
 }
 
 /** The variables organization optimization tries. */
-export type CollaborationVariable = 'handoff' | 'overlap'
+export type CollaborationVariable = 'handoff' | 'overlap' | 'wake' | 'check'
 
 /** The default arrangement (how threads worked before optimization changed anything). */
-export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 'central', handoff: 'brief', overlap: 'parallel' })
+export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 'central', handoff: 'brief', overlap: 'parallel', wake: 'coordinator', check: 'merged' })
 
 /**
  * Each variable's other value and the events it is meant to remove: a
@@ -431,7 +479,9 @@ export const DEFAULT_COLLABORATION: CollaborationConfig = Object.freeze({ mode: 
  */
 export const COLLABORATION_TRIALS: readonly { readonly variable: CollaborationVariable; readonly value: string; readonly target: readonly CollaborationEventName[] }[] = Object.freeze([
   { variable: 'overlap', value: 'sequence', target: ['overlap', 'conflicts'] },
-  { variable: 'handoff', value: 'changed', target: ['missing'] },
+  { variable: 'handoff', value: 'changed', target: ['missing', 'reread'] },
+  { variable: 'wake', value: 'named', target: ['unanswered', 'idle'] },
+  { variable: 'check', value: 'separate', target: ['checkFailed'] },
 ])
 
 /**
@@ -444,7 +494,13 @@ export const COLLABORATION_TRIALS: readonly { readonly variable: CollaborationVa
 export interface CollaborationTrial {
   /** Lowercase uuid v4. */
   readonly id: string
-  /** The kind of task: level and number of parts (`coordinatorShape`). */
+  /**
+   * The kind of task the trial applies to (`collaborationShape`):
+   * `coordinator:<mode>:<parts>:<owns>`: the collaboration mode, the number
+   * of threads (`2` or `3+`), and whether their `owns` overlapped
+   * (`apart`, `overlap`, or `open` when a thread had none). Only runs of the
+   * same shape form its baseline and judge it.
+   */
   readonly shape: string
   readonly variable: CollaborationVariable
   readonly value: string
@@ -455,6 +511,10 @@ export interface CollaborationTrial {
   readonly need: number
   /** Median cost of the baseline runs in USD (a trial run may not cost more than 1.5 times it). */
   readonly baselineUsd: number
+  /** Median wall time of the baseline runs in ms (a trial run may not take more than twice it); absent on older trials. */
+  readonly baselineMs?: number
+  /** The target event the baseline hit most (why this variable was chosen among the candidates). */
+  readonly cause?: CollaborationEventName
   /** The run whose events started it. */
   readonly runId: string
 }

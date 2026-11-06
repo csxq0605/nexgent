@@ -59,6 +59,13 @@ describe('main', () => {
     await fs.access(resolveProjectLayout(tmp).sessions)
   })
 
+  it('passes --thread and the exact switch through to the runtime', async () => {
+    const t = testIo(tmp)
+    const runtime = new FakeRuntime(writeFileTurn())
+    expect(await main(['run', '--project', tmp, '--task', 't', '--thread', 'API: change it', '--thread', 'Docs', '--no-exact-threads'], t.io, { loadRuntime: async () => runtime })).toBe(EXIT.OK)
+    expect(runtime.opened[0]).toMatchObject({ threads: [{ title: 'API', task: 'change it' }, { title: 'Docs' }], exactThreads: false })
+  })
+
   it('passes --sandbox and --model through to the runtime', async () => {
     const t = testIo(tmp)
     const runtime = new FakeRuntime(writeFileTurn())

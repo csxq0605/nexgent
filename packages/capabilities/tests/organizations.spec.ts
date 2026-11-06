@@ -22,6 +22,8 @@ import {
   type FoldedRun,
   wentWell,
   collaborationFor,
+  collaborationShape,
+  trialRun,
   counted,
   judgeTrial,
   keptCollaboration,
@@ -259,23 +261,79 @@ describe('collaboration trials', () => {
   it('keeps a trial after enough clean runs that applied it, and reverts it at once when the events come back or the result is worse', () => {
     const trial = newTrial([trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) })], [], undefined, 'h')!
     expect(trial).toMatchObject({ variable: 'handoff', value: 'changed', need: 2 })
-    const under = (over: Partial<TrialRun> = {}) => trun({ trial: 'h', collaboration: { mode: 'central', handoff: 'changed', overlap: 'parallel' }, ...over })
+    const under = (over: Partial<TrialRun> = {}) => trun({ trial: 'h', collaboration: { mode: 'central', handoff: 'changed', overlap: 'parallel' }, triggers: { changed: 1 }, ...over })
     expect(judgeTrial(trial, [under()])).toBeUndefined()
     expect(judgeTrial(trial, [under(), under()])).toBe('kept')
     expect(judgeTrial(trial, [under(), under({ events: events({ missing: 1 }) })])).toBe('reverted')
     expect(judgeTrial(trial, [under({ sound: false })])).toBe('reverted')
     expect(judgeTrial(trial, [under({ usd: 1.6 })])).toBe('reverted')
-    // A run that did not apply it (a single thread) is no trial; enough of them end it without a verdict.
-    const idle = Array.from({ length: MAX_TRIAL_RUNS }, () => under({ parts: 1 }))
+    // Slower than twice the baseline's median reverts it.
+    expect(judgeTrial({ ...trial, baselineMs: 100 }, [under({ ms: 250 })])).toBe('reverted')
+    expect(judgeTrial({ ...trial, baselineMs: 100 }, [under({ ms: 150 }), under({ ms: 150 })])).toBe('kept')
+    // A run where the value took no effect is neither clean nor failed; enough of them end it without a verdict.
+    const idle = Array.from({ length: MAX_TRIAL_RUNS }, () => under({ triggers: {} }))
     expect(judgeTrial(trial, idle.slice(0, 2))).toBeUndefined()
     expect(judgeTrial(trial, idle)).toBe('inconclusive')
+    expect(judgeTrial(trial, [under({ triggers: {}, events: events({ missing: 1 }) }), under(), under()])).toBe('kept')
+    // Planned runs and runs whose completion is unknown are no trial runs.
+    const left = Array.from({ length: MAX_TRIAL_RUNS }, (_, i) => under(i % 2 === 0 ? { planned: true } : { unknown: true }))
+    expect(judgeTrial(trial, left)).toBeUndefined()
+  })
+
+  it('keeps shapes apart and picks the candidate whose events the baseline hit most', () => {
+    expect(collaborationShape({ mode: 'hybrid', parts: 2, owns: 'apart' })).toBe('coordinator:hybrid:2:apart')
+    expect(collaborationShape({ mode: 'central', parts: 4 })).toBe('coordinator:central:3+:open')
+    const two = [trun({ events: events({ conflicts: 1 }) }), trun({ events: events({ conflicts: 1 }) }), trun({ events: events({ conflicts: 1 }) })]
+    const three = [trun({ parts: 3, events: events({ conflicts: 1 }) }), trun({ parts: 3 }), trun({ parts: 3, events: events({ conflicts: 1 }) })]
+    // Three-thread runs never start a trial on the two-thread baseline, and a trial of one shape does not block the other.
+    expect(newTrial([...two, three[2]!], [], undefined, 'x')).toBeUndefined()
+    const trial = newTrial(two, [], undefined, 'two')!
+    expect(trial.shape).toBe('coordinator:central:2:open')
+    expect(newTrial([...three, trun({ parts: 3, events: events({ conflicts: 1 }) })], [{ trial, seq: 1 }], undefined, 'three')).toMatchObject({ shape: 'coordinator:central:3+:open' })
+    expect(collaborationFor([{ trial, seq: 1 }], 'central', 'coordinator:central:3+:open').trial).toBeUndefined()
+    // Both overlap and handoff are called for: the one with the higher hit rate wins; cause names the event hit most.
+    const both = [trun({ events: events({ conflicts: 1, missing: 1 }) }), trun({ events: events({ conflicts: 1 }) }), trun({ events: events({ conflicts: 1, missing: 1, reread: 1 }) }), trun({ events: events({ conflicts: 1, missing: 1 }) })]
+    expect(newTrial(both, [], undefined, 'b')).toMatchObject({ variable: 'overlap', cause: 'conflicts' })
+    const handoffMore = [trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1 }) }), trun({ events: events({ missing: 1, conflicts: 1 }) }), trun({ events: events({ missing: 1 }) })]
+    expect(newTrial(handoffMore, [], undefined, 'c')).toMatchObject({ variable: 'handoff', cause: 'missing' })
+    expect(newTrial(both.map(run => ({ ...run, ms: 100 })), [], undefined, 'd')?.baselineMs).toBe(100)
+  })
+
+  it('reads planned, unknown, owns, triggers and thread corrections from the library lines', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'nexgent-collab-'))
+    try {
+      const library = new OrganizationLibrary(dir)
+      const thread = (name: string) => ({ name, kind: 'thread' as const, tokens: 1, share: 0.5, usd: 0.5, ms: 1, failures: 0, retries: 0, idleMs: 0, wasted: false })
+      const base: OrganizationProfile = { usd: 1, ms: 10, tokens: 3, parts: [{ ...thread('coordinator'), kind: 'coordinator' }, thread('a'), thread('b')], events: events() }
+      const note = async (turn: number, profile: OrganizationProfile, completed?: boolean | 'unknown') => {
+        await library.record({ classId: 'c', key: ['k'], sessionId: 's', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true })
+        await library.noteProfile({ sessionId: 's', turn, profile, ...(completed === undefined ? {} : { completed }) })
+      }
+      await note(1, { ...base, owns: 'apart', triggers: { sequence: 1 }, correctionsBy: { coordinator: 2 } })
+      await note(2, { ...base, correctionsBy: { a: 1 } })
+      await note(3, base, 'unknown')
+      await note(4, { ...base, planned: true })
+      const runs = (await library.runs()).map(trialRun)
+      expect(runs[0]).toMatchObject({ sound: true, owns: 'apart', triggers: { sequence: 1 }, ms: 10 })
+      expect(runs[1]!.sound).toBe(false)
+      expect(runs[2]).toMatchObject({ unknown: true })
+      expect(runs.map(counted)).toEqual([true, true, false, false])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('leaves planned runs and runs with unknown completion out', () => {
+    expect(counted(trun({ planned: true }))).toBe(false)
+    expect(counted(trun({ unknown: true }))).toBe(false)
   })
 
   it('gives a kept value as the default and the trial going on on top of it', () => {
-    const overlap = { id: 'o', shape: 'coordinator', variable: 'overlap' as const, value: 'sequence', target: ['overlap' as const], baseline: { runs: 3, hits: 3 }, need: 2, baselineUsd: 1, runId: 'x' }
+    const overlap = { id: 'o', shape: 'coordinator:central:2:open', variable: 'overlap' as const, value: 'sequence', target: ['overlap' as const], baseline: { runs: 3, hits: 3 }, need: 2, baselineUsd: 1, runId: 'x' }
     const handoff = { ...overlap, id: 'h', variable: 'handoff' as const, value: 'changed', target: ['missing' as const] }
     const states: TrialState[] = [{ trial: overlap, seq: 1, verdict: { verdict: 'kept', seq: 5 } }, { trial: handoff, seq: 6 }]
-    expect(keptCollaboration(states, 'hybrid')).toEqual({ mode: 'hybrid', handoff: 'brief', overlap: 'sequence' })
+    expect(keptCollaboration(states, 'hybrid', 'coordinator:central:2:open')).toMatchObject({ mode: 'hybrid', handoff: 'brief', overlap: 'sequence' })
+    expect(keptCollaboration(states, 'central', 'coordinator:central:3+:open')).toMatchObject({ overlap: 'parallel' })
     expect(collaborationFor(states)).toMatchObject({ collaboration: { mode: 'central', handoff: 'changed', overlap: 'sequence' }, trial: { id: 'h' } })
     expect(trialNote(states, [])).toEqual({ status: 'kept', variable: 'overlap', value: 'sequence' })
     expect(trialNote(states, [trun({ seq: 7 })])).toEqual({ status: 'trying', variable: 'handoff', value: 'changed' })
@@ -307,7 +365,7 @@ describe('collaboration trials', () => {
       expect(next?.section.body).toContain('owns')
       for (let turn = 4; turn <= 5; turn += 1) {
         await library.record({ classId: 'c', key: ['report'], sessionId: 'coord', turn, level: 'coordinator', decision: 'team', control: false, reorganizations: 0, corrections: 0, completed: true, usd: 1, waiting: true, collaboration: { mode: 'central', handoff: 'brief', overlap: 'sequence' }, trial: trial!.trial.id })
-        await library.noteProfile({ sessionId: 'coord', turn, profile: profile(0) })
+        await library.noteProfile({ sessionId: 'coord', turn, profile: { ...profile(0), triggers: { sequence: 1 } } })
       }
       expect((await library.trials())[0]?.verdict?.verdict).toBe('kept')
       const after = await library.suggest({ text: TASK, level: 'coordinator', random: () => 0.9 })

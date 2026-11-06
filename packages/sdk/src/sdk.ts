@@ -63,6 +63,7 @@ import {
   type Tool,
   type TurnCancelCause,
   type TurnEndReason,
+  THREAD_LIMITS,
   type TurnResult,
   type UserMessageSource,
   type WorkdirMerge,
@@ -134,6 +135,12 @@ export interface LocalSdkOptions extends CreateSdkOptions {
   readonly now?: () => Date
   /** Start-up check of the command shell (tests); default {@link checkCommandShell} over {@link env}. */
   readonly checkShell?: () => CommandShellStatus
+  /**
+   * Continue the coordinator's queued and interrupted threads when a project
+   * opens (default true). Hosts that exit right after one action (listing,
+   * stopping, exporting) pass false so they do not start model turns.
+   */
+  readonly resumeThreads?: boolean
 }
 
 /** A raw kernel event with the project it belongs to. */
@@ -143,7 +150,8 @@ export type ProjectAgentEvent = AgentEvent & { readonly projectId: string }
 export type StartTurnInput =
   | (SendMessageInput & { readonly source?: 'user' })
   | { readonly source: 'feedback'; readonly projectId: string; readonly sessionId: string; readonly feedback: FeedbackEntry; readonly materialIds?: readonly string[] }
-  | { readonly source: 'thread'; readonly projectId: string; readonly sessionId: string; readonly text: string; readonly materialIds?: readonly string[] }
+  /** `relay` (D1): the user's own words passed on with the message, recorded right after it as `user.message { source: 'relay' }`. */
+  | { readonly source: 'thread'; readonly projectId: string; readonly sessionId: string; readonly text: string; readonly materialIds?: readonly string[]; readonly relay?: readonly string[] }
 
 /** A started turn. */
 export interface StartedTurn extends TurnHandle {
@@ -412,23 +420,30 @@ export class LocalNexgentSdk implements NexgentSdk {
     const run = input.source === 'feedback'
       ? entry.agent.run({ source: 'feedback', feedback: input.feedback, ...materialIds })
       : input.source === 'thread'
-        ? entry.agent.run({ source: 'thread', text: input.text, ...materialIds })
+        ? entry.agent.run({ source: 'thread', text: input.text, ...materialIds, ...(input.relay === undefined || input.relay.length === 0 ? {} : { relay: [...input.relay] }) })
         : entry.agent.run({ text: (input as SendMessageInput).text, ...materialIds })
     const done = run.then(
       async result => {
         if (entry.agent.thread !== undefined) entry.lastMerge = result.merge
-        await this.writeOutcome(project, entry.agent.sessionId, tally)
+        // The host hears of the end even when the outcome could not be written.
+        await this.writeOutcome(project, entry.agent.sessionId, tally).catch(error => this.reportTurnError(project, entry.agent.sessionId, error))
+        await this.turnEnded(project, entry, result)
         if (this.options.autoTitle === true && turn === 1 && source === 'user' && tally.reason?.kind === 'completed') {
           this.nameAfterFirstTurn(project, entry, (input as SendMessageInput).text)
         }
         return result
       },
-      (error: unknown) => {
+      async (error: unknown) => {
         // The agent could not run the turn (closed, store failure): close the stream ourselves.
         if (!tally.ended) {
           tally.ended = true
           const info = toErrorInfo(error)
           this.emit(project.projectId, entry.agent.sessionId, { type: 'turn.end', turn, reason: { kind: 'error', error: info }, usage: addUsage(...tally.steps) })
+        }
+        // A thread whose turn failed still releases its claims and lets the queue go on.
+        if (entry.agent.thread !== undefined) {
+          const reason: TurnResult['reason'] = { kind: 'error', error: toErrorInfo(error) }
+          await this.turnEnded(project, entry, { sessionId: entry.agent.sessionId, turn, reason, text: '', usage: addUsage(...tally.steps) })
         }
         throw error
       },
@@ -439,6 +454,29 @@ export class LocalNexgentSdk implements NexgentSdk {
     entry.running = { tally, done }
     done.catch(() => undefined)
     return { sessionId: entry.agent.sessionId, turn, done }
+  }
+
+  /**
+   * Tell the thread host a turn ended: a thread's turn (merge, claims, queue)
+   * and a coordinator's turn (what the user said meanwhile reaches the running
+   * threads, queued threads start). A failure is reported, never thrown.
+   */
+  private reportTurnError(project: ProjectEntry, sessionId: string, error: unknown): void {
+    if (!this.disposed && project.closing !== true) this.emit(project.projectId, sessionId, { type: 'error', error: toErrorInfo(error), fatal: false })
+  }
+
+  private async turnEnded(project: ProjectEntry, entry: SessionEntry, result: TurnResult): Promise<void> {
+    const sessionId = entry.agent.sessionId
+    const report = (error: unknown): void => this.reportTurnError(project, sessionId, error)
+    try {
+      if (entry.agent.thread !== undefined) {
+        await project.threads.turnEnded(sessionId, result)
+      } else if (entry.agent.parentSessionId === undefined && (await this.coordinatorId(project)) === sessionId) {
+        void project.threads.coordinatorTurnEnded(sessionId, result.turn).catch(report)
+      }
+    } catch (error) {
+      report(error)
+    }
   }
 
   /**
@@ -567,7 +605,15 @@ export class LocalNexgentSdk implements NexgentSdk {
 
   private async bootProject(inputRoot: string): Promise<ProjectEntry> {
     let booted: ProjectEntry | undefined
-    const threads = new SdkThreadHost(this.threadRuntime(() => booted))
+    const threads = new SdkThreadHost(this.threadRuntime(() => booted), {
+      // A log entry reaches the windows showing the coordinator and the threads it is about.
+      onCollab: (coordinatorSessionId, entry) => {
+        if (booted === undefined || this.disposed) return
+        for (const sessionId of new Set([coordinatorSessionId, entry.from, ...(entry.to === undefined ? [] : [entry.to])])) {
+          if (booted.sessions.has(sessionId)) this.emit(booted.projectId, sessionId, { type: 'collab', entry })
+        }
+      },
+    })
     const app = await bootProjectApp({
       threads,
       root: inputRoot,
@@ -602,6 +648,15 @@ export class LocalNexgentSdk implements NexgentSdk {
       ctx.approvals.setResponder(this.options.approvalResponder ?? ((request, signal) => this.awaitApproval(project, request, signal)))
       app.agents.setProjectGrantWriter(grant => appendGrant(ctx.workspace.layout, grant))
       this.projects.set(projectId, project)
+      // D3: threads left queued, or stopped by the last exit, continue under the project's coordinator.
+      if (this.options.resumeThreads !== false) void this.coordinatorId(project).then(async id => {
+        if (id === undefined) return
+        try {
+          await project.threads.resume(id)
+        } catch (error) {
+          if (!this.disposed && project.closing !== true) this.emit(projectId, id, { type: 'error', error: toErrorInfo(error), fatal: false })
+        }
+      }).catch(() => undefined)
       return project
     } catch (error) {
       await app.dispose().catch(() => undefined)
@@ -663,18 +718,29 @@ export class LocalNexgentSdk implements NexgentSdk {
         const entry = await this.rootSession(project(), sessionId)
         await entry.agent.appendHostRecord(record)
       },
-      startTurn: async (sessionId, text, materialIds, source = 'thread') => {
+      startTurn: async (sessionId, text, materialIds, source = 'thread', relay) => {
         await this.followCoordinatorPlan(project(), sessionId)
-        const started = await this.startTurn({ ...(source === 'thread' ? { source: 'thread' as const } : {}), projectId: project().projectId, sessionId, text, ...(materialIds === undefined ? {} : { materialIds }) })
+        const started = await this.startTurn({
+          ...(source === 'thread' ? { source: 'thread' as const, ...(relay === undefined || relay.length === 0 ? {} : { relay }) } : {}),
+          projectId: project().projectId,
+          sessionId,
+          text,
+          ...(materialIds === undefined ? {} : { materialIds }),
+        })
         return { turn: started.turn, done: started.done }
       },
-      steer: async (sessionId, text) => {
+      steer: async (sessionId, text, relay) => {
         const entry = await this.rootSession(project(), sessionId)
         const running = entry.running
         if (running === undefined || running.tally.ended) return false
         await this.followCoordinatorPlan(project(), sessionId)
-        return entry.agent.steer(text, { source: 'thread' })
+        return entry.agent.steer(text, { source: 'thread', ...(relay === undefined || relay.length === 0 ? {} : { relay }) })
       },
+      cancel: sessionId => this.cancelTurn({ projectId: project().projectId, sessionId, cause: 'user' }),
+      maxRunning: async () => (await readProjectConfig(project().app.ctx.workspace.layout.configFile).catch(() => undefined))?.config.threads?.maxRunning ?? THREAD_LIMITS.maxRunning,
+      projectRoot: () => project().app.ctx.workspace.root,
+      // Opening the session works it out again from the thread's workdir; a thread not open here still shows it.
+      isolated: async sessionId => (project().sessions.get(sessionId) ?? await this.rootSession(project(), sessionId).catch(() => undefined))?.agent.isolated,
       running: sessionId => this.isRunning(project().projectId, sessionId),
       turnDone: async sessionId => {
         await project().sessions.get(sessionId)?.running?.done.catch(() => undefined)
@@ -896,13 +962,16 @@ export class LocalNexgentSdk implements NexgentSdk {
     const start = records.find(record => record.type === 'session.start')
     const commandSandbox = start?.type === 'session.start' ? start.commandSandbox : undefined
     const model = entry?.agent.model ?? state.metadata.model
+    // Organization redo: the log entries that concern a thread or the coordinator, placed by time.
+    const collab = state.metadata.parentSessionId === undefined ? await project.threads.collabFor(sessionId).catch(() => []) : []
+    const items = historyItems(records, collab)
     return {
       summary: await this.marked(project, sessionSummary(records, state, this.shownRunning(project.projectId, sessionId))),
       sandboxMode: entry?.agent.executionMode ?? state.metadata.sandboxMode,
       plan: entry?.agent.plan ?? state.metadata.plan === true,
       ...(commandSandbox === undefined ? {} : { commandSandbox }),
       model,
-      items: state.metadata.parentSessionId === undefined ? withTurnCosts(historyItems(records), records, model) : historyItems(records),
+      items: state.metadata.parentSessionId === undefined ? withTurnCosts(items, records, model) : items,
       totalUsage: state.metadata.totalUsage,
     }
   }
@@ -1300,6 +1369,18 @@ export class LocalNexgentSdk implements NexgentSdk {
           ...(input.materialIds === undefined ? {} : { materialIds: input.materialIds }),
           ...(input.owns === undefined ? {} : { owns: input.owns }),
         })
+      },
+      'threads.stop': async input => {
+        if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
+        if (typeof input.threadId !== 'string' || input.threadId === '') throw invalid('threadId must be a string')
+        if (input.reason !== undefined && typeof input.reason !== 'string') throw invalid('reason must be a string')
+        const project = this.project(input.projectId)
+        await this.rootSession(project, input.sessionId)
+        return project.threads.stop({ coordinatorSessionId: input.sessionId, threadId: input.threadId, ...(input.reason === undefined ? {} : { reason: input.reason }) })
+      },
+      'threads.plan': async input => {
+        if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')
+        return this.project(input.projectId).threads.plan(input.sessionId) ?? null
       },
       'threads.collab': async input => {
         if (typeof input.sessionId !== 'string' || input.sessionId === '') throw invalid('sessionId must be a string')

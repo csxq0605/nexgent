@@ -56,6 +56,13 @@ export interface RuntimeOpenOptions {
   readonly sandboxMode?: SandboxMode
   /** Start in plan mode (`--plan`, new sessions only). */
   readonly plan?: boolean
+  /**
+   * `--thread`: the threads to start (new sessions only). The task runs in the
+   * project's coordinator conversation and the run waits for the threads.
+   */
+  readonly threads?: readonly { readonly title: string; readonly task?: string }[]
+  /** With {@link threads}: start exactly these (default `true`). */
+  readonly exactThreads?: boolean
   /** The host's approval responder, to register with `ctx.approvals`. */
   readonly approvals: ApprovalResponder
   /** Process environment (API base URL override, `NEXGENT_HOME`). */
@@ -232,6 +239,8 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
     appVersion: packageVersion(),
     env: options.env,
     approvalResponder: options.approvals,
+    // Only a run that waits for threads keeps them going; a one-session run would cut them off at exit.
+    resumeThreads: options.threads !== undefined && options.threads.length > 0,
   })
   try {
     const project = await sdk.call('projects.open', { root: options.layout.root })
@@ -250,7 +259,10 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
     })
     let view
     try {
-      view = resumeId === undefined
+      const named = options.threads !== undefined && options.threads.length > 0
+      view = named
+        ? await sdk.openSession({ projectId, sessionId: (await sdk.call('sessions.coordinator', { projectId })).sessionId, ...(options.sandboxMode === undefined ? {} : { sandboxMode: options.sandboxMode }) })
+        : resumeId === undefined
         ? await sdk.openSession({
           projectId,
           sessionId: (await sdk.createSession({
@@ -295,7 +307,7 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
           yield { type: 'turn.end', turn: interruptedTurn, reason: { kind: 'interrupted' } }
           interruptedTurn = undefined
         }
-        const queue = new EventQueue<ProjectAgentEvent | { type: 'member'; event: MemberStartEvent | MemberEndEvent } | { type: 'run.settled'; error?: unknown }>()
+        const queue = new EventQueue<ProjectAgentEvent | { type: 'member'; event: MemberStartEvent | MemberEndEvent } | { type: 'run.settled'; error?: unknown } | { type: 'quiet' }>()
         const unsubscribeAgent = sdk.onAgentEvent(event => {
           if (event.projectId === projectId && event.sessionId === sessionId) queue.push(event)
         })
@@ -309,20 +321,35 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
         }
         const onAbort = () => void sdk.cancelTurn({ projectId, sessionId, cause: cancelCause(signal) })
         let turn: number | undefined
+        let waiting = false
+        const named = options.threads !== undefined && options.threads.length > 0
         try {
-          const started = await sdk.startTurn({ projectId, sessionId, text: task })
+          // With named threads the message goes through `send`, which hands the plan to the thread host.
+          const started: { readonly turn: number; readonly done: Promise<unknown> } = named
+            ? await startNamed(sdk, projectId, sessionId, task, options.threads!, options.exactThreads !== false)
+            : await sdk.startTurn({ projectId, sessionId, text: task })
           turn = started.turn
           started.done.then(() => queue.push({ type: 'run.settled' }), (error: unknown) => queue.push({ type: 'run.settled', error }))
           signal.addEventListener('abort', onAbort, { once: true })
           if (signal.aborted) onAbort()
+          // The threads run in this process: once the first turn ends, keep rendering until they and the coordinator's follow-up turns are quiet.
+          const beginWait = (): void => {
+            if (waiting) return
+            waiting = true
+            void waitForThreads(sdk, projectId, sessionId, signal).then(() => queue.push({ type: 'quiet' }), () => queue.push({ type: 'quiet' }))
+          }
           for (;;) {
             const event = await queue.next()
+            if (event.type === 'quiet') break
             if (event.type === 'run.settled') {
               // `done` settles only after `turn.end` was emitted; a rejection means no turn.end.
               if (event.error !== undefined) {
                 yield { type: 'turn.end', turn, reason: { kind: 'error', error: toErrorInfo(event.error) } }
+                break
               }
-              break
+              if (!named) break
+              beginWait()
+              continue
             }
             if (event.type === 'member') {
               yield event.event
@@ -332,7 +359,8 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
             if (event.type === 'turn.end' && event.turn === turn) {
               // let the SDK finish the turn's bookkeeping (task.outcome) before the caller closes
               await started.done.catch(() => undefined)
-              break
+              if (!named) break
+              beginWait()
             }
           }
         } finally {
@@ -362,5 +390,50 @@ async function openSession(options: RuntimeOpenOptions): Promise<RuntimeSession>
   } catch (error) {
     await sdk.dispose().catch(() => undefined)
     throw error
+  }
+}
+
+/** Start the coordinator's turn with the user's threads; `done` settles when its `turn.end` is emitted. */
+async function startNamed(
+  sdk: LocalNexgentSdk,
+  projectId: string,
+  sessionId: string,
+  text: string,
+  threads: readonly { readonly title: string; readonly task?: string }[],
+  exact: boolean,
+): Promise<{ readonly turn: number; readonly done: Promise<unknown> }> {
+  let settle: () => void = () => {}
+  const done = new Promise<void>(resolve => { settle = resolve })
+  const stop = sdk.subscribe(event => {
+    if (event.projectId === projectId && event.sessionId === sessionId && event.type === 'turn.end') settle()
+  })
+  void done.finally(stop)
+  let handle: Awaited<ReturnType<LocalNexgentSdk['send']>>
+  try {
+    handle = await sdk.send({ projectId, sessionId, text, threads, exactThreads: exact })
+  } catch (error) {
+    stop()
+    throw error
+  }
+  return { turn: handle.turn, done }
+}
+
+/**
+ * After the coordinator's turn: wait until no thread of it runs or is queued
+ * and the coordinator itself is idle (it is woken when a thread stops and may
+ * start a follow-up turn). An abort stops the threads still going.
+ */
+async function waitForThreads(sdk: LocalNexgentSdk, projectId: string, sessionId: string, signal: AbortSignal): Promise<void> {
+  let quiet = 0
+  while (quiet < 3) {
+    const threads = await sdk.call('threads.list', { projectId, sessionId })
+    const active = threads.filter(thread => thread.status === 'running' || thread.status === 'queued')
+    const busy = active.length > 0 || (await sdk.call('sessions.list', { projectId })).some(s => s.sessionId === sessionId && s.running)
+    if (signal.aborted) {
+      await Promise.all(active.map(thread => sdk.call('threads.stop', { projectId, sessionId, threadId: thread.threadId, reason: 'cancelled from the command line' }).catch(() => undefined)))
+      return
+    }
+    quiet = busy ? 0 : quiet + 1
+    await new Promise(resolve => setTimeout(resolve, 500))
   }
 }

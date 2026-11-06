@@ -51,6 +51,8 @@ export interface ProcessRunnerOptions {
  */
 export interface LocalProcessSpec extends ProcessSpec {
   readonly outputFiles?: { readonly stdout: string; readonly stderr: string }
+  /** Called once the process has started, with a synchronous SIGKILL of its tree. */
+  readonly onStart?: (handle: { readonly killNow: () => void }) => void
 }
 
 /** Whether a POSIX process group still has a live (non-zombie) member. */
@@ -167,6 +169,7 @@ export class LocalProcessRunner implements ProcessRunner {
     }
     const { child, redactor, useJob } = startChild(spec, this.options, this.redactor)
 
+    spec.onStart?.({ killNow: () => signalTree(child, 'SIGKILL') })
     const buffers = { stdout: new HeadTailBuffer(this.maxOutputBytes), stderr: new HeadTailBuffer(this.maxOutputBytes) }
     const sinks = spec.outputFiles === undefined
       ? undefined
@@ -302,12 +305,32 @@ export interface BackgroundRead extends BackgroundStatus {
   readonly output: string
 }
 
+/** What {@link BackgroundShells.adopt} needs. */
+export interface AdoptStart {
+  readonly sessionId: string
+  readonly label: string
+  readonly logPath: string
+  /** When the command started (ms since the epoch). */
+  readonly startedAt: number
+  /** Output so far (already redacted). */
+  readonly initial: { readonly stdout: string; readonly stderr: string }
+  /** Settles when the command (and its tree) has ended. */
+  readonly finished: Promise<ProcessResult>
+  /** Ends the command and its tree. */
+  readonly abort: () => void
+  /** Synchronous SIGKILL of the tree, for host exit (no grace period). */
+  readonly killNow?: () => void
+  /** Called once when it has ended. */
+  readonly onExit?: () => void
+}
+
 interface BackgroundEntry {
   readonly id: string
   readonly sessionId: string
   readonly label: string
   readonly logPath: string
-  readonly child: ChildProcess
+  /** Absent for a foreground command moved to the background ({@link BackgroundShells.adopt}): it is ended through its own `kill`. */
+  readonly child: ChildProcess | undefined
   readonly startedAt: number
   readonly exited: Promise<void>
   unread: string
@@ -319,6 +342,8 @@ interface BackgroundEntry {
   endedAt: number | undefined
   kill: () => Promise<void>
   readonly onExit: (() => void) | undefined
+  /** An adopted command's synchronous SIGKILL (host exit). */
+  readonly killNow?: (() => void) | undefined
 }
 
 const liveRegistries = new Set<BackgroundShells>()
@@ -435,6 +460,58 @@ export class BackgroundShells {
     return this.status(entry)
   }
 
+  /**
+   * Take over a foreground command that is still running (it was started
+   * through the process runner): from now on it is a background process with
+   * the output it has produced so far, readable with `shell_output` and ended
+   * with `shell_kill`. `finished` settles when the runner is done with it;
+   * `abort` ends it. The caller keeps feeding output through `push`.
+   */
+  adopt(spec: AdoptStart): { readonly status: BackgroundStatus; push(stream: 'stdout' | 'stderr', text: string): void } {
+    const id = `bg-${++this.counter}`
+    const onText = (text: string): void => {
+      entry.unread += text
+      if (entry.unread.length > this.maxUnread * 2) {
+        const drop = entry.unread.length - this.maxUnread * 2
+        entry.unread = entry.unread.slice(drop)
+        entry.droppedUnread += drop
+      }
+    }
+    const sinks = [new FileSink(spec.logPath, this.redactor, onText), new FileSink(spec.logPath, this.redactor, onText)]
+    const entry: BackgroundEntry = {
+      id, sessionId: spec.sessionId, label: spec.label, logPath: spec.logPath, child: undefined, startedAt: spec.startedAt,
+      exited: undefined as unknown as Promise<void>,
+      unread: '', droppedUnread: 0, running: true, exitCode: null, signal: undefined, killed: false, endedAt: undefined,
+      kill: undefined as unknown as () => Promise<void>,
+      onExit: spec.onExit,
+      killNow: spec.killNow,
+    }
+    entry.kill = async () => {
+      spec.abort()
+      await spec.finished.catch(() => undefined)
+    }
+    for (const [index, text] of [spec.initial.stdout, spec.initial.stderr].entries()) if (text !== '') sinks[index]!.write(text)
+    ;(entry as { exited: Promise<void> }).exited = spec.finished.then(
+      result => ({ result, failure: undefined as string | undefined }),
+      (error: unknown) => ({ result: undefined, failure: error instanceof Error ? error.message : String(error) }),
+    ).then(async ({ result, failure }) => {
+      if (failure !== undefined) sinks[1]!.write(`${failure}\n`)
+      await Promise.all(sinks.map(sink => sink.close()))
+      entry.exitCode = result?.exitCode ?? null
+      entry.signal = result?.signal
+      if (result?.timedOut === true || result?.aborted === true) entry.killed = true
+      entry.running = false
+      entry.endedAt = Date.now()
+      try {
+        entry.onExit?.()
+      } catch {
+        // a failing callback must not strand the process record
+      }
+    })
+    this.entries.set(id, entry)
+    return { status: this.status(entry), push: (stream, text) => sinks[stream === 'stdout' ? 0 : 1]!.write(text) }
+  }
+
   private status(entry: BackgroundEntry): BackgroundStatus {
     return {
       id: entry.id,
@@ -511,6 +588,12 @@ export class BackgroundShells {
 
   /** Synchronous SIGKILL of every running tree (host exit). */
   killAllNow(): void {
-    for (const entry of this.entries.values()) if (entry.running) signalTree(entry.child, 'SIGKILL')
+    for (const entry of this.entries.values()) {
+      if (!entry.running) continue
+      if (entry.child === undefined) {
+        if (entry.killNow !== undefined) entry.killNow()
+        else void entry.kill()
+      } else signalTree(entry.child, 'SIGKILL')
+    }
   }
 }

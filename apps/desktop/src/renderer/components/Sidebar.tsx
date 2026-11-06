@@ -108,6 +108,7 @@ export function Sidebar(): JSX.Element {
     if (active && state.pendingApprovals.length > 0) return <State tone="warn">{T.needsApproval}</State>
     // Coordinator step three: a thread in the background waits for the user to allow something.
     if (!active && state.threads.some(t => t.threadId === session.sessionId && t.needsApproval === true)) return <State tone="warn">{T.needsApproval}</State>
+    if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'queued')) return <State tone="idle">{T.threadQueued}</State>
     if (session.running) return <State tone="run">{T.running}</State>
     if (state.threads.some(t => t.threadId === session.sessionId && t.status === 'waiting')) return <State tone="warn">{T.threadWaiting}</State>
     if (session.interrupted) return <State tone="idle">{T.interrupted}</State>

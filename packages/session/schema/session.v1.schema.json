@@ -467,7 +467,10 @@
           "$ref": "#/$defs/nonEmptyString"
         },
         "origin": {
-          "const": "user"
+          "enum": [
+            "user",
+            "plan"
+          ]
         },
         "owns": {
           "type": "array",
@@ -1178,7 +1181,8 @@
             "user",
             "inject",
             "feedback",
-            "thread"
+            "thread",
+            "relay"
           ]
         },
         "materials": {
@@ -1548,6 +1552,18 @@
                     "parallel",
                     "sequence"
                   ]
+                },
+                "wake": {
+                  "enum": [
+                    "coordinator",
+                    "named"
+                  ]
+                },
+                "check": {
+                  "enum": [
+                    "merged",
+                    "separate"
+                  ]
                 }
               }
             },
@@ -1571,7 +1587,9 @@
                 "variable": {
                   "enum": [
                     "handoff",
-                    "overlap"
+                    "overlap",
+                    "wake",
+                    "check"
                   ]
                 },
                 "value": {

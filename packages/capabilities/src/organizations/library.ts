@@ -56,7 +56,7 @@ import { join } from 'node:path'
 import type { CollaborationMode, CollaborationTrial, CollaborationVerdict, OrganizationProfile, OrganizationChange, OrganizationChangeVerdict, OrganizationClassSummary, OrganizationLevel, OrganizationMemory, OrganizationName, OrganizationRole, OrganizationRun, OrganizationSuggestion } from '@nexgent/kernel'
 import { jaccard } from '../handbook/tokens.js'
 import { similarityKey } from '../handbook/tokens.js'
-import { collaborationFor, judgeTrial, newTrial, trialNote, type TrialRun, type TrialState } from './collaboration.js'
+import { collaborationFor, expectedShape, judgeTrial, newTrial, shapeOf, trialNote, type TrialRun, type TrialState } from './collaboration.js'
 
 /** Overlap a task needs with a recorded one to join its class. */
 export const ORGANIZATION_CLASS_MIN = 0.25
@@ -99,15 +99,18 @@ export type OrganizationLogLine =
   | { readonly type: 'trial-verdict'; readonly trialId: string; readonly verdict: CollaborationVerdict; readonly at: string }
   /**
    * Coordinator step two: the full profile of a run whose threads have all ended (replaces the run's profile and cost, ends its `waiting`).
-   * `completed: false`: a thread run of the turn did not complete, so neither did the run.
+   * `completed: false`: a thread run of the turn did not complete, so neither did the run;
+   * `'unknown'`: a thread's last reply lacked the four-line format, so whether it completed is not known.
    */
-  | { readonly type: 'profile'; readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly completed?: boolean; readonly at: string }
+  | { readonly type: 'profile'; readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly completed?: boolean | 'unknown'; readonly at: string }
 
 /** A recorded run with what later lines said about it. */
 export interface FoldedRun extends OrganizationRun {
   /** Position of the run's line in the log. */
   readonly seq?: number
   readonly reworked: boolean
+  /** Whether the run completed is not known (left out of collaboration trials). */
+  readonly unknown?: true
   /** The external reviewer's score, when the run was reviewed. */
   readonly review?: number
 }
@@ -127,7 +130,7 @@ export function foldOrganizationLog(lines: readonly OrganizationLogLine[]): Fold
       const index = runs.findIndex(run => run.sessionId === line.sessionId && run.turn === line.turn)
       if (index >= 0) {
         const { waiting: _waiting, ...run } = runs[index]!
-        runs[index] = { ...run, usd: line.profile.usd, profile: line.profile, ...(line.completed === false ? { completed: false } : {}) }
+        runs[index] = { ...run, usd: line.profile.usd, profile: line.profile, ...(line.completed === false ? { completed: false } : {}), ...(line.completed === 'unknown' ? { unknown: true as const } : {}) }
       }
     } else if (line.type === 'review') {
       const index = runs.findIndex(run => run.sessionId === line.sessionId && run.turn === line.turn)
@@ -164,8 +167,14 @@ export function trialRun(run: FoldedRun): TrialRun {
     ...(profile?.events === undefined ? {} : { events: profile.events }),
     ...(run.collaboration === undefined ? {} : { collaboration: run.collaboration }),
     ...(run.trial === undefined ? {} : { trial: run.trial }),
-    sound: wentWell({ ...run, corrections: 0 }),
+    // The user's corrections to the coordinator are how the user talks to the task; those sent to a thread count against the run.
+    sound: wentWell({ ...run, corrections: 0 }) && !Object.entries(profile?.correctionsBy ?? {}).some(([who, n]) => who !== 'coordinator' && n > 0),
     usd: run.usd,
+    ...(profile === undefined ? {} : { ms: profile.ms }),
+    ...(profile?.triggers === undefined ? {} : { triggers: profile.triggers }),
+    ...(profile?.planned === true ? { planned: true } : {}),
+    ...(profile?.owns === undefined ? {} : { owns: profile.owns }),
+    ...(run.unknown === true ? { unknown: true } : {}),
     ...(run.waiting === true ? { waiting: true } : {}),
   }
 }
@@ -176,7 +185,7 @@ export function trialRun(run: FoldedRun): TrialRun {
  * signals, the review is what tells a good result from a poor one.
  */
 export function wentWell(run: FoldedRun): boolean {
-  return run.completed && run.waiting !== true && !run.reworked && run.corrections === 0 && (run.checks === undefined || run.checks.passed === run.checks.total)
+  return run.completed && run.unknown !== true && run.waiting !== true && !run.reworked && run.corrections === 0 && (run.checks === undefined || run.checks.passed === run.checks.total)
     && (run.review === undefined || run.review >= ORGANIZATION_REVIEW_GOOD)
 }
 
@@ -317,8 +326,10 @@ export function suggestOrganization(key: readonly string[], runs: readonly Folde
 
 /** Pure: how a coordinator task's threads work together: the kept arrangement, the trial going on, and the line about it. */
 export function collaborationAdvice(states: readonly TrialState[], runs: readonly FoldedRun[], mode: CollaborationMode): Pick<OrganizationSuggestion, 'collaboration' | 'trial' | 'trialNote'> {
-  const { collaboration, trial } = collaborationFor(states, mode)
-  const note = trialNote(states, runs.filter(run => run.level === 'coordinator').map(trialRun))
+  const trialRuns = runs.filter(run => run.level === 'coordinator').map(trialRun)
+  const shape = expectedShape(trialRuns, mode)
+  const { collaboration, trial } = collaborationFor(states, mode, shape)
+  const note = trialNote(states, trialRuns, shape)
   return { collaboration, ...(trial === undefined ? {} : { trial: trial.id }), ...(note === undefined ? {} : { trialNote: note }) }
 }
 
@@ -441,11 +452,11 @@ export class OrganizationLibrary implements OrganizationMemory {
    * the threads' cost (`addUsd`) joins the run's cost. A coordinator run's
    * collaboration is then judged. A run that is not waiting for threads is left alone.
    */
-  noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
+  noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean | 'unknown' }): Promise<void> {
     return this.#serial(() => this.#noteProfile(input))
   }
 
-  async #noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean }): Promise<void> {
+  async #noteProfile(input: { readonly sessionId: string; readonly turn: number; readonly profile: OrganizationProfile; readonly addUsd?: number; readonly completed?: boolean | 'unknown' }): Promise<void> {
     const run = (await this.runs()).find(item => item.sessionId === input.sessionId && item.turn === input.turn)
     if (run === undefined || run.waiting !== true) return
     const usd = Math.round((run.usd + Math.max(0, input.addUsd ?? 0)) * 1e6) / 1e6
@@ -460,7 +471,7 @@ export class OrganizationLibrary implements OrganizationMemory {
         ...(part.kind === 'coordinator' ? { retries: Math.max(part.retries, retries) } : {}),
       })),
     }
-    await this.#append({ type: 'profile', sessionId: input.sessionId, turn: input.turn, profile, ...(input.completed === false ? { completed: false } : {}), at: this.#now().toISOString() })
+    await this.#append({ type: 'profile', sessionId: input.sessionId, turn: input.turn, profile, ...(input.completed === false || input.completed === 'unknown' ? { completed: input.completed } : {}), at: this.#now().toISOString() })
     if (run.level === 'coordinator') await this.#judgeCollaboration(run.id)
   }
 
@@ -474,14 +485,18 @@ export class OrganizationLibrary implements OrganizationMemory {
     const runs = foldOrganizationLog(lines).filter(run => run.level === 'coordinator').map(trialRun)
     const states = foldTrials(lines)
     const at = this.#now().toISOString()
-    const active = states.find(state => state.verdict === undefined)
-    if (active !== undefined) {
+    const settled = runs.find(run => run.id === runId)
+    const shape = settled === undefined ? undefined : shapeOf(settled)
+    // Trials are per shape: each one going is judged with the runs so far.
+    let decided = false
+    for (const active of states.filter(state => state.verdict === undefined)) {
       const verdict = judgeTrial(active.trial, runs)
-      if (verdict === undefined) return
+      if (verdict === undefined) continue
       await this.#append({ type: 'trial-verdict', trialId: active.trial.id, verdict, at })
-      // The run that decided the trial ran under it: it does not start the next one.
-      return
+      if (active.trial.shape === shape) decided = true
     }
+    // The run that decided the trial ran under it: it does not start the next one.
+    if (decided || states.some(state => state.verdict === undefined && state.trial.shape === shape)) return
     const trial = newTrial(runs, states, runId)
     if (trial !== undefined) await this.#append({ type: 'trial', trial, at })
   }

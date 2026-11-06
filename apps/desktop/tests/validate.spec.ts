@@ -22,6 +22,8 @@ const VALID: Record<SdkMethodName, Record<string, unknown>> = {
   'threads.list': s,
   'threads.start': { ...s, title: '文档', task: '补齐文档', owns: ['docs'] },
   'threads.collab': { ...s, all: true },
+  'threads.stop': { ...s, threadId: 't1', reason: '不要了' },
+  'threads.plan': s,
   'sessions.open': s,
   'sessions.close': s,
   'sessions.export': { ...s, outDir: ABS },

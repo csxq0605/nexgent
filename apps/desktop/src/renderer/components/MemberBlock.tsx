@@ -156,16 +156,24 @@ export function ThreadCard({ entry, readOnly = false }: { readonly entry: Member
   const { run } = entry
   const app = useAppState()
   const thread = app.sessions.find(session => session.sessionId === run.childSessionId)
+  const info = app.threads.find(t => t.threadId === run.childSessionId)
+  const queued = info?.status === 'queued'
   const state = threadRunState(run.status, run.blocker)
   // Coordinator step three: the running thread waits for the user to allow a tool call; the answer is given in the thread.
   const approval = state === 'running' && app.threads.some(t => t.threadId === run.childSessionId && t.needsApproval === true)
   const tone: Tone = approval ? 'warn' : state === 'running' ? 'run' : state === 'done' ? 'ok' : state === 'failed' ? 'bad' : state === 'stopped' ? 'idle' : 'warn'
   return (
-    <section className="thread-card" data-testid="thread-card" data-thread={run.childSessionId} data-status={approval ? 'approval' : state}>
+    <section className="thread-card" data-testid="thread-card" data-thread={run.childSessionId} data-status={queued ? 'queued' : approval ? 'approval' : state}>
       <div className="member-line">
         <span className="role-label">{T.threadLabel}</span>
         <span className="member-name ellipsis" data-testid="thread-title">{thread?.thread?.title ?? thread?.title ?? run.name}</span>
-        <State tone={tone} testId="thread-status">{approval ? T.threadApproval : threadStatusText(state)}</State>
+        {info?.isolated === false && <span className="faint small" title={T.threadSharedHelp} data-testid="thread-shared">{T.threadShared}</span>}
+        <State tone={queued ? 'idle' : tone} testId="thread-status">{queued ? T.threadQueued : approval ? T.threadApproval : threadStatusText(state)}</State>
+        {!readOnly && (queued || state === 'running') && (
+          <button type="button" className="ghost small" title={T.threadStopHelp} onClick={() => void store.stopThread(run.childSessionId)} data-testid="thread-stop">
+            {T.threadStop}
+          </button>
+        )}
       </div>
       {approval && <div className="member-stuck small wrap" data-testid="thread-approval">{T.threadApprovalHint}</div>}
       {state === 'waiting' && run.blocker !== undefined && <div className="member-stuck small wrap" data-testid="thread-ask">{T.threadAsk(run.blocker)}</div>}

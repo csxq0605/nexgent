@@ -7,8 +7,12 @@ The `nexgent` command: `nexgent run` (new session, one task), `nexgent resume <s
 ## Usage
 
 ```text
-nexgent run --project <dir> --task "<text>" [--sandbox <mode>] [--model <id>] [--json]
+nexgent run --project <dir> --task "<text>" [--sandbox <mode>] [--model <id>] [--plan] [--json]
 nexgent resume <sessionId> --project <dir> [--task "<text>"] [--sandbox <mode>] [--json]
+nexgent run --project <dir> --task "<text>" --thread "<title>[: <sentence>]" [--thread ...] [--no-exact-threads]
+nexgent thread start --project <dir> --title <text> --task "<text>" [--json]
+nexgent thread list --project <dir> [--json]
+nexgent thread stop <threadId> --project <dir> [--reason <text>] [--json]
 nexgent export <sessionId> --project <dir> [--out <dir>] [--json]
 nexgent app [--project <dir>]
 nexgent sandbox install
@@ -26,6 +30,8 @@ nexgent resume 6f1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b --project ./my-project      
 - `--project`: an existing directory (resolved against the cwd). The first run creates `.nexgent/{sessions,materials,outputs,capabilities,ledgers}` through the workspace service and writes `.nexgent/config.json` with the defaults; an existing config is never touched.
 - `--sandbox`: `read-only | workspace-write | full-access`. Precedence: the flag, then `.nexgent/config.json` `sandboxMode`, then `workspace-write`. `resume` keeps the mode in the session header unless you pass the flag again. An invalid value fails; there is no silent fallback. With `full-access` the CLI prints a one-line warning.
 - `--model`: model id for a new session (else `config.json` `model`, then the profile's `claude-sonnet-5-5`). On `resume` the session header's model is kept.
+- `--thread "<title>[: <sentence>]"` (repeatable): name the threads you want for the task. `run` then works in the project's coordinator conversation (the resident one, not a new session), which starts them, and waits until the threads and the coordinator's follow-up finish; Ctrl+C stops the threads still going. With `--exact-threads` (default) only these are started, `--no-exact-threads` makes them suggestions. It takes no `--plan` or `--model`.
+- `thread start` begins a thread of the coordinator with your task as its first message, waits until it stops and prints its status line (`--json`: one JSON line); `thread list` shows each thread's id, status, turns and title; `thread stop <threadId>` stops a thread (threads run inside the process that started them, so it reaches queued or recorded threads, not another running process).
 - Session ids are lowercase uuid v4; `resume` rejects anything else before touching the disk.
 - `resume` without `--task` sends `RESUME_DEFAULT_TASK` ("Continue the previous task from where it stopped."). A turn the previous process never closed (crash, `kill -9`) is ended as `turn.end { kind: 'interrupted' }` first; the model sees the earlier history and the delivered prefix of the interrupted reply.
 - Text mode: stdout carries only the assistant's streamed text. Progress goes to stderr: the session line, `> tool args`, `ok|error N ms: result`, approvals, turn status and a closing summary (status, requests, tool calls, tokens, with `?` for unknown).
@@ -123,9 +129,3 @@ Event mapping (`mapAgentEvent`):
 | `packages/bundle/headless` (README, `index.ts`) | one-shot run shape, stdout/stderr split, `final` line, exit 0/1 (extended) |
 | `packages/boot/cmdline`, `apps/cli/src/args.ts` | argument-parsing conventions (rewritten on `util.parseArgs`, no commander) |
 | `packages/bundle/base` | read only; profile composition belongs to the kernel |
-
-## Not done yet
-
-- `nexgent.ps1` has not been executed (no PowerShell in the authoring environment).
-- Approval prompts are not exercised end to end (no TTY in tests; headless denies).
-- `nexgent app` has only been run against a stand-in app; the real `apps/desktop` (W5) must accept `<appDir> [--project <abs>]`.

@@ -17,4 +17,4 @@ export { RECENT_PROJECTS_FILE, RECENT_PROJECTS_LIMIT, RecentProjects } from './r
 export type { RecentProjectEntry } from './recent.js'
 export { describeApiKey, readSettings, secretValues, setApiKey, updateSettings } from './settings.js'
 export type { CredentialEnv } from './settings.js'
-export { CollabLog, collabDelivery, collabRelevance, currentTaskEntries, readerPaths, renderCollabEntry, taskStartSeq, type CollabDeliveryInput, type CollabReader } from './collab.js'
+export { CollabLog, collabDelivery, collabRelevance, currentTaskEntries, hopsOf, logEvents, readerPaths, renderCollabEntry, taskStartSeq, waitCycle, type CollabDeliveryInput, type CollabLogOptions, type CollabReader, type LogEvents, type LogEventsInput } from './collab.js'

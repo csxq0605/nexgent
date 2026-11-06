@@ -137,6 +137,23 @@ export const T = {
   threadStopped: '停了',
   threadFailed: '没做成',
   threadAsk: (text: string) => `在问：${text}`,
+  threadQueued: '排队中',
+  threadQueuedHelp: '同时运行的讨论串已满，排在后面，轮到时自动开始',
+  threadStop: '停止',
+  threadStopHelp: '停掉这个讨论串当前的一轮；停下后不会叫醒协调者',
+  threadShared: '共用项目',
+  threadSharedHelp: '没能为它建独立副本，它直接改项目里的文件，可能与其他讨论串互相覆盖',
+  planThreads: '指定讨论串',
+  planThreadsHelp: '为这条消息指定要开的讨论串：每行一个标题，可写一句话说明它做什么',
+  planRowTitle: '标题',
+  planTask: '一句话（可选）',
+  planAdd: '添加一行',
+  planRemove: '去掉这一行',
+  planExact: '只开这些',
+  planExactHelp: '打开：协调者只开这里写的讨论串；关闭：这些只是建议，协调者可以另开',
+  planClear: '清空',
+  collabCoordinator: '协调者',
+  collabKind: { message: '', ask: '问', note: '记', blocker: '卡住', handoff: '交接', claim: '认领', merged: '合入', release: '释放', stopped: '停止', task: '' } as Readonly<Record<string, string>>,
   threadApproval: '等你批准',
   threadApprovalHint: '有一步操作要你批准，进入讨论串处理',
   fromCoordinator: '协调者交代',
@@ -804,4 +821,28 @@ export function agoText(iso: string, now: number = Date.now()): string {
 export function dayText(iso: string): string {
   const date = new Date(iso)
   return Number.isNaN(date.getTime()) ? iso : `${date.getMonth() + 1} 月 ${date.getDate()} 日`
+}
+
+/** One collaboration entry as one line: who it is from and to, and what it says (a merge: the files with their lines). */
+export function collabLineText(entry: {
+  readonly kind: string
+  readonly fromTitle: string
+  readonly toTitle?: string
+  readonly text: string
+  readonly paths?: readonly string[]
+  readonly stat?: readonly { readonly path: string; readonly added: number; readonly removed: number }[]
+}): { readonly who: string; readonly body: string } {
+  const name = (title: string): string => (title === 'coordinator' ? T.collabCoordinator : title)
+  const from = name(entry.fromTitle)
+  const label = T.collabKind[entry.kind] ?? ''
+  if (entry.kind === 'merged') {
+    const files = entry.stat !== undefined && entry.stat.length > 0 ? entry.stat.map(f => `${f.path} +${f.added} \u2212${f.removed}`) : (entry.paths ?? [])
+    return { who: `${from} ${label}`, body: files.join('，') }
+  }
+  if (entry.kind === 'release' || entry.kind === 'stopped' || entry.kind === 'claim') {
+    const detail = entry.paths !== undefined && entry.paths.length > 0 ? entry.paths.join('，') : entry.text
+    return { who: `${from} ${label}`, body: detail }
+  }
+  const to = entry.toTitle !== undefined ? ` \u2192 ${name(entry.toTitle)}` : entry.kind === 'ask' ? ` \u2192 ${T.collabCoordinator}` : ''
+  return { who: `${from}${to}${label === '' || entry.kind === 'message' ? '' : ` ${label}`}`, body: entry.text }
 }
