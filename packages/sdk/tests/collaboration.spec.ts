@@ -9,7 +9,7 @@
 import { readFile } from 'node:fs/promises'
 import * as nodePath from 'node:path'
 import { COLLAB_DELIVERY_LEAD, type CollabEntry, type Context, type LLMRequest } from '@nexgent/kernel'
-import { llmSessionText, scriptedProvider, type ScriptedProvider, type ScriptEntry } from '@nexgent/test-support'
+import { llmSessionText, routeByMember, scriptedProvider, type ScriptedProvider, type ScriptEntry } from '@nexgent/test-support'
 import { describe, expect, it } from 'vitest'
 import { SdkThreadHost, checkPlan, collabDelivery, ownsOverlap, taskCollaboration } from '../src/index.js'
 import { testSdk, waitForEvent, type TestSdk } from './helpers.js'
@@ -281,5 +281,40 @@ describe('collaboration through the SDK', () => {
     expect(tools).toContain('read_collab')
     expect(tools).toContain('read_merged')
     expect(tools).toContain('ask_coordinator')
+  })
+  it('stops a thread together with the members it started', async () => {
+    let provider: ScriptedProvider | undefined
+    const member = routeByMember(llmSessionText)
+    const t = await testSdk([], {
+      registry: {
+        '@nexgent/llm': {
+          name: 'scripted-llm',
+          apply(ctx: Context) {
+            provider = scriptedProvider([
+              { toolCalls: [{ name: 'start_thread', arguments: { title: 'Mine', task: 'Do it with a helper.' } }] },
+              { content: 'Started.' },
+              { content: 'Stopped.' },
+            ], {
+              routeKey: request => member(request) ?? THREAD_LINE.exec(llmSessionText(request))?.[1],
+              routes: {
+                Mine: [{ toolCalls: [{ name: 'delegate', arguments: { name: 'slow', task: 'Take your time' } }] }],
+                slow: [{ content: Array.from({ length: 200 }, (_, i) => `part ${i} `), chunkDelayMs: 25 }],
+              },
+            })
+            ctx.provide('llm', provider)
+          },
+        },
+      },
+    })
+    const project = await t.sdk.call('projects.open', { root: nodePath.join(t.base, 'p'), create: true })
+    const coordinator = await t.sdk.call('sessions.coordinator', { projectId: project.projectId })
+    await t.sdk.startTurn({ projectId: project.projectId, sessionId: coordinator.sessionId, text: 'Go.' })
+    const delta = await waitForEvent(t, event => event.type === 'text.delta' && event.parentSessionId !== undefined && event.parentSessionId !== coordinator.sessionId)
+    const threadId = delta.parentSessionId!
+    const stopped = await t.sdk.call('threads.stop', { projectId: project.projectId, sessionId: coordinator.sessionId, threadId })
+    expect(stopped.status).not.toBe('running')
+    const end = await waitForEvent(t, event => event.type === 'turn.end' && event.sessionId === delta.sessionId)
+    expect(end).toMatchObject({ reason: { kind: 'cancelled', cause: 'parent' } })
+    expect(t.sdk.isRunning(project.projectId, delta.sessionId!)).toBe(false)
   })
 })

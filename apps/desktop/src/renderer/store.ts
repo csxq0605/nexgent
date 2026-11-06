@@ -620,7 +620,9 @@ export class AppStore {
     const sessionId = this.state.sessionId
     if (projectId === undefined || sessionId === undefined || !this.state.running) return
     this.set({ stopping: true })
-    await this.guard(c => c.call('turns.cancel', { projectId, sessionId }))
+    // A thread stops through its coordinator, so the stop is logged and its members stop with it.
+    if (this.state.threads.some(t => t.threadId === sessionId)) await this.stopThread(sessionId)
+    else await this.guard(c => c.call('turns.cancel', { projectId, sessionId }))
     if (this.state.sessionId === sessionId) this.set({ stopping: false })
   }
 

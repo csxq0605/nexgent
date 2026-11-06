@@ -200,9 +200,10 @@ function ThreadOf({ coordinatorSessionId, threadId }: { readonly coordinatorSess
         {T.threadOf(name)}
       </button>
       {info?.isolated === false && <span className="faint small" title={T.threadSharedHelp} data-testid="thread-shared">{T.threadShared}</span>}
-      {(info?.status === 'queued' || info?.status === 'running') && (
+      {/* A running thread stops from the composer; a queued one has no turn yet, so it stops here. */}
+      {info?.status === 'queued' && (
         <button type="button" className="ghost small thread-stop" title={T.threadStopHelp} onClick={() => void store.stopThread(threadId)} data-testid="thread-stop-top">
-          {info.status === 'queued' ? `${T.threadQueued} · ${T.threadStop}` : T.threadStop}
+          {`${T.threadQueued} · ${T.threadStop}`}
         </button>
       )}
     </>

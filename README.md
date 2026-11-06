@@ -108,19 +108,22 @@ Desktop app (Electron + React)        CLI
 - **Threads** — background conversations with a card each (running / done / waiting for you / waiting for approval); open one to watch it or talk to it; finished ones fold away
 - **Teams inside a thread** — only when its part is large; roles, parallel members, reorganize when stuck
 - **You name the threads** — list them with your message (the button beside the composer) or with `--thread` on the command line, or start one from the sidebar or with `nexgent thread start`; the coordinator follows up on yours
-- **Running limit and stop** — threads beyond the number allowed to run at once (3 by default, `threads.maxRunning` in the project's `config.json`) wait in a queue; a running or queued thread can be stopped from its card or with `nexgent thread stop`
+- **Running limit and stop** — threads beyond the number allowed to run at once (3 by default, `threads.maxRunning` in the project's `config.json`) wait in a queue; a running or queued thread can be stopped from its card or its own window
 - **Threads that work together** — a collaboration log in the project: which files each thread merged (with lines added and removed), messages between threads and (optionally) claims and handoffs, delivered before each step and shown as one line in both threads' windows and the coordinator's; a thread can read a file as the project has it now; questions to the coordinator mid-turn
 - **Improves how threads work together** — tries one change at a time against recorded collaboration problems, enforced by the host; one line under your message says what is being tried and how it ended
 - **Remembers good organizations** — per task class, compared against control runs
 - **Project rules and practices** — rules on every task, asks when a rule conflicts with existing tests or code; practices kept or retired by randomized give/withhold
 - **Checks itself** — tests, your check commands, deliverables that must open; fixes within the same turn
-- **Stop, rewind, resume** — and approvals, sandboxing and cost caps
+- **Stop, rewind, resume** — every conversation, each thread included, has a stop button; stopping a thread stops the members it started; plus approvals, sandboxing and cost caps
 
-<p align="center"><img src="assets/screenshots/coordinator.png" width="760" alt="The coordinator conversation with three threads"></p>
-<p align="center"><sub>The coordinator split one request into three threads: one done, one running, one waiting for an answer.</sub></p>
+<p align="center"><img src="assets/screenshots/coordinator.png" width="760" alt="The coordinator conversation with its threads"></p>
+<p align="center"><sub>The coordinator split one request into four threads: one done, one running, one waiting for an answer, one queued. What the threads said to each other and what they merged shows as one line each.</sub></p>
 
 <p align="center"><img src="assets/screenshots/thread.png" width="760" alt="Inside a thread: two members"></p>
-<p align="center"><sub>Inside a thread: its part was large enough for two members, a builder and then a tester. The interface is in Chinese; the data in both pictures is an example.</sub></p>
+<p align="center"><sub>Inside a thread: two members, a builder and then a tester; the messages it exchanged with another thread; the stop button stops it and its members.</sub></p>
+
+<p align="center"><img src="assets/screenshots/plan.png" width="760" alt="Naming the threads for a message"></p>
+<p align="center"><sub>Naming the threads you want: one title and one sentence per row; with “only these”, the coordinator starts exactly these. The interface is in Chinese; the data in the pictures is an example.</sub></p>
 
 ---
 

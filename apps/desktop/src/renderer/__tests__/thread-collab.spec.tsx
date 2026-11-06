@@ -47,6 +47,20 @@ describe('thread status', () => {
   })
 })
 
+describe('stopping in a thread window', () => {
+  it('stops a running thread from its composer through its coordinator', async () => {
+    const bridge = new FakeBridge()
+    bridge.sessions = [SESSION, THREAD]
+    bridge.threads = [info()]
+    const { store } = await renderApp(bridge)
+    await store.openSession('t1')
+    emit(bridge, { type: 'turn.start', sessionId: 't1', turn: 2, source: 'thread' })
+    fireEvent.click(await screen.findByTestId('stop'))
+    await waitFor(() => expect(bridge.callsOf('threads.stop')).toContainEqual(expect.objectContaining({ sessionId: 's1', threadId: 't1' })))
+    expect(bridge.callsOf('turns.cancel')).toHaveLength(0)
+  })
+})
+
 describe('naming threads', () => {
   it('sends the named threads with the message', async () => {
     const { bridge } = await renderApp()
