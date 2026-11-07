@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { HandbookOp } from '@nexgent/kernel'
 import type { HandbookEntryView, LearningStatus } from '@nexgent/sdk'
 import { useAppState, useAppStore } from '../hooks.js'
-import { L, agoText, dayText, organizationText, rateText, usdText } from '../strings.js'
+import { L, M, agoText, dayText, organizationText, rateText, usdText } from '../strings.js'
 import { useUi } from '../ui.js'
 
 /** Kernel `HANDBOOK_ACTIVATE_HELPFUL` (the renderer imports no kernel values; a test keeps them equal). */
@@ -273,6 +273,7 @@ function RuleRow({ entry }: { readonly entry: HandbookEntryView }): JSX.Element 
       <div className="grow">
         <span className="entry-text">{entry.text}</span>
         <div className="muted small">{L.ruleMeta(entry.appliesTo, dayText(entry.createdAt))}</div>
+        {entry.pending === true && entry.quote !== undefined && <div className="muted small quote-line">{M.quote(entry.quote)}</div>}
       </div>
       {entry.pending === true ? (
         <span className="row">

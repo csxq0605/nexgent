@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { HandbookEntryView, ObservationView } from '@nexgent/sdk'
 import { useAppState, useAppStore } from '../hooks.js'
 import { M, dayText } from '../strings.js'
+import { Icon } from './Icon.js'
 import { EntryHistory, evidenceText } from './Learned.js'
 import { Markdown } from './Markdown.js'
 
@@ -188,8 +189,11 @@ export function DeletedEntries(): JSX.Element | null {
   const deleted = (useAppState().handbook?.entries ?? []).filter(entry => entry.status === 'retired')
   if (deleted.length === 0) return null
   return (
-    <details className="entry-group folded" data-testid="memory-deleted">
-      <summary className="group-title">{M.deletedTitle(deleted.length)}</summary>
+    <details className="entry-group folded record" data-testid="memory-deleted">
+      <summary className="group-title">
+        <FoldMarks />
+        {M.deletedTitle(deleted.length)}
+      </summary>
       <ul className="entries">
         {deleted.map(entry => (
           <li key={entry.id} className="entry" data-testid="memory-deleted-entry" data-entry={entry.id}>
@@ -245,25 +249,30 @@ function keptText(observation: ObservationView): string {
 }
 
 /** One observation: evidence, suggestion, and its one action plus 忽略. */
-export function ObservationItem({ observation }: { readonly observation: ObservationView }): JSX.Element {
+export function ObservationItem({ observation, compact = false }: { readonly observation: ObservationView; readonly compact?: boolean }): JSX.Element {
   const store = useAppStore()
   const [keeping, setKeeping] = useState(false)
   const detail = observationDetail(observation)
   const open = observation.status === 'open'
   const files = observation.kind === 'hotspot' && (observation.evidence.files?.length ?? 0) > 1 ? observation.evidence.files! : []
   const action = observation.kind === 'drift' ? M.keepRule : observation.kind === 'split' ? M.keepSplit : observation.kind === 'stuck' ? M.keepPractice : M.askSplit
+  const tasksTip = M.tasksTip(observation.evidence.tasks.map(task => task.task))
+  const show = !compact || keeping
+  const tip = compact
+    ? [detail, files.join('、'), ...(observation.kind === 'drift' ? (observation.evidence.quotes ?? []).slice(0, 2).map(quote => `“${quote}”`) : []), observation.suggestion ?? '', tasksTip].filter(text => text !== '').join('\n')
+    : tasksTip
   return (
-    <li className="observation" data-testid="observation" data-kind={observation.kind} data-status={observation.status}>
-      <div className="setting-name" title={M.tasksTip(observation.evidence.tasks.map(task => task.task))}>
+    <li className={`observation${compact ? ' compact' : ''}`} data-testid="observation" data-kind={observation.kind} data-status={observation.status}>
+      <div className="setting-name observation-title" title={tip}>
         {observationTitle(observation)}
       </div>
-      {detail !== '' && <div className="muted small">{detail}</div>}
-      {files.length > 0 && <div className="muted small mono-list">{files.join('、')}</div>}
-      {observation.kind === 'drift' && (observation.evidence.quotes ?? []).slice(0, 2).map(quote => (
+      {show && detail !== '' && <div className="muted small">{detail}</div>}
+      {show && files.length > 0 && <div className="muted small mono-list">{files.join('、')}</div>}
+      {show && observation.kind === 'drift' && (observation.evidence.quotes ?? []).slice(0, 2).map(quote => (
         <div key={quote} className="muted small quote-line">“{quote}”</div>
       ))}
-      {(observation.missing ?? []).length > 0 && <div className="small warn-text">{M.outdated(observation.missing!)}</div>}
-      {observation.suggestion !== undefined && <p className="small observation-suggestion" data-testid="observation-suggestion">{observation.suggestion}</p>}
+      {show && (observation.missing ?? []).length > 0 && <div className="small warn-text">{M.outdated(observation.missing!)}</div>}
+      {show && observation.suggestion !== undefined && <p className="small observation-suggestion" data-testid="observation-suggestion">{observation.suggestion}</p>}
       {keeping ? (
         <EntryForm
           rule={observation.kind === 'drift' || observation.kind === 'split'}
@@ -277,7 +286,7 @@ export function ObservationItem({ observation }: { readonly observation: Observa
         <div className="row">
           <button
             type="button"
-            className="ghost small"
+            className="small"
             onClick={() => {
               if (observation.kind !== 'hotspot') return setKeeping(true)
               void store.askCoordinator(M.askSplitText(observation.key, observation.evidence.tasks.length, detail)).then(ok => {
@@ -321,8 +330,11 @@ export function ObservationsSection(): JSX.Element | null {
         </>
       )}
       {handled.length > 0 && (
-        <details className="entry-group folded">
-          <summary className="group-title">{M.handledTitle(handled.length)}</summary>
+        <details className="entry-group folded record">
+          <summary className="group-title">
+            <FoldMarks />
+            {M.handledTitle(handled.length)}
+          </summary>
           <ul className="observations">
             {handled.map(item => (
               <ObservationItem key={item.id} observation={item} />
@@ -357,7 +369,7 @@ export function ObservationCard(): JSX.Element | null {
       </div>
       <ul className="observations">
         {open.slice(0, 3).map(item => (
-          <ObservationItem key={item.id} observation={item} />
+          <ObservationItem key={item.id} observation={item} compact />
         ))}
       </ul>
     </aside>
@@ -422,7 +434,7 @@ export function ProposalCard({ args, content, readOnly }: { readonly args: strin
           <button type="button" className="primary small" onClick={() => void store.setHandbookStatus(entry.id, 'active')} data-testid="proposal-keep">
             {M.keep}
           </button>
-          <button type="button" className="ghost small" onClick={() => setEditing(true)} data-testid="proposal-edit-open">
+          <button type="button" className="small" onClick={() => setEditing(true)} data-testid="proposal-edit-open">
             {M.editFirst}
           </button>
           <button type="button" className="link small" onClick={() => void store.setHandbookStatus(entry.id, 'retired')} data-testid="proposal-drop">
@@ -433,5 +445,15 @@ export function ProposalCard({ args, content, readOnly }: { readonly args: strin
         <div className="faint small">{entry.status === 'retired' ? M.proposalDropped : M.proposalKept}</div>
       ) : null}
     </div>
+  )
+}
+
+/** A right chevron while folded, a down one when open. */
+export function FoldMarks(): JSX.Element {
+  return (
+    <>
+      <Icon name="chevronRight" className="fold-mark closed" />
+      <Icon name="chevronDown" className="fold-mark opened" />
+    </>
   )
 }

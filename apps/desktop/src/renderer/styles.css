@@ -3480,7 +3480,7 @@ details[open] > summary .fold-mark.closed {
 
 .quote-line {
   margin-top: 2px;
-  color: var(--voice);
+  color: var(--muted);
   overflow-wrap: anywhere;
 }
 
@@ -3492,6 +3492,11 @@ details[open] > summary .fold-mark.closed {
 .memory-notes {
   font-size: 13px;
   line-height: 1.6;
+  white-space: pre-wrap;
+}
+
+[data-testid='memory-observations'] > details {
+  margin-top: 12px;
 }
 
 .observations {
@@ -3543,15 +3548,46 @@ details[open] > summary .fold-mark.closed {
   overflow-y: auto;
 }
 
+.observation-card .observation:last-child {
+  padding-bottom: 0;
+}
+
 .proposal-card {
   display: flex;
   flex-direction: column;
   gap: 6px;
   margin: 4px 0 8px;
   padding: 12px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--coral);
   border-radius: var(--radius);
-  background: var(--coral-soft);
+  background: var(--raise);
   font-size: 13px;
+}
+
+.proposal-card > .small.muted:first-child {
+  color: var(--coral-ink);
+}
+
+.observation.compact {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 8px 0;
+}
+
+.observation.compact .observation-title {
+  flex: 1 1 260px;
+  min-width: 0;
+}
+
+.observation.compact .row {
+  margin-top: 0;
+}
+
+.observation.compact .memory-form {
+  flex-basis: 100%;
 }
 
 .proposal-card .row {

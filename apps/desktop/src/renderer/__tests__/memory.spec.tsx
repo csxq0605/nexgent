@@ -83,7 +83,9 @@ describe('项目观察', () => {
     const items = within(card).getAllByTestId('observation')
     expect(items.map(item => item.dataset['kind'])).toEqual(['drift', 'hotspot', 'stuck'])
     expect(items[0]!.textContent).toContain(M.driftTitle(2))
-    expect(items[0]!.textContent).toContain('“文档又没同步”')
+    // the card is compact: evidence is behind the title's tooltip
+    expect(items[0]!.textContent).not.toContain('文档又没同步')
+    expect(items[0]!.querySelector('.observation-title')!.getAttribute('title')).toContain('“文档又没同步”')
 
     fireEvent.click(within(items[0]!).getByTestId('observation-act'))
     expect((within(items[0]!).getByTestId('observation-keep-text') as HTMLTextAreaElement).value).toBe('改接口时同步改文档')

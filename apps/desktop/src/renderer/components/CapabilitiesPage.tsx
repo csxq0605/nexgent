@@ -2,8 +2,7 @@ import { useAppState } from '../hooks.js'
 import { L } from '../strings.js'
 import { useUi } from '../ui.js'
 import { hasPendingRules, LearningCard, learnedLead, organizationLead, PendingRules, useLearningRefresh } from './Learned.js'
-import { DeletedEntries, MemoryGroup, NotesSection, ObservationsSection } from './Memory.js'
-import { Icon } from './Icon.js'
+import { DeletedEntries, FoldMarks, MemoryGroup, NotesSection, ObservationsSection } from './Memory.js'
 import { Page } from './Page.js'
 import { M, T } from '../strings.js'
 
@@ -25,7 +24,6 @@ export function CapabilitiesPage(): JSX.Element {
         {attention && (
           <section className="decide" data-testid="capabilities-attention">
             <h3 className="group-title">
-              <span className="dot warn" aria-hidden="true" />
               {M.pendingTitle}
             </h3>
             <PendingRules />
@@ -50,15 +48,6 @@ export function CapabilitiesPage(): JSX.Element {
   )
 }
 
-/** A right chevron while folded, a down one when open. */
-function FoldMarks(): JSX.Element {
-  return (
-    <>
-      <Icon name="chevronRight" className="fold-mark closed" />
-      <Icon name="chevronDown" className="fold-mark opened" />
-    </>
-  )
-}
 
 function RecordPart({ title, help, open, testId, children }: { readonly title: string; readonly help?: string; readonly open?: boolean; readonly testId: string; readonly children: JSX.Element | null | false | undefined | readonly (JSX.Element | null | false | undefined)[] }): JSX.Element {
   return (

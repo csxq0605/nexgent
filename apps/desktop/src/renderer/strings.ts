@@ -689,8 +689,8 @@ export const L = {
   // ADR 0024: rules the user stated for this project.
   rulesTitle: '项目规则',
   ruleMeta: (appliesTo: string | undefined, date: string) => `适用于：${appliesTo ?? '整个项目'} · ${date} 记下`,
-  confirmRule: '确认',
-  rejectRule: '不要',
+  confirmRule: '记住',
+  rejectRule: '不用',
   activeTitle: '已学会',
   trialTitle: '试用中',
   retiredTitle: (n: number) => `已停用（${n}）`,
