@@ -53,8 +53,11 @@ describe('能力 → 经验', () => {
     const page = await screen.findByTestId('capabilities-page')
     expect((within(page).getByTestId('capabilities-record') as HTMLDetailsElement).open).toBe(false)
     await waitFor(() => expect(within(page).getAllByTestId('memory-entry')).toHaveLength(1))
-    expect(page.textContent).toContain('用着 1 条经验，最近一次改进在')
-    expect(page.textContent).toContain('用上经验的任务，结果好 12 分（满分 100）。')
+    // the status line is the title's tooltip, not text on the page
+    const lead = within(page).getByTestId('page-title').getAttribute('title') ?? ''
+    expect(lead).toContain('用着 1 条经验，最近一次改进在')
+    expect(lead).toContain('用上经验的任务，结果好 12 分（满分 100）。')
+    expect(page.textContent).not.toContain('用着 1 条经验')
     expect(within(page).getByTestId('learning-spend').textContent).toContain('近 30 天学习花了 0.42 美元，预算 3.00 美元')
     expect(within(page).getByTestId('learning-phases').textContent).toBe('给结果打分 0.12 · 总结经验 0.30')
     expect(within(page).getByTestId('learning-self-eval').textContent).toContain('给 3 个任务打了分')

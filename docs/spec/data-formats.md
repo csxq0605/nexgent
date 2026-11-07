@@ -886,7 +886,7 @@ The earlier part of this conversation was compacted. Summary:
 - 一次运行“顺利”：轮次正常完成，没有失败的检查，用户中途没有纠正，之后没有返工；有 `review` 行时分数不低于 0.7。还在 `waiting` 的运行结局未知，不算顺利，也不计入单干与组队比较、组织选择与汇总的次数（结算后才计）；`profile` 行带 `completed: false`（这一轮起的讨论串运行有一次没有正常完成，或停在 `Blockers:` 等回答）时这次运行算没完成。
 - 结论：同类里组队与单独做各至少 5 次后，一方顺利率的 90% 区间下限（Wilson）高于另一方的顺利率，就是那一方更好；否则还在比较。
 - 选择：用更好的一方（没有结论时是组队）；另一方作对照，没有结论时占 1/5，有结论后占 1/10，对照的轮记 `control: true`、`chosenBy: "control"`。组队时从三种内置分工与本类里顺利过的 `custom` 分工中按汤普森抽样挑一个，比本类组队平均花费每多 100% 扣 0.1；建议带上它在本类最近一次顺利运行的角色（任务中改出来的分工也算），写进本轮“How this task is organized”一节，并记为 `turn.start.organization.suggested`。本类已有记录时 `chosenBy` 为 `memory`。
-- 界面：SDK `learning.status.organizations` 按类给出 `OrganizationClassSummary`（关键词、两边次数、结论、常用分工、两边顺利率、花费变化），项目记忆页标题下一句话说运行最多的那类。
+- 界面：SDK `learning.status.organizations` 按类给出 `OrganizationClassSummary`（关键词、两边次数、结论、常用分工、两边顺利率、花费变化），项目记忆页标题的悬停提示里说运行最多的那类。
 
 ### 协作试验
 

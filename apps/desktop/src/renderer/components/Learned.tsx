@@ -158,8 +158,10 @@ export function LearningCard({ learning }: { readonly learning: LearningStatus }
     <section className="learning-card" data-testid="learning-card">
       <div className="setting-line">
         <div className="grow">
-          <div className="setting-name">{L.learningSwitch}</div>
-          <div className="muted small">{learning.config.enabled ? L.learningSwitchHelp : L.learningOff}</div>
+          <div className="setting-name" title={L.learningSwitchHelp}>
+            {L.learningSwitch}
+          </div>
+          {!learning.config.enabled && <div className="muted small">{L.learningOff}</div>}
         </div>
         <Switch checked={learning.config.enabled} onChange={enabled => store.saveLearning({ enabled })} label={L.learningSwitch} testId="learning-toggle" />
       </div>
@@ -188,10 +190,12 @@ export function LearningCard({ learning }: { readonly learning: LearningStatus }
           </div>
         )}
       </div>
-      <div className="muted small wrap" data-testid="learning-self-eval">
+      <div
+        className="muted small wrap"
+        title={reliability.status === 'insufficient' ? L.reliability.insufficient(reliability.sampled) : reliability.status === 'reliable' ? L.reliability.reliable(rateText(reliability.rate)) : L.reliability.unreliable(rateText(reliability.rate))}
+        data-testid="learning-self-eval"
+      >
         {L.selfEvaluations(learning.selfEvaluations)}
-        {'。'}
-        {reliability.status === 'insufficient' ? L.reliability.insufficient(reliability.sampled) : reliability.status === 'reliable' ? L.reliability.reliable(rateText(reliability.rate)) : L.reliability.unreliable(rateText(reliability.rate))}
       </div>
       <button type="button" className="link small" onClick={() => ui.openSettings()} data-testid="learning-adjust">
         {L.learningAdjust}
