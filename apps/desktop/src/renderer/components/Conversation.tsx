@@ -4,6 +4,7 @@ import { T, goalStatusText, memberFormText, sessionTitle } from '../strings.js'
 import { useView, useViewActions } from '../ui.js'
 import { ApprovalCard } from './ApprovalDialog.js'
 import { LearningNotice } from './LearningNotice.js'
+import { ObservationCard } from './Memory.js'
 import { CostNotice, KeyNotice, PlanPanel } from './ConversationNotes.js'
 import { Composer } from './Composer.js'
 import { Drawer } from './Drawer.js'
@@ -269,6 +270,7 @@ function MainConversation(): JSX.Element {
       <CostNotice />
       <KeyNotice />
       <LearningNotice />
+      <ObservationCard />
       <Composer />
       <Drawer />
     </section>

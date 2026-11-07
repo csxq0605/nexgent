@@ -7,7 +7,7 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 import type { HandbookEntryView } from '@nexgent/sdk'
-import { L } from '../strings.js'
+import { L, M } from '../strings.js'
 import { FakeBridge, SESSION } from '../testing/fake-bridge.js'
 import { emit, renderApp } from './helpers.js'
 
@@ -52,13 +52,13 @@ describe('能力 → 经验', () => {
     fireEvent.click(screen.getByTestId('nav-capabilities'))
     const page = await screen.findByTestId('capabilities-page')
     expect((within(page).getByTestId('capabilities-record') as HTMLDetailsElement).open).toBe(false)
-    await waitFor(() => expect(within(page).getAllByTestId('handbook-entry')).toHaveLength(1))
+    await waitFor(() => expect(within(page).getAllByTestId('memory-entry')).toHaveLength(1))
     expect(page.textContent).toContain('用着 1 条经验，最近一次改进在')
     expect(page.textContent).toContain('用上经验的任务，结果好 12 分（满分 100）。')
     expect(within(page).getByTestId('learning-spend').textContent).toContain('近 30 天学习花了 0.42 美元，预算 3.00 美元')
     expect(within(page).getByTestId('learning-phases').textContent).toBe('给结果打分 0.12 · 总结经验 0.30')
     expect(within(page).getByTestId('learning-self-eval').textContent).toContain('给 3 个任务打了分')
-    expect(within(page).getByTestId('handbook-active').textContent).toContain('合并多份明细前先核对各文件的列名是否一致')
+    expect(within(page).getByTestId('memory-practices').textContent).toContain('合并多份明细前先核对各文件的列名是否一致')
     // Trial and stopped entries are no longer listed (2026-10-19).
     expect(within(page).queryByTestId('handbook-trial')).toBeNull()
     expect(within(page).queryByTestId('handbook-retired')).toBeNull()
@@ -69,7 +69,7 @@ describe('能力 → 经验', () => {
   it('shows an entry\'s history with the reasons, and stops it', async () => {
     const { bridge } = await renderApp(learningBridge())
     fireEvent.click(screen.getByTestId('nav-capabilities'))
-    const active = await waitFor(() => screen.getAllByTestId('handbook-entry').find(row => row.dataset['entry'] === ACTIVE)!)
+    const active = await waitFor(() => screen.getAllByTestId('memory-entry').find(row => row.dataset['entry'] === ACTIVE)!)
     fireEvent.click(within(active).getByTestId('handbook-entry-open'))
     const detail = await within(active).findByTestId('handbook-detail')
     expect(detail.textContent).toContain('适用于：汇总、表格')
@@ -77,16 +77,20 @@ describe('能力 → 经验', () => {
       '10 月 15 日 学到这条经验：这次汇总前没核对列名，结果错了一列。',
       '10 月 16 日 正式启用：帮上忙 2 次，正式启用。',
     ])
-    fireEvent.click(within(active).getByTestId('handbook-stop'))
+    fireEvent.click(within(active).getByTestId('memory-delete'))
     await waitFor(() => expect(bridge.callsOf('handbook.setStatus')).toEqual([{ projectId: 'p1', entryId: ACTIVE, status: 'retired' }]))
-    await waitFor(() => expect(screen.queryAllByTestId('handbook-entry').find(row => row.dataset['entry'] === ACTIVE)).toBeUndefined())
+    await waitFor(() => expect(screen.queryAllByTestId('memory-entry').find(row => row.dataset['entry'] === ACTIVE)).toBeUndefined())
+    // Deleted entries are folded at the end, and come back with 恢复.
+    const deleted = screen.getByTestId('memory-deleted')
+    fireEvent.click(within(deleted).getAllByTestId('memory-restore').find(button => button.closest('li')!.dataset['entry'] === ACTIVE)!)
+    await waitFor(() => expect(bridge.callsOf('handbook.setStatus').at(-1)).toEqual({ projectId: 'p1', entryId: ACTIVE, status: 'active' }))
   })
 
   it('says how often each entry was given and held back, how the outcomes differ, and when it was last used', async () => {
     await renderApp(learningBridge())
     fireEvent.click(screen.getByTestId('nav-capabilities'))
     const rows = await waitFor(() => {
-      const all = screen.getAllByTestId('handbook-entry')
+      const all = screen.getAllByTestId('memory-entry')
       expect(all).toHaveLength(1)
       return all
     })
@@ -112,8 +116,8 @@ describe('能力 → 经验', () => {
     const bridge = new FakeBridge()
     await renderApp(bridge)
     fireEvent.click(screen.getByTestId('nav-capabilities'))
-    expect(screen.getByTestId('capabilities-page').textContent).toContain(L.empty)
-    expect(screen.getByTestId('capabilities-page').textContent).toContain(L.leadNone)
+    expect(screen.queryAllByTestId('memory-entry')).toHaveLength(0)
+    expect(screen.getByTestId('memory-notes').textContent).toContain('还没有笔记')
     // Not acknowledged yet: the card says learning waits for it.
     fireEvent.click(screen.getByTestId('learning-acknowledge'))
     await waitFor(() => expect(bridge.callsOf('learning.acknowledge')).toHaveLength(1))
@@ -133,15 +137,15 @@ describe('project rules (ADR 0024)', () => {
     await renderApp(bridge)
     fireEvent.click(screen.getByTestId('nav-capabilities'))
     const page = await screen.findByTestId('capabilities-page')
-    const rules = await within(page).findByTestId('handbook-rules')
+    const rules = await within(page).findByTestId('memory-rules')
     expect(rules.textContent).toContain('金额一律返回整数分。')
     expect(rules.textContent).toContain('适用于：整个项目')
     const pending = within(page).getByTestId('handbook-pending-rules')
     expect(pending.textContent).toContain('适用于：src/billing/')
-    expect(within(page).getAllByTestId('handbook-entry')).toHaveLength(1)
+    expect(within(page).getAllByTestId('memory-entry').filter(row => row.dataset['kind'] === 'practice')).toHaveLength(1)
     fireEvent.click(within(pending).getByTestId('rule-confirm'))
     await waitFor(() => expect(within(page).queryByTestId('handbook-pending-rules')).toBeNull())
-    expect(within(page).getByTestId('handbook-rules').textContent).toContain('每个新函数单独一个测试文件。')
+    expect(within(page).getByTestId('memory-rules').textContent).toContain('每个新函数单独一个测试文件。')
   })
 })
 
@@ -188,11 +192,11 @@ describe('settings in groups', () => {
 describe('plain words', () => {
   it('the new pages never say 门控、候选、基线、改进器 or 元改进', async () => {
     const jargon = /门控|候选|基线|改进器|元改进/
-    const words = JSON.stringify(L, (_key, value) => (typeof value === 'function' ? String(value) : value))
+    const words = JSON.stringify([L, M], (_key, value) => (typeof value === 'function' ? String(value) : value))
     expect(words).not.toMatch(jargon)
     await renderApp(learningBridge())
     fireEvent.click(screen.getByTestId('nav-capabilities'))
-    await waitFor(() => expect(screen.getAllByTestId('handbook-entry')).toHaveLength(1))
+    await waitFor(() => expect(screen.getAllByTestId('memory-entry')).toHaveLength(1))
     expect(screen.getByTestId('capabilities-page').textContent).not.toMatch(jargon)
     fireEvent.click(screen.getByTestId('open-settings'))
     expect((await screen.findByTestId('settings-page')).textContent).not.toMatch(jargon)

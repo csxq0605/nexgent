@@ -420,6 +420,7 @@ export const MEMBER_DENIED_TOOLS = [
   'read_thread',
   'list_threads',
   'update_project_notes',
+  'propose_memory',
   'post_collab',
   'read_collab',
   'message_peer',

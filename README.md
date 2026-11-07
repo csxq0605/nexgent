@@ -36,10 +36,13 @@ You open a project folder and say what you want in plain words. A coordinator sp
 3. **It improves how threads work together, quietly**  
    When a task's threads have all ended, the host counts the collaboration problems between them: files two threads both changed, merge conflicts, files a handoff missed, files outside a thread's part. When a problem keeps coming back, it tries one collaboration variable at a time (threads that change the same files run one after another; every thread is told at once which files the others brought in; a message wakes an idle thread; a thread that did none of the work does the final whole-project check), enforced by the host, and keeps it only after the problem stays away for several tasks in a row; a worse result, 1.5× the cost or twice the time reverts it. You see one line about what is being tried; there are no settings for it. Threads share a collaboration log kept in the project (`.nexgent/collab/`, never committed); new entries that concern a thread reach it before its next step, even in the middle of a long turn. Every message between threads is passed to the coordinator and shown in both threads' windows. Whether threads also write claims and handoffs to the log themselves is your choice in the settings.
 
-4. **Generic, never task-specific**  
+4. **Project memory, with evidence; you decide**  
+   The Project memory page keeps rules, practices and project notes in one place, each with where it came from and when; you can add, edit and delete them. When you correct the work or say how it should be done from now on, the conversation offers a "Remember this?" card with your own words. After each task the host counts, from the run records, the corrections you made, the files that caused trouble, how the split went and calls that kept failing. When something keeps coming back (you saying the same thing in several tasks, a file that causes trouble again and again, splits that go wrong) a "Project observations" card shows it with the tasks, your words and the files as evidence, and offers one action: keep it as a rule, ask the coordinator for split advice, or ignore it. Entries whose files are gone are marked as possibly outdated. Nothing changes until you choose.
+
+5. **Generic, never task-specific**  
    No rule, prompt or default exists to make one kind of task pass. Example tasks are only used to measure.
 
-5. **Recoverable and safe**  
+6. **Recoverable and safe**  
    Sessions are append-only logs: stop, rewind file changes, or kill the process and resume. Commands run in an OS sandbox; writes outside the project need approval; spending has caps in dollars.
 
 Full positioning: [`docs/PROJECT_POSITIONING.md`](docs/PROJECT_POSITIONING.md) and [`AGENTS.md`](AGENTS.md).
@@ -91,8 +94,8 @@ Desktop app (Electron + React)        CLI
 | `packages/context/` | Context, material references, compaction |
 | `packages/tasking/` | Materials, deliverables, feedback, goals |
 | `packages/subagent/`, `workflow/`, `ptc/` | Delegation, `organize`, workflows and the organization profile, code execution |
-| `packages/capabilities/`, `evolve/` | Practice handbook, project rules, organization library and collaboration trials, outcome review, capability versions |
-| `packages/sdk/` | In-process API shared by the desktop app and the CLI |
+| `packages/capabilities/`, `evolve/` | Practice handbook, project rules and memory, organization library and collaboration trials, outcome review, capability versions |
+| `packages/sdk/` | In-process API shared by the desktop app and the CLI; project observations |
 | `packages/skill/`, `preset/`, `tool-spreadsheet/`, `web/` | Skills, presets, spreadsheet and web tools |
 | `packages/test-support/`, `scripts/` | Scripted model, acceptance and measurement scripts |
 | `reference/deepseek-harness/` | Read-only reference (submodule, not built) |
@@ -112,6 +115,9 @@ Desktop app (Electron + React)        CLI
 - **Threads that work together** — a collaboration log in the project: which files each thread merged (with lines added and removed), messages between threads and (optionally) claims and handoffs, delivered before each step and shown as one line in both threads' windows and the coordinator's; a thread can read a file as the project has it now; questions to the coordinator mid-turn
 - **Improves how threads work together** — tries one change at a time against recorded collaboration problems, enforced by the host; one line under your message says what is being tried and how it ended
 - **Remembers good organizations** — per task class, compared against control runs
+- **Project memory** — rules, practices and project notes on one page, each with its source and date; add, edit, delete and restore; entries whose files are gone are marked possibly outdated
+- **Remember this?** — when you correct the work, a card with your own words offers to keep it as a project rule
+- **Project observations** — at the end of a task, recurring corrections, trouble files, split problems and repeated failures, with the evidence, and one action each
 - **Project rules and practices** — rules on every task, asks when a rule conflicts with existing tests or code; practices kept or retired by randomized give/withhold
 - **Checks itself** — tests, your check commands, deliverables that must open; fixes within the same turn
 - **Stop, rewind, resume** — every conversation, each thread included, has a stop button; stopping a thread stops the members it started; plus approvals, sandboxing and cost caps

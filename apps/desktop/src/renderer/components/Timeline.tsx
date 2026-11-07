@@ -9,6 +9,7 @@ import { Icon } from './Icon.js'
 import { Markdown } from './Markdown.js'
 import { TeamCard, ThreadCard, WorkflowBlock } from './MemberBlock.js'
 import { ToolBlock, toolSummary } from './ToolBlock.js'
+import { ProposalCard } from './Memory.js'
 import { State } from './State.js'
 
 type Entry = TimelineEntry
@@ -47,6 +48,12 @@ export function blocksOf(entries: readonly Entry[]): Block[] {
     run = []
   }
   for (const entry of entries) {
+    // Project memory: a rule the conversation proposed asks the user on a card of its own.
+    if (entry.kind === 'tool' && entry.name === 'propose_memory' && entry.isError === false) {
+      flush()
+      blocks.push({ kind: 'entry', key: entry.key, entry })
+      continue
+    }
     if (FOLDED.has(entry.kind)) {
       if (run.length > 0 && run[0]!.turn !== entry.turn) flush()
       run.push(entry)
@@ -250,6 +257,8 @@ function EntryView({
   readonly mark?: 'kept' | 'steered' | undefined
 }): JSX.Element | null {
   switch (entry.kind) {
+    case 'tool':
+      return entry.name === 'propose_memory' ? <ProposalCard args={entry.args} content={entry.content} readOnly={readOnly} /> : null
     case 'user': {
       // Coordinator step two: a thread's note in the coordinator is one line; the coordinator's task in a thread is its message.
       const note = entry.thread === true ? threadNoteText(entry.text) : undefined

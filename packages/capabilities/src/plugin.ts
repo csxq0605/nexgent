@@ -45,8 +45,9 @@ export const CapabilitiesPlugin = {
       for (const tool of capabilityTools(service, readRecords)) {
         scope.effect(() => scope.tools.register(tool), `tools.register(${tool.definition.name})`)
       }
-      const mark = handbook.markTool()
-      scope.effect(() => scope.tools.register(mark), `tools.register(${mark.definition.name})`)
+      for (const tool of [handbook.markTool(), handbook.proposeTool()]) {
+        scope.effect(() => scope.tools.register(tool), `tools.register(${tool.definition.name})`)
+      }
     })
     ctx.inject(['context'], scope => {
       const compactor = scope.context.compactor as { setSessionOverride?: CompactionOverrideSink } | undefined

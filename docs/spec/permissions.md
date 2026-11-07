@@ -219,7 +219,7 @@
 - **学习预算。** `learning.budget`（默认每项目 30 天 3 美元）按带 `learningPhase` 的账本记录的估算美元在滚动时间窗内计，含自评与校准；单个任务的自评另有 `learning.selfEvalMaxUsd`（默认 0.05 美元）。宿主在每次学习请求前检查，余额不够一个任务上限时不再打分（自评记 `budget-exhausted`）。学习费用不计入任何用户任务的 `perTask` / `perConversation`，但计入 `perProject`。
 - **评分器不可靠时收紧。** 自评与外部评审的一致率不足（少于 10 次校准或低于 80%）时，评分器记为不可靠；手册条目照常试用（`data-formats.md` §自评）。
 - **共享由项目决定。** `learning.useShared` 关掉后本项目不使用用户级手册条目；`learning.contribute` 关掉后本项目的条目不进用户级。
-- **开关与预算只由用户改。** `learning` 在“始终审批”表里。用户级配置在主目录里，文件工具够不到。手册与自评都在主目录里，模型读写都拒绝；执行中的模型只能经 `handbook_mark` 给注入的条目投票。
+- **开关与预算只由用户改。** `learning` 在“始终审批”表里。用户级配置在主目录里，文件工具够不到。手册与自评都在主目录里，模型读写都拒绝；执行中的模型只能经 `handbook_mark` 给注入的条目投票，经 `propose_memory` 提一条待用户确认的规则（原话须出自用户在这个对话里的消息，确认前不给任何任务）。项目记忆的事实与观察（`<项目数据>/memory/`）只由宿主写，模型读写都拒绝；观察的采纳与忽略只由用户做。
 
 ## 费用上限
 
@@ -247,7 +247,7 @@
 
 | 项 | 规则 |
 | --- | --- |
-| 深度 | 只有根会话（含讨论串）能启动成员；成员看不到 `delegate`、`workflow`、`organize`、`start_thread`、`message_thread`、`read_thread`、`list_threads`、`stop_thread`、`update_project_notes`、`post_collab`、`read_collab`、`message_peer`、`ask_coordinator`、`read_merged`、`capability_draft`、`capability_try`（契约 `MEMBER_DENIED_TOOLS`：讨论串与协作工具加能力工具，成员不能再启动成员，也不能起草或试用能力组件），kernel 拒绝以子会话为父会话创建子会话 |
+| 深度 | 只有根会话（含讨论串）能启动成员；成员看不到 `delegate`、`workflow`、`organize`、`start_thread`、`message_thread`、`read_thread`、`list_threads`、`stop_thread`、`update_project_notes`、`propose_memory`、`post_collab`、`read_collab`、`message_peer`、`ask_coordinator`、`read_merged`、`capability_draft`、`capability_try`（契约 `MEMBER_DENIED_TOOLS`：讨论串与协作工具加能力工具，成员不能再启动成员，也不能起草或试用能力组件），kernel 拒绝以子会话为父会话创建子会话 |
 | 沙箱 | 成员的模式取父会话、预设、显式请求三者中最窄的；任何一项宽于父会话时创建失败，错误码 `sandbox/denied`，不悄悄降级（`childSandboxMode`）。顺序：`read-only` < `workspace-write` < `full-access` |
 | 工具范围 | 预设的 `tools`（`allow` / `deny`）用成员作用域上的 `restrict()` 实现，与父会话可见的集合求交；`MEMBER_DENIED_TOOLS` 总是叠加在上面 |
 | 路径与命令 | 与父会话相同的路径策略、命令策略和 `extraReadRoots`。可写的成员在自己的项目副本里工作（`data-formats.md` §子会话与成员“成员的工作副本”）：副本取代项目根成为它的读写根与命令的可写根，项目本身只读；自己检查路径的工具（文件工具、`run_code` 的宿主函数、表格与文档工具）用同一个按调用划定的沙箱（`sandboxForCall`：工作目录即副本算作项目、这次调用的模式、只放行本会话的临时目录），所以写自己的副本不会被当成“项目外写入”去问，讨论串也一样（讨论串里的成员从讨论串的副本复制、合回讨论串的副本）；`read-only` 成员和放不下副本的项目照旧共用项目根。成员改项目（合回，或共用项目根时可能改项目的工具调用）都先等根轮快照完成。所有会话都能读 `<系统临时目录>/nexgent-workdirs/`（成员副本与冲突副本） |
@@ -259,7 +259,7 @@
 
 成员在 `read-only` 父会话下调用 `present` 照常可用（快照由宿主写）。
 
-**项目的总对话（协调者）只派活。** 总对话自己不干活。它的作用域上用 `limitEffects(COORDINATOR_TOOL_EFFECTS)`（`['read', 'network']`）只留效果全在这两类里的工具（读文件、搜索、网页、讨论串工具、`update_project_notes`、`present`），再遮掉 `organize`、`delegate`、`workflow`（`COORDINATOR_DENIED_TOOLS`）：每一块活都交给讨论串，讨论串自己派成员。`write_file`、`str_replace`、`bash`、`run_code` 等写或执行的工具既不出现在它的请求里，调用也报 `tool/not-found`。这个限制只作用于总对话自己：讨论串（各自是根会话，在自己的项目副本里工作）照常拿到写、执行和派成员的工具，它们的成员再按上表收窄。
+**项目的总对话（协调者）只派活。** 总对话自己不干活。它的作用域上用 `limitEffects(COORDINATOR_TOOL_EFFECTS)`（`['read', 'network']`）只留效果全在这两类里的工具（读文件、搜索、网页、讨论串工具、`update_project_notes`、`propose_memory`、`present`），再遮掉 `organize`、`delegate`、`workflow`（`COORDINATOR_DENIED_TOOLS`）：每一块活都交给讨论串，讨论串自己派成员。`write_file`、`str_replace`、`bash`、`run_code` 等写或执行的工具既不出现在它的请求里，调用也报 `tool/not-found`。这个限制只作用于总对话自己：讨论串（各自是根会话，在自己的项目副本里工作）照常拿到写、执行和派成员的工具，它们的成员再按上表收窄。
 
 **讨论串之间的工具。** 讨论串总有 `message_peer`、`ask_coordinator`、`read_collab`、`read_merged`（`PEER_TOOL_NAMES`）：它们之间的每条往来都写进协作记录，送到总对话，并显示在双方讨论串的窗口里；项目配置 `collaboration` 是 `hybrid` 时还有 `post_collab`（`note`、`claim`、`handoff`、`blocker`）。总对话有 `post_collab`（只能写 `note`）、`read_collab` 与 `stop_thread`（`THREAD_TOOL_NAMES` 里的其余四个也只有总对话有）；其他对话与成员任何时候都没有协作工具（`agents.ts` 的 `scopeRoot` 遮掉；成员另在 `MEMBER_DENIED_TOOLS` 里）。`read_merged` 读项目里合并后的当前文件（至多 200 KB，拒绝项目外路径与 `.nexgent/`、`.git/`），因为讨论串的副本可能比项目旧。这些工具只追加项目 `.nexgent/collab/` 里的协作记录、叫醒同一个总对话或读项目文件，不写项目文件；`.nexgent/` 仍受保护，模型的文件工具与命令写不了协作记录。`collaboration` 与 `threads` 是受保护字段，模型不能改，只由用户在设置里改。宿主按这次任务的协作方式与限额拒绝或排队：拒绝时报 `tool/denied`，`details.collab` 给原因：`claim`（认领的路径与还在干活的讨论串重叠）、`limit`（讨论串数、给同一个讨论串的消息数、一轮里问总对话的次数、重复的话超限）、`hops`（消息转了超过 2 跳）、`cycle`（`blocker` 的 `waitsFor` 会让讨论串互相等成环）；`sequence`（`overlap: sequence` 下与在跑的讨论串路径重叠或没写 `owns`）与 `wakes`（`wake: named` 下本任务叫醒空闲讨论串已满 4 次）是指标里认的原因，现在宿主对前者让这一轮排队、对后者只把消息留到对方下一轮，并不抛错。同时运行超过上限的讨论串轮次排队，不拒绝。你点名了讨论串（`exactThreads`）时，计划以外的标题不能开，`tool/denied`。
 
@@ -341,6 +341,7 @@
 - `sessions.rename` 写一条 `session.title` 记录（`data-formats.md`），只改显示名。
 - `deliverables.readText` 只读快照目录里属于该版本的文件，`deliverables.reveal` 只对快照目录内的路径调用 `shell.showItemInFolder`，二者都拒绝 `..` 与绝对路径参数。
 - `sessions.export` 的 `outDir` 来自主进程的保存对话框。
+- 项目记忆：`handbook.add / edit` 只写本项目的手册（`actor: user`），`memory.notes / saveNotes` 只读写本项目的项目笔记（至多 8000 字符），`memory.observations / resolve` 只读本项目的观察、改其状态；采纳时写入的条目同样是 `actor: user`。主进程按字段校验输入类型（`handbookKind`、`observationStatus`），长度与路径由 SDK 检查。
 
 **密钥。** `settings.setApiKey` 是唯一把密钥值从渲染进程送进主进程的方法；值只在这一次调用里经过 IPC，主进程写入 `~/.nexgent/credentials.json`（`0600`）后只返回 `{ configured, source }`。没有任何方法或事件把密钥值送回渲染进程；设置页的输入框写入后清空，只显示“已配置 / 来源”。IPC 日志不记录 `settings.setApiKey` 的参数。
 

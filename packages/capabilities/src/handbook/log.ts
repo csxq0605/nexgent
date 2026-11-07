@@ -54,6 +54,15 @@ function checkKeywords(keywords: unknown): void {
   }
 }
 
+function checkFiles(files: unknown): void {
+  if (!Array.isArray(files) || files.length > HANDBOOK_LIMITS.maxFiles) invalid(`files must be a list of at most ${HANDBOOK_LIMITS.maxFiles}`)
+  for (const file of files) {
+    if (typeof file !== 'string' || file === '' || file.length > HANDBOOK_LIMITS.maxFileChars || file.startsWith('/') || /^[a-zA-Z]:/.test(file) || file.split(/[\\/]/).includes('..')) {
+      invalid(`file ${JSON.stringify(file)} must be a project-relative path of 1–${HANDBOOK_LIMITS.maxFileChars} characters`)
+    }
+  }
+}
+
 /**
  * Validate an operation before it is written (shape and `HANDBOOK_LIMITS`).
  * @throws `tool/invalid-input`.
@@ -77,11 +86,14 @@ export function checkHandbookOp(op: HandbookOpInput): void {
       if (op.appliesTo !== undefined && (typeof op.appliesTo !== 'string' || op.appliesTo.trim() === '' || [...op.appliesTo].length > HANDBOOK_LIMITS.maxAppliesToChars)) invalid(`appliesTo must be 1–${HANDBOOK_LIMITS.maxAppliesToChars} characters`)
       if ((op.appliesTo !== undefined || op.pending !== undefined) && op.kind !== 'rule') invalid('appliesTo and pending belong to a rule')
       if (op.pending !== undefined && typeof op.pending !== 'boolean') invalid('pending must be a boolean')
+      if (op.quote !== undefined && (typeof op.quote !== 'string' || op.quote.trim() === '' || [...op.quote].length > HANDBOOK_LIMITS.maxQuoteChars)) invalid(`quote must be 1–${HANDBOOK_LIMITS.maxQuoteChars} characters`)
+      if (op.files !== undefined) checkFiles(op.files)
       break
     case 'edit':
-      if (op.text === undefined && op.keywords === undefined) invalid('an edit changes text or keywords')
+      if (op.text === undefined && op.keywords === undefined && op.appliesTo === undefined) invalid('an edit changes text, keywords or range')
       if (op.text !== undefined) checkText(op.text, 'text')
       if (op.keywords !== undefined) checkKeywords(op.keywords)
+      if (op.appliesTo !== undefined && (typeof op.appliesTo !== 'string' || op.appliesTo.trim() === '' || [...op.appliesTo].length > HANDBOOK_LIMITS.maxAppliesToChars)) invalid(`appliesTo must be 1–${HANDBOOK_LIMITS.maxAppliesToChars} characters`)
       break
     case 'status':
       if (!HANDBOOK_ENTRY_STATUSES.includes(op.status)) invalid(`unknown status ${JSON.stringify(op.status)}`)

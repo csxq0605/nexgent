@@ -66,6 +66,10 @@ export interface HandbookEntry {
   readonly appliesTo?: string
   /** A rule whose standing was unclear: not given to tasks until the user confirms it (a `status` operation by the user). */
   readonly pending?: boolean
+  /** Project memory: the user's own words the entry came from, verbatim (≤ {@link HANDBOOK_LIMITS.maxQuoteChars}). */
+  readonly quote?: string
+  /** Project memory: project-relative files the entry is about (≤ {@link HANDBOOK_LIMITS.maxFiles}); one that no longer exists marks the entry as possibly outdated. */
+  readonly files?: readonly string[]
   /** Helpful votes. Since ADR 0023 they mean “used”, not evidence that it helps. */
   readonly helpful: number
   /** Harmful votes. Since ADR 0023 they mean “said it misled”. */
@@ -87,6 +91,9 @@ export const HANDBOOK_LIMITS = {
   maxKeywordChars: 40,
   maxReasonChars: 200,
   maxAppliesToChars: 120,
+  maxQuoteChars: 600,
+  maxFiles: 8,
+  maxFileChars: 200,
 } as const
 
 /** Entries retrieved for a task (ADR 0018 decision 4: top k, default 5). */
@@ -125,13 +132,19 @@ export interface HandbookAddOp extends HandbookOpBase {
   readonly kind?: HandbookEntryKind
   readonly appliesTo?: string
   readonly pending?: boolean
+  /** Project memory: the user's own words it came from. */
+  readonly quote?: string
+  /** Project memory: the files it is about. */
+  readonly files?: readonly string[]
 }
 
-/** A wording or keyword change; counts and status stay. */
+/** A wording, keyword or (for a rule) range change; counts and status stay. */
 export interface HandbookEditOp extends HandbookOpBase {
   readonly op: 'edit'
   readonly text?: string
   readonly keywords?: readonly string[]
+  /** A rule's new range. */
+  readonly appliesTo?: string
 }
 
 /** One helpful vote. */
@@ -205,6 +218,8 @@ export function foldHandbook(ops: readonly HandbookOp[], untilSeq = Number.POSIT
         ...(op.kind === 'rule' ? { kind: 'rule' as const } : {}),
         ...(op.appliesTo === undefined ? {} : { appliesTo: op.appliesTo }),
         ...(op.pending === true ? { pending: true } : {}),
+        ...(op.quote === undefined ? {} : { quote: op.quote }),
+        ...(op.files === undefined || op.files.length === 0 ? {} : { files: op.files }),
         helpful: 0,
         harmful: 0,
         sources: op.source === undefined ? [] : [op.source],
@@ -221,7 +236,13 @@ export function foldHandbook(ops: readonly HandbookOp[], untilSeq = Number.POSIT
     if (current === undefined) continue
     switch (op.op) {
       case 'edit':
-        entries.set(op.entryId, { ...current, ...(op.text === undefined ? {} : { text: op.text }), ...(op.keywords === undefined ? {} : { keywords: op.keywords }), updatedAt: op.at })
+        entries.set(op.entryId, {
+          ...current,
+          ...(op.text === undefined ? {} : { text: op.text }),
+          ...(op.keywords === undefined ? {} : { keywords: op.keywords }),
+          ...(op.appliesTo === undefined || current.kind !== 'rule' ? {} : { appliesTo: op.appliesTo }),
+          updatedAt: op.at,
+        })
         break
       case 'upvote':
         entries.set(op.entryId, { ...current, helpful: current.helpful + 1, updatedAt: op.at })
@@ -295,6 +316,32 @@ export const HANDBOOK_MARK_TOOL: Step2ToolSpec = {
       entryId: { type: 'string', minLength: 1, description: 'Id of an entry shown at the start of this task.' } satisfies JsonSchema,
       verdict: { enum: ['helpful', 'harmful'] },
       reason: { type: 'string', maxLength: HANDBOOK_LIMITS.maxReasonChars },
+    },
+  },
+}
+
+/**
+ * Project memory: `propose_memory`. When the user corrects the work or
+ * states how something should be done from now on, the conversation
+ * proposes it as a project rule in the user's own words; the host keeps it
+ * pending (not given to any task) until the user confirms it on the card
+ * shown with the call, or on the project memory page. The quote must be the
+ * user's words, word for word, from this conversation. Root conversations
+ * only (the coordinator and threads); members do not see it.
+ */
+export const PROPOSE_MEMORY_TOOL: Step2ToolSpec = {
+  name: 'propose_memory',
+  effects: ['read'],
+  approval: 'never',
+  inputSchema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['text', 'quote'],
+    properties: {
+      text: { type: 'string', minLength: 1, maxLength: HANDBOOK_LIMITS.maxTextChars, description: 'The rule as one short line, in the user\'s language, keeping their values.' },
+      quote: { type: 'string', minLength: 1, maxLength: HANDBOOK_LIMITS.maxQuoteChars, description: 'The user\'s own words it comes from, copied exactly from one of their messages in this conversation.' },
+      appliesTo: { type: 'string', maxLength: HANDBOOK_LIMITS.maxAppliesToChars, description: 'Where it applies, in the user\'s words (a directory, module or kind of file); leave out for the whole project.' },
+      files: { type: 'array', maxItems: HANDBOOK_LIMITS.maxFiles, items: { type: 'string', minLength: 1, maxLength: HANDBOOK_LIMITS.maxFileChars }, description: 'Project-relative files the rule is about, if any.' },
     },
   },
 }

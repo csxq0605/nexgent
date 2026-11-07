@@ -46,7 +46,7 @@ export const T = {
   groupToday: '今天',
   groupWeek: '本周',
   groupEarlier: '更早',
-  capabilities: '能力',
+  capabilities: '项目记忆',
   needsApproval: '等你批准',
   untitled: '未命名对话',
   rename: '改名',
@@ -242,7 +242,7 @@ export const T = {
   goalAdd: '设定目标',
   goalLabel: (text: string) => `目标：${text}`,
   backToChat: '返回对话',
-  capabilitiesTitle: '能力',
+  capabilitiesTitle: '项目记忆',
   settingsLead: '这个项目的模型、权限、费用与改进设置。',
   appearance: '外观',
   appearanceHint: '跟随系统时，系统切到深色，Nexgent 也跟着变深。',
@@ -845,4 +845,69 @@ export function collabLineText(entry: {
   }
   const to = entry.toTitle !== undefined ? ` \u2192 ${name(entry.toTitle)}` : entry.kind === 'ask' ? ` \u2192 ${T.collabCoordinator}` : ''
   return { who: `${from}${to}${label === '' || entry.kind === 'message' ? '' : ` ${label}`}`, body: entry.text }
+}
+
+// ---------------------------------------------------------------------------
+// Project memory: the page, the "要记住吗" card and the observations card.
+// ---------------------------------------------------------------------------
+
+function times(n: number, what: string): string {
+  return n > 0 ? `${what} ${n} 次` : ''
+}
+
+function joined(parts: readonly string[]): string {
+  return parts.filter(part => part !== '').join('、')
+}
+
+export const M = {
+  observationsTitle: '项目观察',
+  pendingTitle: '等你确认',
+  rulesTitle: '规则',
+  practicesTitle: '经验',
+  notesTitle: '项目笔记',
+  deletedTitle: (n: number) => `已删除（${n}）`,
+  handledTitle: (n: number) => `已处理的观察（${n}）`,
+  notesEmpty: '还没有笔记',
+  add: '添加',
+  edit: '编辑',
+  delete: '删除',
+  save: '保存',
+  cancel: '取消',
+  restore: '恢复',
+  keep: '记住',
+  noNeed: '不用',
+  editFirst: '改一下',
+  ignore: '忽略',
+  close: '收起',
+  ruleText: '规则',
+  practiceText: '经验',
+  appliesTo: '适用范围（空着就是整个项目）',
+  notesPlaceholder: '目标、约定、决定和坑，一行一条',
+  quote: (text: string) => `你说：“${text}”`,
+  range: (appliesTo: string) => `适用于：${appliesTo}`,
+  outdated: (files: readonly string[]) => `可能过时：${files.join('、')} 已不存在`,
+  ruleMeta: (appliesTo: string | undefined, date: string, user: boolean) => `适用于：${appliesTo ?? '整个项目'} · ${date} ${user ? '由你添加' : '记下'}`,
+  practiceMeta: (date: string, user: boolean) => `${date} ${user ? '由你添加' : '学到'}`,
+  notesMeta: (date: string) => `${date} 更新`,
+  // the card shown with propose_memory
+  proposalTitle: '要记住吗',
+  proposalKept: '已记住，以后的任务都会照这条做',
+  proposalDropped: '没有记',
+  proposalExists: '项目记忆里已经有这条了',
+  // observations
+  driftTitle: (n: number) => `你在 ${n} 个任务里说过类似的话`,
+  hotspotTitle: (key: string, n: number) => `${key} 在最近 ${n} 个任务里反复出问题`,
+  hotspotDetail: (t: { readonly conflicts: number; readonly threads: number; readonly outside: number; readonly reread: number }) => joined([times(t.conflicts, '合并冲突'), times(t.threads, '几个讨论串同时改'), times(t.outside, '改到分配范围以外'), times(t.reread, '反复读')]),
+  splitTitle: (n: number, of: number) => `最近 ${of} 个分给多个讨论串的任务里，${n} 个拆分出了问题`,
+  splitDetail: (p: { readonly checkFailed: number; readonly idle: number; readonly unanswered: number; readonly conflicts: number; readonly notDone: number }) => joined([times(p.checkFailed, '最后检查没过'), times(p.idle, '讨论串互相等'), times(p.unanswered, '留言没人回'), times(p.conflicts, '有冲突'), times(p.notDone, '没做完')]),
+  stuckTitle: (tool: string, n: number) => `${tool} 在 ${n} 个任务里同样的调用反复失败`,
+  tasksTip: (tasks: readonly string[]) => tasks.map(task => `· ${task}`).join('\n'),
+  keepRule: '记成规则',
+  keepSplit: '以后这类任务这样拆',
+  keepPractice: '记成经验',
+  askSplit: '看拆分建议',
+  askSplitText: (key: string, n: number, detail: string) => `「${key}」在最近 ${n} 个任务里反复出问题${detail === '' ? '' : `（${detail}）`}。请读相关代码，给出拆分或调整结构的建议，先不要改动。`,
+  stuckPractice: (tool: string) => `${tool} 同样的调用连续失败时，换个做法，不要重试同一个调用`,
+  adopted: '已采纳',
+  dismissed: '已忽略',
 }

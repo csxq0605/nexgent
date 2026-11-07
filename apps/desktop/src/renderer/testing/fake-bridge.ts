@@ -5,7 +5,7 @@
  * Never bundled into the app (only tests import it).
  */
 import type { ApprovalRequest, DeliverableDiff, DeliverableSummary, DeliverableVersion, HandbookOp, MaterialMetadata, ThreadInfo } from '@nexgent/kernel'
-import type { CapabilityListing, HandbookEntryView, LearningStatus, MemberRunView, ProjectFileEntry, ProjectInfo, ProjectSettings, RewindView, SdkEvent, SessionSummary, SessionView, UserSettings, WorkflowView } from '@nexgent/sdk'
+import type { CapabilityListing, HandbookEntryView, LearningStatus, ObservationView, ProjectNotesView, MemberRunView, ProjectFileEntry, ProjectInfo, ProjectSettings, RewindView, SdkEvent, SessionSummary, SessionView, UserSettings, WorkflowView } from '@nexgent/sdk'
 import type { NexgentBridge } from '../bridge.js'
 
 type Handler = (input: any) => unknown
@@ -114,6 +114,8 @@ export class FakeBridge implements NexgentBridge {
   /** Rework D2: what `handbook.list` answers (`setStatus` changes it like the SDK would), and each entry's operations for `handbook.show`. */
   handbook: HandbookEntryView[] = []
   handbookOps: Record<string, HandbookOp[]> = {}
+  notes: ProjectNotesView = { text: '' }
+  observations: ObservationView[] = []
   /** Redesign 3.1: what `sessions.rewind` previews; `undefined` answers `session/not-found` (no snapshot). Applying emits `turn.rewind`. */
   rewind: Omit<RewindView, 'applied'> | undefined = { turn: 1, takenAt: '2026-10-16T10:00:00.000Z', changes: [], unchanged: [] }
   /** Rework D2: `learning.status`; config and notice follow the settings like the SDK's. */
@@ -233,6 +235,36 @@ export class FakeBridge implements NexgentBridge {
       const ops = this.handbookOps[entry.id] ?? []
       this.handbookOps[entry.id] = [...ops, { formatVersion: 1, seq: ops.length + 1, at: '2026-10-16T13:00:00.000Z', entryId: entry.id, actor: 'user', op: 'status', status: input.status }]
       return { entry: updated, ops: this.handbookOps[entry.id] }
+    },
+    'handbook.add': input => {
+      const id = `00000000-0000-4000-8000-${String(this.handbook.length + 1).padStart(12, '0')}`
+      const rule = input.kind !== 'practice'
+      const entry: HandbookEntryView = {
+        id, text: input.text, keywords: [], scope: 'project', projectId: 'p1', status: 'active', ...(rule ? { kind: 'rule' as const } : {}), ...(input.appliesTo === undefined ? {} : { appliesTo: input.appliesTo }),
+        helpful: 0, harmful: 0, sources: [], supersedes: [], createdAt: '2026-11-07T10:00:00.000Z', updatedAt: '2026-11-07T10:00:00.000Z', retrievable: true,
+      }
+      this.handbook = [entry, ...this.handbook]
+      return { entry, ops: [] }
+    },
+    'handbook.edit': input => {
+      const entry = this.handbook.find(e => e.id === input.entryId)
+      if (entry === undefined) throw { name: 'NexgentError', code: 'handbook/not-found', message: `no entry ${input.entryId}` }
+      const updated: HandbookEntryView = { ...entry, ...(input.text === undefined ? {} : { text: input.text }), ...(input.appliesTo === undefined ? {} : { appliesTo: input.appliesTo }), updatedAt: '2026-11-07T11:00:00.000Z' }
+      this.handbook = this.handbook.map(e => (e.id === entry.id ? updated : e))
+      return { entry: updated, ops: this.handbookOps[entry.id] ?? [] }
+    },
+    'memory.notes': () => this.notes,
+    'memory.saveNotes': input => {
+      this.notes = input.text.trim() === '' ? { text: '' } : { text: input.text.trim(), updatedAt: '2026-11-07T12:00:00.000Z' }
+      return this.notes
+    },
+    'memory.observations': () => ({ observations: this.observations }),
+    'memory.resolve': input => {
+      const observation = this.observations.find(item => item.id === input.observationId)
+      if (observation === undefined) throw { name: 'NexgentError', code: 'tool/invalid-input', message: `no observation ${input.observationId}` }
+      const updated: ObservationView = { ...observation, status: input.status, updatedAt: '2026-11-07T12:00:00.000Z' }
+      this.observations = this.observations.map(item => (item.id === updated.id ? updated : item))
+      return updated
     },
     'learning.status': () => {
       const config = this.settings.learning

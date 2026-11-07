@@ -9,7 +9,7 @@
 import type { ApprovalRequest, DeliverableSummary, ErrorInfo, FeedbackRating, Goal, GoalStatus, LLMUsage, MaterialMetadata, SandboxMode } from '@nexgent/kernel'
 import type { CommandSandboxStatus } from '@nexgent/kernel'
 import type { LearningConfig, ThreadInfo, ThreadPlan } from '@nexgent/kernel'
-import type { CostWarningView, HandbookEntryDetail, HandbookListing, LearningStatus, ProjectFileListing, ProjectInfo, ProjectSettings, RewindView, SdkEvent, SessionSummary, SettingsPatch, UserSettings, UserSettingsPatch } from '@nexgent/sdk'
+import type { CostWarningView, HandbookEntryDetail, HandbookListing, LearningStatus, ObservationView, ProjectNotesView, ProjectFileListing, ProjectInfo, ProjectSettings, RewindView, SdkEvent, SessionSummary, SettingsPatch, UserSettings, UserSettingsPatch } from '@nexgent/sdk'
 import { SdkClient, errorInfoOf, type NexgentBridge } from './bridge.js'
 import { applyEvent, feedbackEntry, fromHistory, userEntry, withWorkflows, workflowKey, type TimelineEntry } from './timeline.js'
 
@@ -81,6 +81,10 @@ export interface AppState {
   readonly handbookDetail?: HandbookEntryDetail | undefined
   /** Rework D2: learning switch, spend against the budget, self-evaluations. */
   readonly learning?: LearningStatus | undefined
+  /** Project memory: the coordinator's project notes. */
+  readonly notes?: ProjectNotesView | undefined
+  /** Project memory: the patterns the host found, latest change first. */
+  readonly observations?: readonly ObservationView[] | undefined
   /** Rework D3: the latest cost-cap warning of this project, until dismissed. */
   readonly costWarning?: CostWarningView | undefined
   /** Coordinator step two: the project's threads with their status (`threads.list` of each conversation that has threads). */
@@ -242,6 +246,8 @@ export class AppStore {
       handbook: undefined,
       handbookDetail: undefined,
       learning: undefined,
+      notes: undefined,
+      observations: undefined,
       costWarning: undefined,
     })
     await Promise.all([this.refreshSessions(), this.refreshMaterials(), this.refreshDeliverables(), this.refreshSettings(), this.refreshRecent(), this.refreshUserSettings(), this.refreshLearning()])
@@ -274,7 +280,7 @@ export class AppStore {
 
   /** Back to the start screen; the project stays open in the backend (running turns go on). */
   leaveProject(): void {
-    this.set({ project: undefined, sessionId: undefined, sessionMeta: undefined, timeline: [], running: false, pendingApprovals: [], memberView: undefined, handbook: undefined, handbookDetail: undefined, learning: undefined, costWarning: undefined })
+    this.set({ project: undefined, sessionId: undefined, sessionMeta: undefined, timeline: [], running: false, pendingApprovals: [], memberView: undefined, handbook: undefined, handbookDetail: undefined, learning: undefined, notes: undefined, observations: undefined, costWarning: undefined })
     void this.refreshRecent()
   }
 
@@ -336,9 +342,14 @@ export class AppStore {
     if (projectId === undefined) return
     const latest = this.startRead('learning')
     await this.guard(async c => {
-      const [handbook, learning] = await Promise.all([c.call('handbook.list', { projectId, includeRetired: true }), c.call('learning.status', { projectId })])
+      const [handbook, learning, notes, observations] = await Promise.all([
+        c.call('handbook.list', { projectId, includeRetired: true }),
+        c.call('learning.status', { projectId }),
+        c.call('memory.notes', { projectId }).catch(() => undefined),
+        c.call('memory.observations', { projectId }).then(listing => listing.observations, () => undefined),
+      ])
       if (this.projectId !== projectId || !latest()) return
-      this.set({ handbook, learning })
+      this.set({ handbook, learning, ...(notes === undefined ? {} : { notes }), ...(observations === undefined ? {} : { observations }) })
       const open = this.state.handbookDetail
       const now = open === undefined ? undefined : handbook.entries.find(entry => entry.id === open.entry.id)
       if (open !== undefined && now !== undefined && now.updatedAt !== open.entry.updatedAt) await this.showHandbookEntry(open.entry.id)
@@ -373,6 +384,70 @@ export class AppStore {
     this.set(state => ({ handbookDetail: state.handbookDetail?.entry.id === entryId ? detail : state.handbookDetail }))
     await this.refreshLearning()
     return true
+  }
+
+  // --- project memory -----------------------------------------------------------
+
+  /** The observations again (a task end found a pattern, a suggestion arrived). */
+  async refreshObservations(): Promise<void> {
+    const projectId = this.projectId
+    if (projectId === undefined) return
+    const latest = this.startRead('observations')
+    const listing = await this.client?.call('memory.observations', { projectId }).catch(() => undefined)
+    if (listing !== undefined && this.projectId === projectId && latest()) this.set({ observations: listing.observations })
+  }
+
+  /** The user adds a rule or a practice; `false` when it was refused (a notice says why). */
+  async addMemory(input: { readonly text: string; readonly kind: 'rule' | 'practice'; readonly appliesTo?: string }): Promise<boolean> {
+    const projectId = this.projectId
+    if (projectId === undefined || input.text.trim() === '') return false
+    const appliesTo = input.appliesTo?.trim()
+    const detail = await this.guard(c => c.call('handbook.add', { projectId, text: input.text.trim(), kind: input.kind, ...(appliesTo === undefined || appliesTo === '' ? {} : { appliesTo }) }))
+    if (detail === undefined) return false
+    await this.refreshLearning()
+    return true
+  }
+
+  /** The user rewrites an entry (and a rule's range). */
+  async editMemory(entryId: string, input: { readonly text: string; readonly appliesTo?: string }): Promise<boolean> {
+    const projectId = this.projectId
+    if (projectId === undefined || input.text.trim() === '') return false
+    const appliesTo = input.appliesTo?.trim()
+    const detail = await this.guard(c => c.call('handbook.edit', { projectId, entryId, text: input.text.trim(), ...(appliesTo === undefined || appliesTo === '' ? {} : { appliesTo }) }))
+    if (detail === undefined) return false
+    await this.refreshLearning()
+    return true
+  }
+
+  /** The user rewrites the project notes. */
+  async saveNotes(text: string): Promise<boolean> {
+    const projectId = this.projectId
+    if (projectId === undefined) return false
+    const notes = await this.guard(c => c.call('memory.saveNotes', { projectId, text }))
+    if (notes === undefined) return false
+    if (this.projectId === projectId) this.set({ notes })
+    return true
+  }
+
+  /** The user keeps (with the rule or practice `text`) or dismisses an observation. */
+  async resolveObservation(observationId: string, status: 'adopted' | 'dismissed', keep?: { readonly text: string; readonly appliesTo?: string }): Promise<boolean> {
+    const projectId = this.projectId
+    if (projectId === undefined) return false
+    const appliesTo = keep?.appliesTo?.trim()
+    const view = await this.guard(c => c.call('memory.resolve', { projectId, observationId, status, ...(keep === undefined || keep.text.trim() === '' ? {} : { text: keep.text.trim() }), ...(appliesTo === undefined || appliesTo === '' ? {} : { appliesTo }) }))
+    if (view === undefined) return false
+    this.set(state => ({ observations: state.observations?.map(item => (item.id === view.id ? view : item)) }))
+    if (keep !== undefined) await this.refreshLearning()
+    return true
+  }
+
+  /** Ask the coordinator something (it opens first): the observation's “看拆分建议”. */
+  async askCoordinator(text: string): Promise<boolean> {
+    const coordinator = this.state.sessions.find(session => session.coordinator === true)
+    if (coordinator === undefined) return false
+    if (this.state.sessionId !== coordinator.sessionId) await this.openSession(coordinator.sessionId, { show: true })
+    if (this.state.sessionId !== coordinator.sessionId) return false
+    return this.send(text, [])
   }
 
   /**
@@ -784,6 +859,11 @@ export class AppStore {
     // Rework D3: a cost cap warned or was reached (project-level; shown above the composer).
     if (event.type === 'cost.warning') {
       this.set({ costWarning: event.warning })
+      return
+    }
+    // Project memory: the observations changed.
+    if (event.type === 'memory.observations') {
+      void this.refreshObservations()
       return
     }
     const current = event.sessionId === this.state.sessionId

@@ -118,6 +118,7 @@
     │                                     内部布局与上面项目内的同名目录相同（PROJECT_DATA_SUBDIRS）
     ├── handbook/ops.jsonl                项目级经验手册
     ├── learning/queue.json               后台学习队列
+    ├── memory/facts.jsonl  observations.json  项目记忆：每个任务的事实与项目观察（本文“项目记忆”）
     └── evaluations/<taskId>.json         自评（本文“自评”）
 ```
 
@@ -885,7 +886,7 @@ The earlier part of this conversation was compacted. Summary:
 - 一次运行“顺利”：轮次正常完成，没有失败的检查，用户中途没有纠正，之后没有返工；有 `review` 行时分数不低于 0.7。还在 `waiting` 的运行结局未知，不算顺利，也不计入单干与组队比较、组织选择与汇总的次数（结算后才计）；`profile` 行带 `completed: false`（这一轮起的讨论串运行有一次没有正常完成，或停在 `Blockers:` 等回答）时这次运行算没完成。
 - 结论：同类里组队与单独做各至少 5 次后，一方顺利率的 90% 区间下限（Wilson）高于另一方的顺利率，就是那一方更好；否则还在比较。
 - 选择：用更好的一方（没有结论时是组队）；另一方作对照，没有结论时占 1/5，有结论后占 1/10，对照的轮记 `control: true`、`chosenBy: "control"`。组队时从三种内置分工与本类里顺利过的 `custom` 分工中按汤普森抽样挑一个，比本类组队平均花费每多 100% 扣 0.1；建议带上它在本类最近一次顺利运行的角色（任务中改出来的分工也算），写进本轮“How this task is organized”一节，并记为 `turn.start.organization.suggested`。本类已有记录时 `chosenBy` 为 `memory`。
-- 界面：SDK `learning.status.organizations` 按类给出 `OrganizationClassSummary`（关键词、两边次数、结论、常用分工、两边顺利率、花费变化），能力页标题下一句话说运行最多的那类。
+- 界面：SDK `learning.status.organizations` 按类给出 `OrganizationClassSummary`（关键词、两边次数、结论、常用分工、两边顺利率、花费变化），项目记忆页标题下一句话说运行最多的那类。
 
 ### 协作试验
 
@@ -983,18 +984,21 @@ The earlier part of this conversation was compacted. Summary:
 
 | `op` | 专有字段 | 说明 |
 | --- | --- | --- |
-| `add` | `text`（≤600 字符）、`keywords`（≤12 个小写词，每个 ≤40 字符）、`scope: "user" \| "project"`、`projectId?`、`status?: "trial" \| "active"`、`supersedes?`、`kind?: "practice" \| "rule"`、`appliesTo?`（≤120 字符）、`pending?` | 新条目，缺省 `trial`；从上下文策略迁来的条目直接 `active`。`supersedes` 列出被取代的条目，它们随之退休。`kind: "rule"` 是项目规则，必须 `scope: "project"`；`appliesTo` 与 `pending` 只属于规则 |
-| `edit` | `text?`、`keywords?` | 改措辞或关键词；计数与状态不变 |
+| `add` | `text`（≤600 字符）、`keywords`（≤12 个小写词，每个 ≤40 字符）、`scope: "user" \| "project"`、`projectId?`、`status?: "trial" \| "active"`、`supersedes?`、`kind?: "practice" \| "rule"`、`appliesTo?`（≤120 字符）、`pending?`、`quote?`（≤600 字符）、`files?`（≤8 个项目相对路径，每个 ≤200 字符） | 新条目，缺省 `trial`；从上下文策略迁来的条目直接 `active`。`supersedes` 列出被取代的条目，它们随之退休。`kind: "rule"` 是项目规则，必须 `scope: "project"`；`appliesTo` 与 `pending` 只属于规则；`quote` 是用户的原话，`files` 是条目说到的文件 |
+| `edit` | `text?`、`keywords?`、`appliesTo?` | 改措辞、关键词或规则的范围（`appliesTo` 只用于规则）；计数与状态不变 |
 | `upvote` / `downvote` | 无 | 一票有用 / 有害 |
 | `status` | `status: "trial" \| "active" \| "retired"` | 宿主按 `nextHandbookStatus` 追加，或用户改 |
 
-条目（折叠结果）字段：`id`、`text`、`keywords`、`scope`、`projectId?`、`status`、`kind?`、`appliesTo?`、`pending?`、`helpful`、`harmful`、`sources`、`supersedes`、`supersededBy?`、`createdAt`、`updatedAt`。用户（`actor: "user"`）对一条 `pending` 规则追加的 `status` 操作同时去掉 `pending`。
+条目（折叠结果）字段：`id`、`text`、`keywords`、`scope`、`projectId?`、`status`、`kind?`、`appliesTo?`、`pending?`、`quote?`、`files?`、`helpful`、`harmful`、`sources`、`supersedes`、`supersededBy?`、`createdAt`、`updatedAt`。用户（`actor: "user"`）对一条 `pending` 规则追加的 `status` 操作同时去掉 `pending`。
 
 规则：
 
 - 状态（`handbookStatusFromEvidence`，契约 `handbook-evidence.ts`）：只按下文“随机注入对照”的证据定。试用条目在给与不给两组各有至少 3 个结局已知的任务、且给的那组均分不低于不给的那组时启用；给的那组出现用户的负面信号，或给的那组至少 4 个任务、均分比不给的那组低 0.1 以上，或被取代时下线；执行模型或反思说某条启用的条目误导了它，只能把它退回试用。票（`upvote` / `downvote`，折叠为 `helpful` / `harmful`）从此读作“用到了” / “说它误导”，不能让条目启用。
-- 项目规则（`isRuleInForce`）：用户在任务或反馈里说成以后都要遵守的约定，保留具体的单位、格式、命名与数值，记在项目级，`appliesTo` 是用户说的范围（整个项目，或某个目录、模块、某类文件；没说时记为这次任务改到的那部分）。规则不按任务文字检索、不抽签：本项目每个根任务的第一轮都在手册注入的最前面给全部生效的规则（`HANDBOOK_RULES_HEADER`，每行带范围），任务本身的要求与规则冲突时以任务为准；id 同样写进 `turn.start.handbook`。规则不受随机注入对照与按使用下线的影响，只有用户停用或被新规则取代时退休。规则行之后总跟一句 `RULE_CONFLICT_NOTE`：范围内已有的测试或代码与规则不符时两边都不改，用一句话问用户以哪个为准（README、注释、示例照规则改）。本项目里还没给过别的根会话的规则（看 `usage.jsonl` 里有没有别的会话给出它的 `hit`）在 id 后标 `(new)`（`RULE_NEW_MARK`），并加一句 `NEW_RULES_NOTE`，要模型先找与它不符的已有测试或代码。给过规则的任务，自动检查失败时重试说明后加 `RULE_CONFLICT_AFTER_CHECKS_NOTE`。反思拿不准是不是长期规则时写成 `pending`（`status: trial`），不注入，等用户在“能力”页确认（`status: active`）或拒绝（`status: retired`）。
+- 项目规则（`isRuleInForce`）：用户在任务或反馈里说成以后都要遵守的约定，保留具体的单位、格式、命名与数值，记在项目级，`appliesTo` 是用户说的范围（整个项目，或某个目录、模块、某类文件；没说时记为这次任务改到的那部分）。规则不按任务文字检索、不抽签：本项目每个根任务的第一轮都在手册注入的最前面给全部生效的规则（`HANDBOOK_RULES_HEADER`，每行带范围），任务本身的要求与规则冲突时以任务为准；id 同样写进 `turn.start.handbook`。规则不受随机注入对照与按使用下线的影响，只有用户停用或被新规则取代时退休。规则行之后总跟一句 `RULE_CONFLICT_NOTE`：范围内已有的测试或代码与规则不符时两边都不改，用一句话问用户以哪个为准（README、注释、示例照规则改）。本项目里还没给过别的根会话的规则（看 `usage.jsonl` 里有没有别的会话给出它的 `hit`）在 id 后标 `(new)`（`RULE_NEW_MARK`），并加一句 `NEW_RULES_NOTE`，要模型先找与它不符的已有测试或代码。给过规则的任务，自动检查失败时重试说明后加 `RULE_CONFLICT_AFTER_CHECKS_NOTE`。反思拿不准是不是长期规则时写成 `pending`（`status: trial`），不注入，等用户在“项目记忆”页确认（`status: active`）或拒绝（`status: retired`）。
 - 检索：试用与启用的条目可被检索（`isRetrievable`；规则除外），每个任务至多 5 条（`HANDBOOK_TOP_K`）；项目级条目只给本项目，用户级条目在 `learning.useShared` 开着时给所有项目。注入的条目 id 写在 `turn.start.handbook`。
+- 提议记住（`propose_memory`，契约 `PROPOSE_MEMORY_TOOL`）：用户纠正做法、或说以后这个项目都该怎样时，用户直接对话的根会话（总对话或讨论串，不含成员）提一条规则，`text` 一句话，`quote` 是用户的原话，可带 `appliesTo` 与 `files`。宿主核对 `quote`（空白折叠后）出现在这个会话某条来源为 `user` 或 `relay` 的用户消息里，不在就拒绝；通过的追加一条 `add`（`kind: rule`、`status: trial`、`pending: true`、`actor: execution`），与已有规则重复时不新增并在结果里说出已有条目的 id。工具结果写明条目 id，界面据此显示“要记住吗”卡片。
+- 用户手动添加（SDK `handbook.add`）：`actor: user`、`status: active`、项目级；规则的 `keywords` 为空，经验的关键词从文字取。用户改经验的文字时关键词随之重算（`handbook.edit`）。“删除”就是 `status: retired`，可以恢复，历史保留。
+- 过时：条目带 `files` 时，其中已不在项目里的文件在 `HandbookEntryView.missing` 里给界面；注入给模型时该行后面注明这些文件已不存在，条目可能过时。
 - 执行中的模型用 `handbook_mark`（只读、不审批、可并发）说一条注入的条目帮了忙还是带偏了；每个任务每个条目一票，重复的忽略。
 - 条目文字用用户的界面语言；不得含某个任务的具体数值（沿用“草稿与回滚”末尾的具体数值检查）。
 - 使用记录与按使用下线：每个手册目录在 `ops.jsonl` 旁边有 `usage.jsonl`，JSON Lines，只追加，不取锁，读取方跳过解析不了的行。它只是记账，不属于条目的历史。每行公共字段 `formatVersion: 1`、`at`、`kind`、`projectId`、`sessionId`（根会话）：`kind: "turn"` 是根任务的一轮问了手册（用户级文件在 `useShared` 开着时也记）；`kind: "hit"` 另带 `entryId`、`given`（是否给了模型），记在条目所在的那一份。“用到了”取 `ops.jsonl` 里的有用票。宿主每轮检索前下线没人用的条目，追加 `status: retired`（`actor: host`，`reason` 以 `unused:` 开头）：启用的条目 90 天、试用的条目 60 天没被检索到，并且其间至少有 10 个根会话问过这份手册；或者试用条目自上次被用到（或新增、恢复）以来给过 8 个根会话都没得到有用票。计时从条目新增、修改、用到、用户改状态或最近一次命中中最晚的那个算起。用户可以把它恢复到下线前的状态（`status` 操作，`actor: user`）；被取代的条目不能这样恢复。检索分数相同的条目，先按用到次数与给出次数之比，再按最近用到时间排序。
@@ -1022,6 +1026,44 @@ The earlier part of this conversation was compacted. Summary:
 **反思与整理**（`@nexgent/evolve` 的 `LearningHost`）：每个根任务轮结束后（`turn.end` 之后，内核调用可选的 `ctx.learning.noteTurnEnd`；用户、关机或父会话取消的轮不学），任务进入项目的学习队列；应用进程里的后台循环一次处理一个任务：先调 `selfEvaluate`（`@nexgent/capabilities`，见 §自评；每个任务只评一次，之后的轮只并入用户反馈；请求记 `learningPhase: "self-eval"` 或 `"calibrate"`，与反思共用学习预算），再读整段任务的会话记录与这份自评（自评失败或项目副本没有自评时，由本轮确定性检查与用户最后一次评分按 `selfEvalOutcome` 推出；这个结局只给反思参考），接着写本任务的对照结局（见下），找本项目历史里最相似、结局不同的一个任务作对照，发一次反思请求（`purpose: "auxiliary"`、`learningPhase: "reflect"`、`taskId` 为被学习的任务，不带 `sessionId`），把回答里的操作交给确定性整理，通过的经 `Handbook.apply`（`@nexgent/capabilities`，`actor: "reflection"`）写入，`apply` 在日志锁内再查一遍；反思的票只记“用到了 / 说它误导”，不能让条目启用。整理规则（任何任务都成立）：反思写的条目文字 1–300 字符（一条做法，不是清单）；关键词小写、去重、至多 12 个，缺省时从文字取；含任务具体数值的条目拒绝（`findInstanceLiterals`，项目级条目允许项目常量，用户级不允许）；与任务的用户消息或反馈评论共享 24 个以上连续字符、或用引号引用其中原话的条目，视为照抄一次性要求，拒绝（反馈里对某个成果的偏好不是规则）；反思对同一条目至多改写 2 次；与可见条目文字相似度 ≥ 0.6 且未声明取代的新条目视为重复，拒绝；`supersedes` 与 `edit` 只能指向同一份日志里未退休的条目；投票只能投给本任务被给到的条目（`turn.start.handbook`；没有注入记录时为按任务文字检索到的前 5 条），每个任务每个条目一票，与结局是否已知无关；`learning.contribute` 关着时新条目一律记为项目级；文字里有本项目任务消息中出现过的文件名（`name.ext`）或路径（`a/b`）时，新条目记为项目级（名字只在本项目有意义），给用户级条目的 `edit` 带进这类名字时拒绝；一次反思至多新增 3 条、写 10 个操作（规则计入新增条数）。规则（反思的 `rule` 操作）另按：用户原话里与它最像的那句（任务、运行中插话、反馈都算）只说“这次、这里、先别、暂时、for now、this time”这类一次性说法、没有“一律、以后、每次、项目里、always、from now on”这类长期说法的，拒绝（`one-off`）；两类说法都没有的，即使反思说确定也写成 `pending`；只能带用户在任务消息或反馈里亲口给出的数值，其他任务数值照样拒绝；仍须用自己的话重述（共享 24 个以上连续字符拒绝）；与已有生效规则相似度 ≥ 0.6 且未声明取代的视为重复；`supersedes` 只能指向本项目未退休的规则；确定的规则直接 `active`，拿不准的写成 `pending`；反思对规则的投票与 `edit` 一律以 `rule-locked` 拒绝。自评从本任务第一轮的注入里读出给到的规则（`givenRules`），写进评分标准与打分请求，规则压过项目旧文件、只有任务自己的消息能压过规则。执行中的模型经 `handbook_mark` 记票（`actor: "execution"`）；同一任务已投过的条目，反思不再投。
 
 **学习队列** `<项目数据>/learning/queue.json`（迁移前在 `.nexgent/learning/`，在 `queue.lock` 下原子重写；处理它的进程持有 `worker.lock`，别的进程只入队）：`{ formatVersion: 1, items, history }`。`items[]`：`{ taskId, sessionId, fromTurn, turn, checks, enqueuedAt, status: "pending" | "running" | "waiting-budget", attempts, detail? }`，同一任务的新一轮替换它等待中的那项，反思覆盖自上次学到的轮之后的所有轮；至多 50 项。`history[]`：`{ taskId, sessionId, fromTurn, throughTurn, finishedAt, status: "done" | "skipped" | "failed", outcome, task（≤500 字符）, keywords, approach（≤600 字符）, ops, rejected, added, usd?, detail?, outputs?, deleted?, reverted? }`（`outputs` 是任务交出、且自己没删的成果文件，至多 50 个；`deleted` 是任务轮删掉的文件，至多 200 个；`reverted` 表示已记过用户删除成果），至多 500 项，供找对照任务。花钱前检查 `mayLearn` 与学习预算：没确认说明时项留在队列里；预算余额不足 0.1 美元（`REFLECTION_RESERVE_USD`）时项标为 `waiting-budget`，等之后某轮结束或应用重启时窗口有余额再跑；应用退出时中止正在进行的请求，那一项回到 `pending`（本次不计入尝试次数），下次启动继续；请求失败重试，3 次后记为 `failed`。
+
+## 项目记忆
+
+宿主在每个项目里攒下的、关于反复出现的问题的记录：每个任务的事实，以及从最近的任务里找出的模式（项目观察）。全部由宿主从运行记录里数出，不由模型判断；观察本身不改代码、不改规则，由用户采纳或忽略。契约 `project-memory.ts`，实现 `@nexgent/sdk` 的 `memory.ts`。
+
+文件在 `<项目数据>/memory/`：
+
+- `facts.jsonl`：JSON Lines，每行一个 `TaskFacts`，同一 `key` 以最后一行为准；超过 200 行（`PROJECT_MEMORY_LIMITS.factsKept`）时重写，只留最新的。
+- `observations.json`：`{ formatVersion: 1, observations: ProjectObservation[] }`，至多 60 条（`kept`），先写临时文件再改名。
+
+**任务事实**（`TaskFacts`）：总对话的一个任务一行，`key` 为 `<coordinatorSessionId>:<用户开始这个任务的那一轮>`。讨论串都结束、宿主数完协作问题时写（没有派讨论串的任务在总对话这一轮结束时写）。字段：
+
+| 字段 | 说明 |
+| --- | --- |
+| `formatVersion: 1`、`key`、`coordinatorSessionId`、`turn`、`at` | |
+| `task` | 任务的第一条消息，至多 120 字符 |
+| `threads` | 这个任务里跑过的讨论串数 |
+| `completed` | `true` / `false` / `"unknown"`（讨论串的报告看不出做没做完） |
+| `checkFailed`、`idle`、`unanswered` | 最后的整体检查没过；因等别的讨论串而停下的讨论串数；没人回的留言与提问数 |
+| `corrections[]` | `{ text（≤300 字符）, to, kind, at }`。`kind: "mid"`：任务运行中用户对总对话的插话，或用户在任务开始后直接对讨论串说的话（`to` 为讨论串标题）；`kind: "redo"`：项目里已有更早的任务，而这个任务的第一条消息说上次的结果不对、要重做。至少 3 个词（`minCorrectionTerms`）才记 |
+| `files[]` | 至多 40 个（`filesPerTask`）：`{ path, threads, conflicts, outside, reread }`，按讨论串合入记录数：合入它的讨论串、合并冲突次数、是否在分给它的 `owns` 以外、是否被同一讨论串在一轮里反复读 |
+| `loops[]` | `{ who, tool, code?, count }`：同一个调用连续失败 3 次以上（`stuckRepeats`） |
+| `usd?`、`ms?` | 只记录，不参与任何判断 |
+
+**找模式**（`findPatterns`）：读最近 12 个任务（`window`）：
+
+- `drift`：两条纠正的词语相似度（`termSet` 的 Jaccard）≥ 0.3 时算同一件事；同一件事出现在 2 个以上不同任务（`driftTasks`）里。`key` 为第一句的词。证据带原话（最新在前）。
+- `hotspot`：同一个文件在 3 个以上任务（`hotspotTasks`）里出过麻烦（冲突、几个讨论串同时改、`owns` 以外、反复读）；同一目录下有几个这样的文件时合成一条，`key` 为目录。证据带文件与各类次数（`trouble`）。
+- `split`：派了两个以上讨论串的任务里，有 2 个以上（`splitTasks`）拆分出了问题（检查没过、互等、留言没人回、冲突、没做完）。`key` 为 `split`。证据带各类次数（`problems`）与窗口里多讨论串任务的数目（`of`）。
+- `stuck`：同一个工具的同样的连续失败出现在 2 个以上任务（`stuckTasks`）里。`key` 为工具名。同一任务里连续失败达到 3 次时，宿主在下一次请求前给这个会话一句提醒（换个做法，不要重试同一个调用）。
+
+**合并**（`mergeObservations`）：同 `kind` 同 `key` 的（`drift` 另按原话相似度）算同一条，更新证据与 `updatedAt`；`status: "dismissed"` 的不再重新打开，`adopted` 的不再提。新出现或证据变了的观察让 SDK 发 `memory.observations` 事件。
+
+**建议**：有新的或变了的观察时，可选地发一次辅助请求（`purpose: "auxiliary"`），给每条写一两句 `suggestion`（≤400 字符）和可直接采纳的 `rule` / `appliesTo`；SDK 选项 `observationSuggestions` 打开时才发（桌面应用打开）。没有新模式时不发。
+
+**采纳**（SDK `memory.resolve`）：`status: "adopted"` 带 `text` 时，`drift`、`split` 记成项目规则，`hotspot`、`stuck` 记成经验，都是 `actor: user`、`status: active`，带原话、文件和 `source.taskId`（观察的 `taskKey`），条目 id 写进观察的 `entryId`；不带 `text` 只改状态（设计热点交给协调者给建议后即为采纳）。`status: "dismissed"` 是忽略。
+
+**给协调者**：总对话每轮的系统段 `coordinator-observations`（`OBSERVATIONS_LEAD` 开头）列出还开着的 `hotspot` 与 `split`，各一行，派活时考虑。
 
 ## 已删除功能留下的数据
 

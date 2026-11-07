@@ -17,7 +17,9 @@
  *   nobody uses, then draws which found entries the model gets and records
  *   the draws.
  */
-import { HANDBOOK_EVIDENCE, HANDBOOK_MARK_TOOL, HANDBOOK_RULES_HEADER, NEW_RULES_NOTE, NexgentError, RULE_CONFLICT_NOTE, RULE_NEW_MARK, type HandbookDraw, type HandbookEntry, type HandbookTurnInput, type HandbookTurnSelection, type SessionRecord, type Tool } from '@nexgent/kernel'
+import { existsSync } from 'node:fs'
+import { isAbsolute, relative, resolve } from 'node:path'
+import { HANDBOOK_EVIDENCE, HANDBOOK_LIMITS, HANDBOOK_MARK_TOOL, PROPOSE_MEMORY_TOOL, HANDBOOK_RULES_HEADER, NEW_RULES_NOTE, NexgentError, RULE_CONFLICT_NOTE, RULE_NEW_MARK, type HandbookDraw, type HandbookEntry, type HandbookTurnInput, type HandbookTurnSelection, type SessionRecord, type Tool } from '@nexgent/kernel'
 import type { CapabilityService } from '../service.js'
 import { Handbook, type HandbookTurnHit } from './handbook.js'
 import { contextPolicyKey, migrateContextPolicies } from './migrate.js'
@@ -60,6 +62,25 @@ export { HANDBOOK_RULES_HEADER }
 
 /** The opening line of practices that come with the session's capability version. */
 export const VERSION_PRACTICES_HEADER = 'Practices of this capability version:'
+
+/** Project memory: the description of `propose_memory`. */
+export const PROPOSE_MEMORY_DESCRIPTION = 'When the user corrects the work, or says how something should be done in this project from now on (not just this time), '
+  + 'propose it as a project rule: one short line in their language, with their own words as quote (copied exactly from one of their messages here). '
+  + 'The user sees a card and decides; until they confirm, it is not a rule, so keep doing the task as asked. Do not propose one-off requests, your own ideas, or what a rule already says.'
+
+/** Pure: whitespace folded, for comparing a quote with the user's messages. */
+function folded(text: string): string {
+  return text.normalize('NFKC').replace(/\s+/g, ' ').trim()
+}
+
+/** Project memory: the files of an entry that no longer exist in the project (the entry may be outdated). */
+export function missingFiles(projectRoot: string, files: readonly string[] | undefined): string[] {
+  return (files ?? []).filter(file => {
+    const path = resolve(projectRoot, file)
+    const inside = relative(projectRoot, path)
+    return inside === '' || inside.startsWith('..') || isAbsolute(inside) ? false : !existsSync(path)
+  })
+}
 
 /** The ids given to a session so far (`turn.start.handbook`). */
 export function givenEntries(records: readonly SessionRecord[]): string[] {
@@ -127,8 +148,13 @@ export class HandbookHost {
     const active = given('active')
     const trial = given('trial')
     if (rules.length === 0 && active.length === 0 && trial.length === 0 && pinned.length === 0) return undefined
-    const line = (entry: HandbookEntry) => `- [${entry.id}] ${entry.text.replace(/\s*\n\s*/g, ' ')}`
-    const ruleLine = (entry: HandbookEntry) => `- [${entry.id}]${before.has(entry.id) ? '' : ` ${RULE_NEW_MARK}`}${entry.appliesTo === undefined ? '' : ` (applies to: ${entry.appliesTo})`} ${entry.text.replace(/\s*\n\s*/g, ' ')}`
+    // Project memory: an entry about files that are gone is said to be possibly outdated.
+    const outdated = (entry: HandbookEntry) => {
+      const gone = missingFiles(this.#options.projectRoot, entry.files)
+      return gone.length === 0 ? '' : ` (may be outdated: ${gone.join(', ')} no longer exist${gone.length === 1 ? 's' : ''})`
+    }
+    const line = (entry: HandbookEntry) => `- [${entry.id}] ${entry.text.replace(/\s*\n\s*/g, ' ')}${outdated(entry)}`
+    const ruleLine = (entry: HandbookEntry) => `- [${entry.id}]${before.has(entry.id) ? '' : ` ${RULE_NEW_MARK}`}${entry.appliesTo === undefined ? '' : ` (applies to: ${entry.appliesTo})`} ${entry.text.replace(/\s*\n\s*/g, ' ')}${outdated(entry)}`
     const lines: string[] = []
     if (rules.length > 0) lines.push(HANDBOOK_RULES_HEADER, ...rules.map(ruleLine), RULE_CONFLICT_NOTE, ...(rules.some(rule => !before.has(rule.id)) ? [NEW_RULES_NOTE] : []))
     if (active.length > 0 || trial.length > 0) lines.push(...(lines.length > 0 ? [''] : []), HANDBOOK_INJECT_HEADER, ...active.map(line))
@@ -213,6 +239,56 @@ export class HandbookHost {
         }
         if (result?.outcome !== 'applied') throw new NexgentError('tool/failed', `entry ${input.entryId} could not be marked`)
         return { content: `Marked entry ${input.entryId} ${input.verdict}.`, meta: { entryId: input.entryId, verdict: input.verdict, recorded: true } }
+      },
+    }
+  }
+
+  /**
+   * Project memory: `propose_memory`. The rule is kept pending (on trial,
+   * given to no task) until the user confirms it; the quote must be the
+   * user's own words in this conversation.
+   */
+  proposeTool(): Tool {
+    return {
+      definition: {
+        name: PROPOSE_MEMORY_TOOL.name,
+        description: PROPOSE_MEMORY_DESCRIPTION,
+        inputSchema: PROPOSE_MEMORY_TOOL.inputSchema,
+        effects: [...PROPOSE_MEMORY_TOOL.effects],
+        approval: PROPOSE_MEMORY_TOOL.approval,
+      },
+      handler: async (raw, context) => {
+        const input = raw as { readonly text?: unknown; readonly quote?: unknown; readonly appliesTo?: unknown; readonly files?: unknown }
+        if (typeof input.text !== 'string' || input.text.trim() === '') throw new NexgentError('tool/invalid-input', 'give text: the rule in one short line')
+        if (typeof input.quote !== 'string' || input.quote.trim() === '') throw new NexgentError('tool/invalid-input', 'give quote: the user\'s own words')
+        if (input.appliesTo !== undefined && typeof input.appliesTo !== 'string') throw new NexgentError('tool/invalid-input', 'appliesTo must be text')
+        if (input.files !== undefined && (!Array.isArray(input.files) || input.files.some(file => typeof file !== 'string'))) throw new NexgentError('tool/invalid-input', 'files must be a list of paths')
+        const records = await this.#options.readRecords(context.sessionId)
+        const start = records[0]
+        if (context.member !== undefined || start?.type !== 'session.start' || start.parentSessionId !== undefined || start.member !== undefined) {
+          throw new NexgentError('tool/denied', 'only the conversation the user talks to proposes project memory')
+        }
+        const quote = input.quote.trim().slice(0, HANDBOOK_LIMITS.maxQuoteChars)
+        const said = records.flatMap(record => (record.type === 'user.message' && (record.source === 'user' || record.source === 'relay') ? [folded(record.content)] : []))
+        if (!said.some(text => text.includes(folded(quote)))) {
+          throw new NexgentError('tool/invalid-input', 'quote must be the user\'s own words, copied exactly from one of their messages in this conversation')
+        }
+        const appliesTo = typeof input.appliesTo === 'string' && input.appliesTo.trim() !== '' ? input.appliesTo.trim() : undefined
+        const files = Array.isArray(input.files) ? (input.files as string[]).map(file => file.trim()).filter(file => file !== '').slice(0, HANDBOOK_LIMITS.maxFiles) : []
+        const handbook = await this.open()
+        const taskId = context.attribution?.taskId ?? context.sessionId
+        const [result] = await handbook.apply(
+          [{ op: 'add', kind: 'rule', scope: 'project', status: 'trial', pending: true, text: input.text.trim(), keywords: [], quote, ...(appliesTo === undefined ? {} : { appliesTo }), ...(files.length === 0 ? {} : { files }) }],
+          { actor: 'execution', source: { projectId: handbook.projectId, taskId, sessionId: context.sessionId } },
+        )
+        if (result?.outcome === 'duplicate') {
+          return { content: `Project memory already has this (entry ${result.duplicateOf}); nothing new was proposed.`, meta: { entryId: result.duplicateOf, duplicate: true } }
+        }
+        if (result?.outcome !== 'applied') throw new NexgentError('tool/invalid-input', result?.outcome === 'rejected' ? result.detail : 'the proposal was not kept')
+        return {
+          content: `Proposed to the user as project memory (entry ${result.entryId}). It is not a rule until they confirm it; keep doing the task as asked.`,
+          meta: { entryId: result.entryId },
+        }
       },
     }
   }

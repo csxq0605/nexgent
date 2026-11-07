@@ -227,7 +227,7 @@ function entryMeta(entry: HandbookEntryView): string {
 }
 
 /** Redesign UI 1: how often the entry was given and held back, the outcome gap, and its last use. */
-function evidenceText(entry: HandbookEntryView): string {
+export function evidenceText(entry: HandbookEntryView): string {
   const e = entry.evidence
   const parts = [L.trials(e?.shown ?? 0, e?.heldBack ?? 0)]
   if (e?.shownMean !== undefined && e.heldBackMean !== undefined) parts.push(L.trialGap(Math.round((e.shownMean - e.heldBackMean) * 100)))
@@ -296,7 +296,7 @@ function opText(op: HandbookOp): string {
   return op.op === 'status' ? L.op[op.status] ?? op.status : L.op[op.op] ?? op.op
 }
 
-function EntryHistory({ keywords, sources, ops }: { readonly keywords: readonly string[]; readonly sources: number; readonly ops: readonly HandbookOp[] }): JSX.Element {
+export function EntryHistory({ keywords, sources, ops }: { readonly keywords: readonly string[]; readonly sources: number; readonly ops: readonly HandbookOp[] }): JSX.Element {
   return (
     <div className="entry-detail" data-testid="handbook-detail">
       {keywords.length > 0 && (

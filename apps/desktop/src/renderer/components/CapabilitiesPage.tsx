@@ -1,15 +1,17 @@
 import { useAppState } from '../hooks.js'
 import { L } from '../strings.js'
 import { useUi } from '../ui.js'
-import { hasPendingRules, InUseList, LearningCard, learnedLead, organizationLead, PendingRules, RulesList, useLearningRefresh } from './Learned.js'
+import { hasPendingRules, LearningCard, learnedLead, organizationLead, PendingRules, useLearningRefresh } from './Learned.js'
+import { DeletedEntries, MemoryGroup, NotesSection, ObservationsSection } from './Memory.js'
 import { Icon } from './Icon.js'
 import { Page } from './Page.js'
-import { T } from '../strings.js'
+import { M, T } from '../strings.js'
 
 /**
- * 能力 as one quiet page (ADR 0028): one line on what is in use and its
- * effect, what waits for the user (only when something does), the project
- * rules and the practices in use. The learning spend is in the folded
+ * 项目记忆 (ADR 0028, project memory 2026-11-07): one line on what is in
+ * use and its effect, what waits for the user (only when something does),
+ * the observations, the rules, the practices and the coordinator's notes,
+ * each editable, and what was deleted. The learning spend is in the folded
  * 改进记录.
  */
 export function CapabilitiesPage(): JSX.Element {
@@ -24,13 +26,16 @@ export function CapabilitiesPage(): JSX.Element {
           <section className="decide" data-testid="capabilities-attention">
             <h3 className="group-title">
               <span className="dot warn" aria-hidden="true" />
-              {L.attentionTitle}
+              {M.pendingTitle}
             </h3>
             <PendingRules />
           </section>
         )}
-        <RulesList />
-        <InUseList />
+        <ObservationsSection />
+        <MemoryGroup kind="rule" />
+        <MemoryGroup kind="practice" />
+        <NotesSection />
+        <DeletedEntries />
         <details className="entry-group folded record" data-testid="capabilities-record">
           <summary className="group-title">
             <FoldMarks />
