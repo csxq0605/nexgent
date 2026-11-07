@@ -329,6 +329,8 @@ export function applyEvent(list: readonly TimelineEntry[], event: SdkEvent): Tim
     case 'capability.version':
     // API 8: cost warnings are project-level (the shell shows them, not the timeline).
     case 'cost.warning':
+    // Project memory: the observations card and page read them.
+    case 'memory.observations':
     // Rework D2: the sidebar and the title bar show the title.
     case 'session.title':
       return [...list]

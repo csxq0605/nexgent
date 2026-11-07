@@ -25,6 +25,8 @@ type FieldKind =
   | 'capabilityVersion'
   | 'handbookScope'
   | 'handbookStatus'
+  | 'handbookKind'
+  | 'observationStatus'
 
 interface FieldSpec {
   readonly kind: FieldKind
@@ -99,6 +101,12 @@ export const METHOD_SPECS: Readonly<Record<SdkMethodName, MethodSpec>> = {
   'handbook.list': { projectId: id, scope: { kind: 'handbookScope', optional: true }, includeRetired: { kind: 'boolean', optional: true } },
   'handbook.show': { projectId: id, entryId: id },
   'handbook.setStatus': { projectId: id, entryId: id, status: { kind: 'handbookStatus' }, reason: { kind: 'string', optional: true } },
+  'handbook.add': { projectId: id, text: { kind: 'nonEmptyString' }, kind: { kind: 'handbookKind', optional: true }, appliesTo: { kind: 'string', optional: true }, files: { kind: 'stringArray', optional: true } },
+  'handbook.edit': { projectId: id, entryId: id, text: { kind: 'string', optional: true }, appliesTo: { kind: 'string', optional: true } },
+  'memory.notes': project,
+  'memory.saveNotes': { projectId: id, text: { kind: 'string' } },
+  'memory.observations': project,
+  'memory.resolve': { projectId: id, observationId: id, status: { kind: 'observationStatus' }, text: { kind: 'string', optional: true }, appliesTo: { kind: 'string', optional: true } },
   'learning.status': project,
   'learning.acknowledge': {},
   'commandSandbox.install': {},
@@ -155,6 +163,10 @@ function checkField(kind: FieldKind, value: unknown): boolean {
       return value === 'user' || value === 'project'
     case 'handbookStatus':
       return value === 'active' || value === 'retired'
+    case 'handbookKind':
+      return value === 'rule' || value === 'practice'
+    case 'observationStatus':
+      return value === 'adopted' || value === 'dismissed'
     case 'approvalDecision':
       // `decidedBy` is set by the main process side, never by the page.
       return (

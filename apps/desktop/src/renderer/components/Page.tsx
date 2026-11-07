@@ -34,8 +34,9 @@ export function Page({ title, lead, onClose, testId, bar, aside, children }: Pro
         <div className="inner">
           <div className="page-head-row">
             <div className="grow">
-              <h2 className="page-title">{title}</h2>
-              {lead !== undefined && lead !== '' && <p>{lead}</p>}
+              <h2 className="page-title" {...(lead !== undefined && lead !== '' ? { title: lead } : {})} data-testid="page-title">
+                {title}
+              </h2>
             </div>
             <div className="page-head-actions">
               {aside}

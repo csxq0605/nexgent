@@ -52,6 +52,7 @@ import type {
   HandbookEntry,
   HandbookOp,
   HandbookScope,
+  ProjectObservation,
   LearningConfig,
   LearningConfigInput,
   LearningPhase,
@@ -402,6 +403,8 @@ export type SdkEvent =
    * `sessionId` of the triggering session is in `triggerSessionId`.
    */
   | CapabilityEventBase & { readonly type: 'cost.warning'; readonly warning: CostWarningView }
+  /** Project memory: the project's observations changed (a task end found a pattern, a suggestion arrived, the user decided). */
+  | CapabilityEventBase & { readonly type: 'memory.observations'; readonly open: number }
 
 /** The `type` vocabulary of {@link SdkEvent}. */
 export type SdkEventType = SdkEvent['type']
@@ -458,6 +461,26 @@ export interface HandbookEntryView extends HandbookEntry {
   readonly retrievable: boolean
   /** Redesign UI 1: how it fared when given or held back by lot (ADR 0023), and when a task last used it; absent when unknown. */
   readonly evidence?: HandbookEntryEvidence
+  /** Project memory: files it is about that no longer exist (it may be outdated). */
+  readonly missing?: readonly string[]
+}
+
+/** Project memory: the coordinator's project notes as the memory page shows them. */
+export interface ProjectNotesView {
+  readonly text: string
+  /** When the file was last written; absent when there are no notes. */
+  readonly updatedAt?: string
+}
+
+/** Project memory: one observation as the windows show it. */
+export interface ObservationView extends ProjectObservation {
+  /** Files it cites that no longer exist. */
+  readonly missing?: readonly string[]
+}
+
+/** Project memory: what `memory.observations` returns, latest change first. */
+export interface ObservationListing {
+  readonly observations: readonly ObservationView[]
 }
 
 /** Redesign UI 1: one entry's randomized evidence (`Handbook.evidence()`) and its last use (`Handbook.usage()`). */
@@ -765,6 +788,23 @@ export interface SdkMethods {
   'handbook.show': (input: { readonly projectId: string; readonly entryId: string }) => Promise<HandbookEntryDetail>
   /** Rework D2: the user stops (`retired`) or restores (`active`) an entry; returns it with its operations. An unknown id rejects `handbook/not-found`. */
   'handbook.setStatus': (input: { readonly projectId: string; readonly entryId: string; readonly status: 'active' | 'retired'; readonly reason?: string }) => Promise<HandbookEntryDetail>
+  /** Project memory: the user adds a project rule (in force at once) or a practice (`kind`, default `rule`); a near-copy of an entry rejects `tool/invalid-input`. */
+  'handbook.add': (input: { readonly projectId: string; readonly text: string; readonly kind?: 'rule' | 'practice'; readonly appliesTo?: string; readonly files?: readonly string[] }) => Promise<HandbookEntryDetail>
+  /** Project memory: the user rewrites an entry (and a rule's range); an unknown id rejects `handbook/not-found`. */
+  'handbook.edit': (input: { readonly projectId: string; readonly entryId: string; readonly text?: string; readonly appliesTo?: string }) => Promise<HandbookEntryDetail>
+  /** Project memory: the coordinator's project notes. */
+  'memory.notes': (input: { readonly projectId: string }) => Promise<ProjectNotesView>
+  /** Project memory: the user rewrites the project notes (at most `THREAD_LIMITS.notesChars` characters). */
+  'memory.saveNotes': (input: { readonly projectId: string; readonly text: string }) => Promise<ProjectNotesView>
+  /** Project memory: the patterns the host found in the project's tasks. */
+  'memory.observations': (input: { readonly projectId: string }) => Promise<ObservationListing>
+  /**
+   * Project memory: the user's decision on an observation. `adopted` with
+   * `text` keeps it in the project memory too: a rule (`drift`, `split`) or a
+   * practice (`hotspot`, `stuck`), in force at once; `dismissed`: it is never
+   * shown again.
+   */
+  'memory.resolve': (input: { readonly projectId: string; readonly observationId: string; readonly status: 'adopted' | 'dismissed'; readonly text?: string; readonly appliesTo?: string }) => Promise<ObservationView>
   /** API 8: learning settings, spend in the window and scorer reliability. */
   'learning.status': (input: { readonly projectId: string }) => Promise<LearningStatus>
   /** API 8: the user acknowledged the background-learning notice (user level; idempotent, keeps the first time). */
@@ -840,6 +880,12 @@ export const SDK_METHOD_NAMES = [
   'handbook.list',
   'handbook.show',
   'handbook.setStatus',
+  'handbook.add',
+  'handbook.edit',
+  'memory.notes',
+  'memory.saveNotes',
+  'memory.observations',
+  'memory.resolve',
   'learning.status',
   'learning.acknowledge',
   'commandSandbox.install',
@@ -875,4 +921,11 @@ export interface CreateSdkOptions {
    * it on).
    */
   readonly autoTitle?: boolean
+  /**
+   * Project memory: when a task's end finds a new recurring pattern, write
+   * its suggestion with one short request to the execution model (counted
+   * in the ledger). Default off; the desktop app turns it on. Without it an
+   * observation shows its evidence only.
+   */
+  readonly observationSuggestions?: boolean
 }

@@ -247,6 +247,8 @@ async function start(): Promise<void> {
       pickFiles: () => pickMaterialFiles(showOpenDialog),
       // Rework D2: a conversation is named after its first turn (NEXGENT_AUTO_TITLE=0 turns it off).
       autoTitle: process.env['NEXGENT_AUTO_TITLE'] !== '0',
+      // Project memory: a new recurring pattern gets a one- or two-sentence suggestion.
+      observationSuggestions: true,
     },
     devEnv('NEXGENT_DESKTOP_SDK_MODULE'),
   )

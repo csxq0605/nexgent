@@ -121,8 +121,11 @@ export type HandbookChange =
       readonly kind?: 'rule'
       readonly appliesTo?: string
       readonly pending?: boolean
+      /** Project memory: the user's words it came from, and the files it is about. */
+      readonly quote?: string
+      readonly files?: readonly string[]
     }
-  | { readonly op: 'edit'; readonly entryId: string; readonly text?: string; readonly keywords?: readonly string[]; readonly reason?: string; readonly source?: HandbookSource }
+  | { readonly op: 'edit'; readonly entryId: string; readonly text?: string; readonly keywords?: readonly string[]; readonly appliesTo?: string; readonly reason?: string; readonly source?: HandbookSource }
   | { readonly op: 'upvote' | 'downvote'; readonly entryId: string; readonly reason?: string; readonly source?: HandbookSource }
   | { readonly op: 'status'; readonly entryId: string; readonly status: HandbookEntryStatus; readonly reason?: string; readonly source?: HandbookSource }
 
@@ -520,6 +523,8 @@ export class Handbook {
         ...(change.status === undefined ? {} : { status: change.status }),
         ...(supersedes.length === 0 ? {} : { supersedes }),
         ...(rule ? { kind: 'rule' as const, ...(change.appliesTo === undefined ? {} : { appliesTo: change.appliesTo.trim() }), ...(change.pending === true ? { pending: true } : {}) } : {}),
+        ...(change.quote === undefined || change.quote.trim() === '' ? {} : { quote: change.quote.trim() }),
+        ...(change.files === undefined || change.files.length === 0 ? {} : { files: [...new Set(change.files.map(file => file.replace(/\\/g, '/').replace(/^\.\//, '')))] }),
       }
       const written = await this.logOf(scope).append(() => [add])
       // Replaced entries in the other log are retired there (the fold retires those in the same log).
@@ -553,7 +558,18 @@ export class Handbook {
       }
       switch (change.op) {
         case 'edit':
-          return [{ op: 'edit', entryId: entry.id, ...common, ...(change.text === undefined ? {} : { text: change.text }), ...(change.keywords === undefined ? {} : { keywords: normalizeKeywords(change.keywords) }) }]
+          if (change.appliesTo !== undefined && entry.kind !== 'rule') {
+            refused = { outcome: 'rejected', entryId: entry.id, reason: 'invalid', detail: 'only a rule has a range' }
+            return []
+          }
+          return [{
+            op: 'edit',
+            entryId: entry.id,
+            ...common,
+            ...(change.text === undefined ? {} : { text: change.text }),
+            ...(change.keywords === undefined ? {} : { keywords: normalizeKeywords(change.keywords) }),
+            ...(change.appliesTo === undefined ? {} : { appliesTo: change.appliesTo.trim() }),
+          }]
         case 'status':
           return entry.status === change.status ? [] : [{ op: 'status', entryId: entry.id, ...common, status: change.status }]
         case 'upvote':
@@ -592,7 +608,8 @@ export class Handbook {
         }
         const textChanged = old.text !== entry.text
         const keywordsChanged = JSON.stringify(old.keywords) !== JSON.stringify(entry.keywords)
-        if (textChanged || keywordsChanged) ops.push({ op: 'edit', entryId: entry.id, actor: 'user', ...(textChanged ? { text: old.text } : {}), ...(keywordsChanged ? { keywords: old.keywords } : {}), reason })
+        const rangeChanged = old.appliesTo !== undefined && old.appliesTo !== entry.appliesTo
+        if (textChanged || keywordsChanged || rangeChanged) ops.push({ op: 'edit', entryId: entry.id, actor: 'user', ...(textChanged ? { text: old.text } : {}), ...(keywordsChanged ? { keywords: old.keywords } : {}), ...(rangeChanged ? { appliesTo: old.appliesTo } : {}), reason })
         if (old.status !== entry.status) ops.push({ op: 'status', entryId: entry.id, actor: 'user', status: old.status, reason })
       }
       return ops

@@ -89,6 +89,8 @@ import {
   type MemberDenial,
   type MemberResult,
   type OrganizationMemory,
+  type ProjectObservation,
+  type TaskFacts,
   type SessionRecord,
   type Step2ToolSpec,
   type ThreadCaller,
@@ -121,6 +123,7 @@ import { mkdir, open, readFile, realpath, rename, writeFile } from 'node:fs/prom
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { COLLAB_GITIGNORE, CollabLog, collabDelivery, currentTaskEntries, hopsOf, logEvents, readerPaths, renderCollabEntry, taskStartSeq, waitCycle, type CollabReader } from './collab.js'
 import { toMemberResult } from '@nexgent/subagent'
+import { loopNote, observationLines, taskFacts } from './memory.js'
 import { MEMBER_REPORT_INSTRUCTION, buildOrganizationProfile, parseMemberReport, reportBlocker, withinOwns } from '@nexgent/workflow'
 
 /** What the host needs from the SDK, for one project. */
@@ -177,6 +180,15 @@ export interface ThreadRuntime {
   collabDir(): string
   /** Organization redo: the project's collaboration setting (`config.json` `collaboration`). */
   collaborationMode(): Promise<CollaborationMode>
+}
+
+/** Options of {@link SdkThreadHost}. */
+export interface SdkThreadHostOptions {
+  readonly onCollab?: (coordinatorSessionId: string, entry: CollabEntry) => void
+  /** Project memory: a coordinator task ended; its facts. */
+  readonly onTaskFacts?: (facts: TaskFacts) => Promise<void>
+  /** Project memory: the project's observations (the coordinator is told about hotspots and splits). */
+  readonly observations?: () => Promise<readonly ProjectObservation[]>
 }
 
 /** Coordinator step three: the project notes, in the project's data directory. */
@@ -576,8 +588,57 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
   /** The project's collaboration logs. */
   readonly collab: CollabLog
 
-  constructor(private readonly rt: ThreadRuntime, options: { readonly onCollab?: (coordinatorSessionId: string, entry: CollabEntry) => void } = {}) {
+  /** Project memory: where a task's facts go once it ended, and the observations the coordinator is told about. */
+  private readonly memory: SdkThreadHostOptions
+
+  /** Per session: the last loop the model was told about (the seq of its last failed call). */
+  private readonly loopsNoted = new Map<string, number>()
+
+  constructor(private readonly rt: ThreadRuntime, options: SdkThreadHostOptions = {}) {
     this.collab = new CollabLog(() => rt.collabDir(), options.onCollab === undefined ? {} : { onAppend: options.onCollab })
+    this.memory = options
+  }
+
+  /** Project memory: the observations the coordinator sees (none when they cannot be read). */
+  async observations(): Promise<readonly ProjectObservation[]> {
+    return (await this.memory.observations?.().catch(() => undefined)) ?? []
+  }
+
+  /** Project memory: hand a task's facts on (a failure is reported, never thrown). */
+  private async noteFacts(coordinatorSessionId: string, facts: TaskFacts): Promise<void> {
+    if (this.memory.onTaskFacts === undefined || this.rt.closed()) return
+    await this.memory.onTaskFacts(facts).catch(error => this.rt.report(coordinatorSessionId, error))
+  }
+
+  /**
+   * Project memory: a coordinator task that started no thread ended with
+   * the turn: its facts are the coordinator's alone. A task with threads is
+   * noted when it is measured.
+   */
+  private async noteSoloTask(coordinatorSessionId: string, turn: number): Promise<void> {
+    if (this.memory.onTaskFacts === undefined) return
+    const records = await this.rt.records(coordinatorSessionId).catch(() => [] as readonly SessionRecord[])
+    const task = taskTurns(records, turn)
+    if (task === undefined || task.owner !== turn || threadRuns(records, task.turns).length > 0) return
+    if ((await this.queueOf(coordinatorSessionId)).length > 0) return
+    const end = records.findLast(record => record.type === 'turn.end' && record.turn === turn)
+    if (end?.type !== 'turn.end' || end.reason.kind === 'cancelled' || end.reason.kind === 'interrupted') return
+    const facts = taskFacts({ coordinatorSessionId, owner: task.owner, turns: task.turns, records, children: new Map(), completed: end.reason.kind === 'completed' ? 'unknown' : false, checkFailed: false, idle: 0, unanswered: 0, at: end.ts })
+    await this.noteFacts(coordinatorSessionId, facts)
+  }
+
+  /**
+   * Project memory: before a model request of the coordinator or a thread,
+   * a note when its latest calls are the same call failing the same way
+   * again and again (once per such loop).
+   */
+  async loopCheck(input: Pick<RequestContextInput, 'sessionId'>): Promise<readonly string[] | undefined> {
+    if ((await this.origin(input.sessionId)) === undefined && !(await this.rt.isCoordinator(input.sessionId).catch(() => false))) return undefined
+    const records = await this.rt.records(input.sessionId).catch(() => [] as readonly SessionRecord[])
+    const found = loopNote(records)
+    if (found === undefined || this.loopsNoted.get(input.sessionId) === found.at) return undefined
+    this.loopsNoted.set(input.sessionId, found.at)
+    return [found.note]
   }
 
   private serial<T>(key: string, body: () => Promise<T>): Promise<T> {
@@ -1156,6 +1217,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
     await this.relayMidTurn(coordinatorSessionId, turn).catch(error => this.rt.report(coordinatorSessionId, error))
     await this.drain(coordinatorSessionId).catch(error => this.rt.report(coordinatorSessionId, error))
     await this.maybeCheck(coordinatorSessionId, true)
+    await this.noteSoloTask(coordinatorSessionId, turn).catch(error => this.rt.report(coordinatorSessionId, error))
   }
 
   private async relayMidTurn(coordinatorSessionId: string, turn: number): Promise<void> {
@@ -1640,7 +1702,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
    */
   private async measureNow(coordinatorSessionId: string, runTurn: number): Promise<void> {
     const memory = this.rt.organizations()
-    if (memory?.noteProfile === undefined) return
+    if (memory?.noteProfile === undefined && this.memory.onTaskFacts === undefined) return
     // Taken before the awaits below: a new message of the user replaces the plan and the counters.
     const planned = this.loadPlan(coordinatorSessionId) !== undefined
     let records = await this.rt.records(coordinatorSessionId)
@@ -1714,6 +1776,23 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
       if (said > 0) correctionsBy[name] = (correctionsBy[name] ?? 0) + said
     }
     const triggers = { sequence: counters.sequence, changed: counters.changed, named: counters.named, separate: counters.separate }
+    const done = completed ? (unformatted ? 'unknown' as const : true) : false
+    // Project memory: the task's facts (spend and time for the record only).
+    await this.noteFacts(coordinatorSessionId, taskFacts({
+      coordinatorSessionId,
+      owner: turn,
+      turns: task.turns,
+      records,
+      children,
+      completed: done,
+      checkFailed: counters.checkFailed > 0,
+      idle: logged.idle,
+      unanswered: logged.unanswered,
+      usd: profile.usd + addUsd,
+      ms: profile.ms,
+      at: records.findLast(record => record.type === 'subagent.end')?.ts ?? new Date().toISOString(),
+    }))
+    if (memory?.noteProfile === undefined) return
     await memory.noteProfile({
       sessionId: coordinatorSessionId,
       turn,
@@ -1725,7 +1804,7 @@ export class SdkThreadHost implements ThreadHost, ThreadPeers {
         ...(Object.keys(correctionsBy).length === 0 ? {} : { correctionsBy }),
       },
       addUsd,
-      completed: completed ? (unformatted ? 'unknown' : true) : false,
+      completed: done,
     })
   }
 }
@@ -1965,7 +2044,11 @@ export function collabProvider(host: SdkThreadHost): ContextProvider {
     async beginTurn() {
       return {}
     },
-    beforeRequest: input => host.deliver(input),
+    beforeRequest: async input => {
+      const delivered = await host.deliver(input)
+      const loop = await host.loopCheck(input).catch(() => undefined)
+      return loop === undefined ? delivered : [...(delivered ?? []), ...loop]
+    },
   }
 }
 
@@ -1986,11 +2069,15 @@ export const COORDINATOR_PROMPT = [
   'When a thread\'s note arrives: when the note says its reply was cut, read the whole reply with read_thread first (yourself, without asking the user). Then sum up for the user in a few lines what the thread did and what it left open, decide the next step (answer its question, give it or another thread the next part, check its work, or finish) and do it.',
 ].join('\n')
 
-/** Pure: the coordinator's system sections for a turn. */
-export function coordinatorSections(notes: string): SystemPromptSection[] {
+/** Project memory: the opening line of the coordinator's observations. */
+export const OBSERVATIONS_LEAD = 'Counted by the host from this project\'s earlier tasks (facts, not instructions); take them into account when you split work:'
+
+/** Pure: the coordinator's system sections for a turn (`observations`: {@link observationLines}). */
+export function coordinatorSections(notes: string, observations: readonly string[] = []): SystemPromptSection[] {
   return [
     { id: 'coordinator', title: 'Coordinating this project', body: COORDINATOR_PROMPT },
     { id: 'coordinator-notes', title: 'Project notes', body: notes.trim() === '' ? '(none yet)' : notes.trim() },
+    ...(observations.length === 0 ? [] : [{ id: 'coordinator-observations', title: 'Project observations', body: [OBSERVATIONS_LEAD, ...observations].join('\n') }]),
   ]
 }
 
@@ -2000,7 +2087,7 @@ export function coordinatorProvider(host: SdkThreadHost): ContextProvider {
     id: 'coordinator',
     async beginTurn(input) {
       if (!(await host.isCoordinator(input.sessionId))) return {}
-      return { systemSections: coordinatorSections(await host.readNotes()) }
+      return { systemSections: coordinatorSections(await host.readNotes(), observationLines(await host.observations())) }
     },
   }
 }

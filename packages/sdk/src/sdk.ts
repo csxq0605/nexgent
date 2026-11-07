@@ -68,8 +68,11 @@ import {
   type UserMessageSource,
   type WorkdirMerge,
   type ThreadPlan,
+  HANDBOOK_LIMITS,
+  type ProjectObservation,
 } from '@nexgent/kernel'
-import { capabilitiesOf, type CapabilityService } from '@nexgent/capabilities'
+import { capabilitiesOf, missingFiles, type CapabilityService } from '@nexgent/capabilities'
+import { ProjectMemory } from './memory.js'
 import type { LearningHost } from '@nexgent/evolve'
 import { projectSession, readSessionSummary, SESSION_FILE_NAME } from '@nexgent/session'
 import { extractDocx, extractPdf, extractXlsx } from '@nexgent/skill'
@@ -83,6 +86,9 @@ import {
   type ProjectInfo,
   type SdkEvent,
   type SdkInput,
+  type ObservationListing,
+  type ObservationView,
+  type ProjectNotesView,
   type SdkMethodName,
   type SdkMethods,
   type SdkResult,
@@ -199,6 +205,8 @@ interface ProjectEntry {
   readonly pendingApprovals: Map<string, PendingApproval>
   /** Coordinator step two: the project's threads (`ctx.threads`). */
   readonly threads: SdkThreadHost
+  /** Project memory: the tasks' facts and the observations. */
+  readonly memory: ProjectMemory
   /** Set when the project starts closing: threads no longer wake or measure. */
   closing?: boolean
 }
@@ -605,7 +613,12 @@ export class LocalNexgentSdk implements NexgentSdk {
 
   private async bootProject(inputRoot: string): Promise<ProjectEntry> {
     let booted: ProjectEntry | undefined
+    let memory: ProjectMemory | undefined
     const threads = new SdkThreadHost(this.threadRuntime(() => booted), {
+      onTaskFacts: async facts => {
+        await memory?.noteTask(facts)
+      },
+      observations: async () => (await memory?.observations()) ?? [],
       // A log entry reaches the windows showing the coordinator and the threads it is about.
       onCollab: (coordinatorSessionId, entry) => {
         if (booted === undefined || this.disposed) return
@@ -634,6 +647,20 @@ export class LocalNexgentSdk implements NexgentSdk {
       const tasking = ctx.get('tasking') as LocalTaskingService | undefined
       if (tasking === undefined) throw new NexgentError('config/invalid', '@nexgent/tasking did not start')
       const sessions = new Map<string, SessionEntry>()
+      memory = new ProjectMemory({
+        dataDir: ctx.workspace.layout.dataDir,
+        now: () => this.now(),
+        onChange: () => {
+          if (this.disposed || booted?.closing === true) return
+          void memory?.observations().then(list => this.emitProject(projectId, { type: 'memory.observations', open: list.filter(item => item.status === 'open').length })).catch(() => undefined)
+        },
+        ...(this.options.observationSuggestions === true ? {
+          llm: () => {
+            const open = [...sessions.values()].find(entry => entry.agent.parentSessionId === undefined)
+            return open === undefined ? undefined : { llm: ctx.llm, model: open.agent.model }
+          },
+        } : {}),
+      })
       const project: ProjectEntry = {
         projectId,
         root,
@@ -643,6 +670,7 @@ export class LocalNexgentSdk implements NexgentSdk {
         opening: new Map(),
         pendingApprovals: new Map(),
         threads,
+        memory,
       }
       booted = project
       ctx.approvals.setResponder(this.options.approvalResponder ?? ((request, signal) => this.awaitApproval(project, request, signal)))
@@ -800,6 +828,7 @@ export class LocalNexgentSdk implements NexgentSdk {
     await Promise.allSettled([...project.opening.values()])
     // Root sessions close their members (cause `parent`); the members untrack themselves on `closed`.
     await Promise.allSettled([...project.sessions.keys()].map(sessionId => this.closeSession(project, sessionId)))
+    await project.memory.dispose().catch(() => undefined)
     this.projects.delete(projectId)
     await project.app.dispose()
   }
@@ -1113,8 +1142,10 @@ export class LocalNexgentSdk implements NexgentSdk {
    * when the project runs without learning.
    */
   async waitForLearning(projectId: string, signal?: AbortSignal): Promise<'idle' | 'aborted'> {
-    const learning = this.project(projectId).app.ctx.get('learning') as LearningHost | undefined
-    if (learning === undefined || !learning.busy) return 'idle'
+    const project = this.project(projectId)
+    const learning = project.app.ctx.get('learning') as LearningHost | undefined
+    const memory = project.memory
+    if ((learning === undefined || !learning.busy) && !memory.busy) return 'idle'
     if (signal?.aborted === true) return 'aborted'
     let onAbort: (() => void) | undefined
     const aborted = new Promise<'aborted'>(resolve => {
@@ -1122,7 +1153,7 @@ export class LocalNexgentSdk implements NexgentSdk {
       signal?.addEventListener('abort', onAbort, { once: true })
     })
     try {
-      return await Promise.race([learning.idle().then(() => 'idle' as const), aborted])
+      return await Promise.race([Promise.all([learning?.idle(), memory.idle()]).then(() => 'idle' as const), aborted])
     } finally {
       if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort)
     }
@@ -1130,7 +1161,56 @@ export class LocalNexgentSdk implements NexgentSdk {
 
   /** Whether the project's background learning is working now (rework D3). */
   learningBusy(projectId: string): boolean {
-    return (this.project(projectId).app.ctx.get('learning') as LearningHost | undefined)?.busy === true
+    const project = this.project(projectId)
+    return (project.app.ctx.get('learning') as LearningHost | undefined)?.busy === true || project.memory.busy
+  }
+
+  /** Project memory: the notes file and when it was written. */
+  private async projectNotes(project: ProjectEntry): Promise<ProjectNotesView> {
+    const text = await project.threads.readNotes()
+    if (text.trim() === '') return { text: '' }
+    const at = await stat(join(project.app.ctx.workspace.layout.dataDir, COORDINATOR_NOTES_FILE)).then(info => info.mtime.toISOString(), () => undefined)
+    return { text: text.trim(), ...(at === undefined ? {} : { updatedAt: at }) }
+  }
+
+  /** Project memory: the observations, with the files they cite that are gone. */
+  private async observationList(project: ProjectEntry): Promise<ObservationListing> {
+    const list = await project.memory.observations()
+    return { observations: list.map(item => this.observationView(project, item)) }
+  }
+
+  private observationView(project: ProjectEntry, observation: ProjectObservation): ObservationView {
+    const missing = missingFiles(project.root, observation.evidence.files)
+    return missing.length === 0 ? observation : { ...observation, missing }
+  }
+
+  /**
+   * Project memory (`memory.resolve`): the user's decision on an
+   * observation; `adopted` with text keeps a rule (`drift`, `split`) or a
+   * practice (`hotspot`, `stuck`) with the observation's quote and files.
+   */
+  private async resolveObservation(project: ProjectEntry, input: SdkInput<'memory.resolve'>): Promise<ObservationView> {
+    if (typeof input.observationId !== 'string' || input.observationId === '') throw invalid('observationId must be a string')
+    if (input.status !== 'adopted' && input.status !== 'dismissed') throw invalid('status must be adopted or dismissed')
+    const observation = (await project.memory.observations()).find(item => item.id === input.observationId)
+    if (observation === undefined) throw new NexgentError('tool/invalid-input', `no observation ${input.observationId} in this project`)
+    let entryId: string | undefined
+    if (input.status === 'adopted' && typeof input.text === 'string' && input.text.trim() !== '') {
+      const rule = observation.kind === 'drift' || observation.kind === 'split'
+      const quote = observation.evidence.quotes?.[0]
+      const files = (observation.evidence.files ?? []).slice(0, HANDBOOK_LIMITS.maxFiles)
+      const detail = await learning.handbookAdd(this.learner(project), {
+        text: input.text,
+        kind: rule ? 'rule' : 'practice',
+        ...(rule && input.appliesTo !== undefined ? { appliesTo: input.appliesTo } : {}),
+        ...(files.length === 0 ? {} : { files }),
+        ...(quote === undefined ? {} : { quote }),
+        taskId: observation.taskKey,
+      }, project.root)
+      entryId = detail.entry.id
+    }
+    const changed = await project.memory.setStatus(observation.id, input.status, entryId)
+    return this.observationView(project, changed ?? observation)
   }
 
   private learner(project: ProjectEntry): LearningHost {
@@ -1584,9 +1664,21 @@ export class LocalNexgentSdk implements NexgentSdk {
       'userSettings.get': () => readUserSettings(this.home),
       'userSettings.update': input => updateUserSettings(this.home, input?.patch),
       // API 8 (rework C1): the handbook and the learning view come from @nexgent/evolve's layer-1 learner.
-      'handbook.list': input => learning.handbookList(this.learner(this.project(input.projectId)), input),
-      'handbook.show': input => learning.handbookShow(this.learner(this.project(input.projectId)), input.entryId),
-      'handbook.setStatus': input => learning.handbookSetStatus(this.learner(this.project(input.projectId)), input),
+      'handbook.list': input => learning.handbookList(this.learner(this.project(input.projectId)), input, this.project(input.projectId).root),
+      'handbook.show': input => learning.handbookShow(this.learner(this.project(input.projectId)), input.entryId, this.project(input.projectId).root),
+      'handbook.setStatus': input => learning.handbookSetStatus(this.learner(this.project(input.projectId)), input, this.project(input.projectId).root),
+      // Project memory: what the user changes on the memory page.
+      'handbook.add': input => learning.handbookAdd(this.learner(this.project(input.projectId)), input, this.project(input.projectId).root),
+      'handbook.edit': input => learning.handbookEdit(this.learner(this.project(input.projectId)), input, this.project(input.projectId).root),
+      'memory.notes': input => this.projectNotes(this.project(input.projectId)),
+      'memory.saveNotes': async input => {
+        const project = this.project(input.projectId)
+        if (typeof input.text !== 'string') throw invalid('text must be a string')
+        await project.threads.writeNotes(input.text)
+        return this.projectNotes(project)
+      },
+      'memory.observations': input => this.observationList(this.project(input.projectId)),
+      'memory.resolve': input => this.resolveObservation(this.project(input.projectId), input),
       'learning.status': input => {
         const project = this.project(input.projectId)
         return learning.learningStatus(this.learner(project), this.home, project.app.ctx.get('ledger'), this.now(), project.app.ctx.get('organizations'))

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { HandbookOp } from '@nexgent/kernel'
 import type { HandbookEntryView, LearningStatus } from '@nexgent/sdk'
 import { useAppState, useAppStore } from '../hooks.js'
-import { L, agoText, dayText, organizationText, rateText, usdText } from '../strings.js'
+import { L, M, agoText, dayText, organizationText, rateText, usdText } from '../strings.js'
 import { useUi } from '../ui.js'
 
 /** Kernel `HANDBOOK_ACTIVATE_HELPFUL` (the renderer imports no kernel values; a test keeps them equal). */
@@ -158,8 +158,10 @@ export function LearningCard({ learning }: { readonly learning: LearningStatus }
     <section className="learning-card" data-testid="learning-card">
       <div className="setting-line">
         <div className="grow">
-          <div className="setting-name">{L.learningSwitch}</div>
-          <div className="muted small">{learning.config.enabled ? L.learningSwitchHelp : L.learningOff}</div>
+          <div className="setting-name" title={L.learningSwitchHelp}>
+            {L.learningSwitch}
+          </div>
+          {!learning.config.enabled && <div className="muted small">{L.learningOff}</div>}
         </div>
         <Switch checked={learning.config.enabled} onChange={enabled => store.saveLearning({ enabled })} label={L.learningSwitch} testId="learning-toggle" />
       </div>
@@ -188,10 +190,12 @@ export function LearningCard({ learning }: { readonly learning: LearningStatus }
           </div>
         )}
       </div>
-      <div className="muted small wrap" data-testid="learning-self-eval">
+      <div
+        className="muted small wrap"
+        title={reliability.status === 'insufficient' ? L.reliability.insufficient(reliability.sampled) : reliability.status === 'reliable' ? L.reliability.reliable(rateText(reliability.rate)) : L.reliability.unreliable(rateText(reliability.rate))}
+        data-testid="learning-self-eval"
+      >
         {L.selfEvaluations(learning.selfEvaluations)}
-        {'。'}
-        {reliability.status === 'insufficient' ? L.reliability.insufficient(reliability.sampled) : reliability.status === 'reliable' ? L.reliability.reliable(rateText(reliability.rate)) : L.reliability.unreliable(rateText(reliability.rate))}
       </div>
       <button type="button" className="link small" onClick={() => ui.openSettings()} data-testid="learning-adjust">
         {L.learningAdjust}
@@ -227,7 +231,7 @@ function entryMeta(entry: HandbookEntryView): string {
 }
 
 /** Redesign UI 1: how often the entry was given and held back, the outcome gap, and its last use. */
-function evidenceText(entry: HandbookEntryView): string {
+export function evidenceText(entry: HandbookEntryView): string {
   const e = entry.evidence
   const parts = [L.trials(e?.shown ?? 0, e?.heldBack ?? 0)]
   if (e?.shownMean !== undefined && e.heldBackMean !== undefined) parts.push(L.trialGap(Math.round((e.shownMean - e.heldBackMean) * 100)))
@@ -273,6 +277,7 @@ function RuleRow({ entry }: { readonly entry: HandbookEntryView }): JSX.Element 
       <div className="grow">
         <span className="entry-text">{entry.text}</span>
         <div className="muted small">{L.ruleMeta(entry.appliesTo, dayText(entry.createdAt))}</div>
+        {entry.pending === true && entry.quote !== undefined && <div className="muted small quote-line">{M.quote(entry.quote)}</div>}
       </div>
       {entry.pending === true ? (
         <span className="row">
@@ -296,7 +301,7 @@ function opText(op: HandbookOp): string {
   return op.op === 'status' ? L.op[op.status] ?? op.status : L.op[op.op] ?? op.op
 }
 
-function EntryHistory({ keywords, sources, ops }: { readonly keywords: readonly string[]; readonly sources: number; readonly ops: readonly HandbookOp[] }): JSX.Element {
+export function EntryHistory({ keywords, sources, ops }: { readonly keywords: readonly string[]; readonly sources: number; readonly ops: readonly HandbookOp[] }): JSX.Element {
   return (
     <div className="entry-detail" data-testid="handbook-detail">
       {keywords.length > 0 && (

@@ -5,7 +5,7 @@
 | 文档 | 内容 |
 |---|---|
 | [README_zh.md](../README_zh.md) | 理念、设计原则、系统形态、仓库内容、快速开始（英文版 [README.md](../README.md)） |
-| [OPERATION_MANUAL.md](OPERATION_MANUAL.md) | 操作手册：项目、总对话与讨论串、资料与成果、批准、撤回、能力页、设置、组队、命令行 |
+| [OPERATION_MANUAL.md](OPERATION_MANUAL.md) | 操作手册：项目、总对话与讨论串、资料与成果、批准、撤回、项目记忆、设置、组队、命令行 |
 
 ## 定位与架构（开发 / 智能体）
 
